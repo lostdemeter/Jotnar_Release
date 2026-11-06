@@ -1,0 +1,21 @@
+# known words
+the
+quick
+brown
+fox
+make
+global
+futhark
+jotnar
+runes
+# contractions in the trained lexicon / exceptions
+trump's
+isn't
+can't
+don't
+# words outside the lexicon: fallback rules
+qwerty
+florp
+blorptastic
+chthonic
+strengths

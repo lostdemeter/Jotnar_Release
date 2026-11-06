@@ -1,0 +1,12 @@
+[package]
+name = "phi-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Rust port of the phi-core geometric lattice substrate"
+
+[dependencies]
+ndarray = "0.16"
+thiserror = "2"
+libm = "0.2"
+serde_json = "1"

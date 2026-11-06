@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400">
+  <defs>
+    <marker id="ta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#171411"/>
+    </marker>
+    <marker id="tr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#de4034"/>
+    </marker>
+  </defs>
+  <g font-family="Courier Prime, monospace" fill="#171411">
+    <text x="24" y="40" font-size="20" letter-spacing="3">THE TRUST LOOP</text>
+    <text x="660" y="40" font-size="12" letter-spacing="1.5">APPENDIX A / FIG. 01</text>
+
+    <g>
+      <rect x="24" y="78" width="164" height="110" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <rect x="24" y="78" width="164" height="24" fill="#de4034" stroke="#171411" stroke-width="4"/>
+      <text x="36" y="96" font-size="13" font-weight="bold">01 / SPACE</text>
+      <text x="36" y="128" font-size="16" font-weight="bold">DECLARE</text>
+      <text x="36" y="150" font-size="11">sample, reference,</text>
+      <text x="36" y="166" font-size="11">bounds, provenance</text>
+    </g>
+
+    <g>
+      <rect x="218" y="78" width="164" height="110" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <rect x="218" y="78" width="164" height="24" fill="#de4034" stroke="#171411" stroke-width="4"/>
+      <text x="230" y="96" font-size="13" font-weight="bold">02 / PROPOSAL</text>
+      <text x="230" y="128" font-size="16" font-weight="bold">PROPOSE</text>
+      <text x="230" y="150" font-size="11">candidate +</text>
+      <text x="230" y="166" font-size="11">provenance</text>
+    </g>
+
+    <g>
+      <rect x="412" y="78" width="164" height="110" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <rect x="412" y="78" width="164" height="24" fill="#de4034" stroke="#171411" stroke-width="4"/>
+      <text x="424" y="96" font-size="13" font-weight="bold">03 / RESOLVE</text>
+      <text x="424" y="128" font-size="16" font-weight="bold">EXACT</text>
+      <text x="424" y="150" font-size="11">deterministic</text>
+      <text x="424" y="166" font-size="11">resolution</text>
+    </g>
+
+    <g>
+      <rect x="606" y="78" width="164" height="110" fill="#171411" stroke="#171411" stroke-width="4"/>
+      <rect x="606" y="78" width="164" height="24" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <text x="618" y="96" font-size="13" font-weight="bold">04 / GATE</text>
+      <text x="618" y="128" font-size="16" font-weight="bold" fill="#f2eadb">SAY NO</text>
+      <text x="618" y="150" font-size="11" fill="#f2eadb">independent</text>
+      <text x="618" y="166" font-size="11" fill="#f2eadb">reference</text>
+    </g>
+
+    <g>
+      <rect x="800" y="78" width="136" height="110" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <rect x="800" y="78" width="136" height="24" fill="#de4034" stroke="#171411" stroke-width="4"/>
+      <text x="812" y="96" font-size="13" font-weight="bold">05 / KEEP</text>
+      <text x="812" y="128" font-size="16" font-weight="bold">CERT</text>
+      <text x="812" y="150" font-size="11">proves +</text>
+      <text x="812" y="166" font-size="11">does_not_prove</text>
+    </g>
+
+    <g stroke="#171411" stroke-width="4" marker-end="url(#ta)">
+      <line x1="188" y1="133" x2="214" y2="133"/>
+      <line x1="382" y1="133" x2="408" y2="133"/>
+      <line x1="576" y1="133" x2="602" y2="133"/>
+      <line x1="770" y1="133" x2="796" y2="133"/>
+    </g>
+
+    <g stroke="#de4034" stroke-width="4" stroke-dasharray="9 7" fill="none" marker-end="url(#tr)">
+      <path d="M106 192 C106 250 250 250 330 250"/>
+      <path d="M300 192 C300 250 360 250 420 250"/>
+      <path d="M494 192 C494 250 530 250 560 250"/>
+      <path d="M688 192 C688 250 680 250 650 250"/>
+      <path d="M868 192 C868 250 780 250 720 250"/>
+    </g>
+
+    <g>
+      <rect x="228" y="248" width="500" height="90" fill="#de4034" stroke="#171411" stroke-width="4"/>
+      <text x="248" y="276" font-size="17" font-weight="bold">REFUSE LOUDLY WHEN YOU CANNOT</text>
+      <text x="248" y="300" font-size="11">under_specified · unsupported_capability</text>
+      <text x="248" y="318" font-size="11">runtime_absent · reference_absent · unsolved</text>
+    </g>
+
+    <text x="24" y="366" font-size="12" letter-spacing="1">A refusal is a result. A block is a result. A failed gate is a result. None of them is a pass.</text>
+  </g>
+</svg>

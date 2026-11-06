@@ -1,0 +1,202 @@
+module cpu8 (
+  input  wire clk,
+  input  wire rst,
+  output wire [15:0] OP,
+  output wire [15:0] ARG,
+  output wire [15:0] H,
+  output wire [15:0] L1,
+  output wire [15:0] L2,
+  output wire [15:0] S3,
+  output wire [15:0] A4,
+  output wire [15:0] A5,
+  output wire [15:0] J6,
+  output wire [15:0] Z7,
+  output wire [15:0] N8,
+  output wire [15:0] I9,
+  output wire [15:0] D10,
+  output wire [15:0] B11,
+  output wire [15:0] D8,
+  output wire [15:0] T1,
+  output wire [15:0] C1,
+  output wire [15:0] T2,
+  output wire [15:0] C2,
+  output wire [15:0] T3,
+  output wire [15:0] C3,
+  output wire [15:0] T4,
+  output wire [15:0] C4,
+  output wire [15:0] T5,
+  output wire [15:0] C5,
+  output wire [15:0] K0,
+  output wire [15:0] K1,
+  output wire [15:0] K2,
+  output wire [15:0] K3,
+  output wire [15:0] K4,
+  output wire [15:0] K5,
+  output wire [15:0] ACC_NEXT,
+  output wire [15:0] U1,
+  output wire [15:0] U2,
+  output wire [15:0] U3,
+  output wire [15:0] U4,
+  output wire [15:0] U5,
+  output wire [15:0] ZSET,
+  output wire [15:0] Z_NEW,
+  output wire [15:0] Z_NEXT,
+  output wire [15:0] HALTED,
+  output wire [15:0] HALT_NEXT,
+  output wire [15:0] NOTZ,
+  output wire [15:0] JZ_T,
+  output wire [15:0] JNZ_T,
+  output wire [15:0] J1,
+  output wire [15:0] JT,
+  output wire [15:0] PC1,
+  output wire [15:0] PC_TAKE,
+  output wire [15:0] PC_NEXT,
+  output wire [15:0] NH,
+  output wire [15:0] WE,
+  output wire [15:0] WDATA
+);
+  reg [15:0] PC;
+  reg [15:0] ACC;
+  reg [15:0] Z;
+  reg [15:0] HALT;
+  reg [15:0] RAM [0:255];
+  initial begin
+    RAM[0] = 16'h100a;
+    RAM[1] = 16'h30f0;
+    RAM[2] = 16'h1000;
+    RAM[3] = 16'h30f1;
+    RAM[4] = 16'h20f1;
+    RAM[5] = 16'h50f0;
+    RAM[6] = 16'h30f1;
+    RAM[7] = 16'h20f0;
+    RAM[8] = 16'ha000;
+    RAM[9] = 16'h30f0;
+    RAM[10] = 16'h8004;
+    RAM[11] = 16'h20f1;
+    RAM[12] = 16'h0;
+  end
+  wire [15:0] INSTR;
+  assign INSTR = RAM[PC[7:0]];
+  wire [15:0] DATA;
+  assign DATA = RAM[ARG[7:0]];
+  wire [15:0] OP;
+  assign OP = INSTR >> 12;
+  wire [15:0] ARG;
+  assign ARG = INSTR & 16'hff;
+  wire [15:0] H;
+  assign H = (OP == 16'h0) ? 1'b1 : 1'b0;
+  wire [15:0] L1;
+  assign L1 = (OP == 16'h1) ? 1'b1 : 1'b0;
+  wire [15:0] L2;
+  assign L2 = (OP == 16'h2) ? 1'b1 : 1'b0;
+  wire [15:0] S3;
+  assign S3 = (OP == 16'h3) ? 1'b1 : 1'b0;
+  wire [15:0] A4;
+  assign A4 = (OP == 16'h4) ? 1'b1 : 1'b0;
+  wire [15:0] A5;
+  assign A5 = (OP == 16'h5) ? 1'b1 : 1'b0;
+  wire [15:0] J6;
+  assign J6 = (OP == 16'h6) ? 1'b1 : 1'b0;
+  wire [15:0] Z7;
+  assign Z7 = (OP == 16'h7) ? 1'b1 : 1'b0;
+  wire [15:0] N8;
+  assign N8 = (OP == 16'h8) ? 1'b1 : 1'b0;
+  wire [15:0] I9;
+  assign I9 = (OP == 16'h9) ? 1'b1 : 1'b0;
+  wire [15:0] D10;
+  assign D10 = (OP == 16'ha) ? 1'b1 : 1'b0;
+  wire [15:0] B11;
+  assign B11 = (OP == 16'hb) ? 1'b1 : 1'b0;
+  wire [15:0] D8;
+  assign D8 = DATA & 16'hff;
+  wire [15:0] T1;
+  assign T1 = ACC + ARG;
+  wire [15:0] C1;
+  assign C1 = T1 & 16'hff;
+  wire [15:0] T2;
+  assign T2 = ACC + D8;
+  wire [15:0] C2;
+  assign C2 = T2 & 16'hff;
+  wire [15:0] T3;
+  assign T3 = ACC - ARG;
+  wire [15:0] C3;
+  assign C3 = T3 & 16'hff;
+  wire [15:0] T4;
+  assign T4 = ACC + 16'h1;
+  wire [15:0] C4;
+  assign C4 = T4 & 16'hff;
+  wire [15:0] T5;
+  assign T5 = ACC - 16'h1;
+  wire [15:0] C5;
+  assign C5 = T5 & 16'hff;
+  wire [15:0] K0;
+  assign K0 = L1 ? ARG : ACC;
+  wire [15:0] K1;
+  assign K1 = L2 ? D8 : K0;
+  wire [15:0] K2;
+  assign K2 = A4 ? C1 : K1;
+  wire [15:0] K3;
+  assign K3 = A5 ? C2 : K2;
+  wire [15:0] K4;
+  assign K4 = B11 ? C3 : K3;
+  wire [15:0] K5;
+  assign K5 = I9 ? C4 : K4;
+  wire [15:0] ACC_NEXT;
+  assign ACC_NEXT = D10 ? C5 : K5;
+  wire [15:0] U1;
+  assign U1 = I9 | D10;
+  wire [15:0] U2;
+  assign U2 = B11 | U1;
+  wire [15:0] U3;
+  assign U3 = A5 | U2;
+  wire [15:0] U4;
+  assign U4 = A4 | U3;
+  wire [15:0] U5;
+  assign U5 = L2 | U4;
+  wire [15:0] ZSET;
+  assign ZSET = L1 | U5;
+  wire [15:0] Z_NEW;
+  assign Z_NEW = (ACC_NEXT == 16'h0) ? 1'b1 : 1'b0;
+  wire [15:0] Z_NEXT;
+  assign Z_NEXT = ZSET ? Z_NEW : Z;
+  wire [15:0] HALTED;
+  assign HALTED = HALT | H;
+  wire [15:0] HALT_NEXT;
+  assign HALT_NEXT = HALTED ^ 16'h0;
+  wire [15:0] NOTZ;
+  assign NOTZ = Z ^ 16'h1;
+  wire [15:0] JZ_T;
+  assign JZ_T = Z7 & Z;
+  wire [15:0] JNZ_T;
+  assign JNZ_T = N8 & NOTZ;
+  wire [15:0] J1;
+  assign J1 = JZ_T | JNZ_T;
+  wire [15:0] JT;
+  assign JT = J6 | J1;
+  wire [15:0] PC1;
+  assign PC1 = PC + 16'h1;
+  wire [15:0] PC_TAKE;
+  assign PC_TAKE = JT ? ARG : PC1;
+  wire [15:0] PC_NEXT;
+  assign PC_NEXT = HALTED ? PC : PC_TAKE;
+  wire [15:0] NH;
+  assign NH = HALTED ^ 16'h1;
+  wire [15:0] WE;
+  assign WE = S3 & NH;
+  wire [15:0] WDATA;
+  assign WDATA = ACC & 16'hff;
+  always @(posedge clk) begin
+    if (rst) begin
+      PC <= 16'h0;
+      ACC <= 16'h0;
+      Z <= 16'h0;
+      HALT <= 16'h0;
+    end else begin
+      PC <= PC_NEXT;
+      ACC <= ACC_NEXT;
+      Z <= Z_NEXT;
+      HALT <= HALT_NEXT;
+      if (WE) RAM[ARG[7:0]] <= WDATA;
+    end
+  end
+endmodule

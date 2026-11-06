@@ -1,0 +1,78 @@
+{
+  "capabilities_available": [
+    "dac.pcm",
+    "adc.pcm",
+    "rc_field2d"
+  ],
+  "capabilities_required": [
+    "dac.pcm",
+    "adc.pcm",
+    "rc_field2d"
+  ],
+  "capability_profiles": {
+    "baked_map": {
+      "accepted": true,
+      "missing": [],
+      "mode": "apply_refined_map",
+      "note": "the DAC/RC solve is offline; the application path is a Jotnar-VEC over a stored map"
+    },
+    "live": {
+      "accepted": true,
+      "missing": [],
+      "mode": "dac_rc_adc"
+    },
+    "live_no_dac": {
+      "accepted": false,
+      "missing": [
+        "dac.pcm"
+      ],
+      "reason": "a live field solve still needs boundary programming"
+    }
+  },
+  "gate": {
+    "accepted": true,
+    "bit_exact": false,
+    "budget": 0.001,
+    "class": "tolerance",
+    "metric": "hole_l1",
+    "observed": 0.0002656556444642227,
+    "provenance": "simulated"
+  },
+  "kind": "research.rjm.field2d",
+  "language_op": "dirichlet_laplace_fill",
+  "placement": {
+    "adc": {
+      "bits": 10,
+      "kind": "pcm"
+    },
+    "boundary": "hole_ring",
+    "dac": {
+      "bits": 8,
+      "kind": "pcm"
+    },
+    "grid": [
+      80,
+      112,
+      3
+    ],
+    "schedule": {
+      "dt": 0.2,
+      "kind": "rc_jacobi",
+      "steps": 20000
+    }
+  },
+  "target": "simulated_analog_field2d",
+  "vector": {
+    "base": "field2d.digital_laplace",
+    "direction": "compose[field2d_rc]",
+    "endpoint": "field2d.simulated_rc",
+    "gate": "tolerance",
+    "level": "shape",
+    "magnitude": {
+      "cells": 215040,
+      "lanes": 8
+    },
+    "note": "research vector; not accepted by the bit-exact RJM rule"
+  },
+  "version": 1
+}

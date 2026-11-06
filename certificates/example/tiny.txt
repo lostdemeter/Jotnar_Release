@@ -1,0 +1,1 @@
+Jotnar trust-spine example artifact.

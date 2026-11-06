@@ -1,0 +1,86 @@
+SRGB_DECODE	1	1	U8:HWC -> F:HWC	image	Decode sRGB bytes to linear float (normalized, gamma 2.2).
+LUMA	1	1	F:HWC -> F:HW	image	Rec.709 luma: 0.2126 R + 0.7152 G + 0.0722 B.
+SQRT	1	1	F:HW -> T:HW	image	Elementwise square root, emitted as triples.
+SPLAT_BLUR	1	2	T:HW -> T:HW, T:HW	image	Structure-tensor splat blur; returns image and coherence.
+SUB	2	1	$A, $A -> $A	image	Elementwise subtraction.
+BETA_V5	2	1	T:HW, T:HW -> T:HW	image	Beta field v5 from depth and coherence.
+MUL	2	1	$A, $A -> $A	image	Elementwise multiplication.
+ADD	2	1	$A, $A -> $A	image	Elementwise addition.
+SQUARE	1	1	$A -> $A	image	Elementwise square.
+GAIN	3	1	F:HWC, F:HW, T:HW -> F:HWC	image	Apply a coherence-gated color gain.
+SRGB_ENCODE	1	1	F:HWC -> U8:HWC	image	Encode linear float to sRGB bytes.
+BETA	1	1	$A -> $A	image	Fill a stream with the scalar beta, encoded as triples.
+TBETA	1	1	$A -> $A	image	Fill a stream with beta_b (temporal beta).
+ISO_BLUR	1	1	T:HW -> T:HW	image	Fixed 5x5 Gaussian blur (radius 2, sigma 1).
+WARP	2	1	T:HW, F:HW2 -> T:HW	image	Bilinear warp of depth by a flow field; None passes through.
+STATIC	1	1	F:HW2 -> I:HW	image	Mask true where the flow magnitude is zero.
+MIXDYAD	3	1	T:HW, T:HW, I:HW -> T:HW	image	Blend current and history samples under a mask.
+IADD	2	1	I:*, * -> I:*	int	Wrapping signed 64-bit addition.
+SADD	2	1	I:*, * -> I:*	int	Saturating signed 64-bit addition.
+IMAX	2	1	I:*, * -> I:*	int	Elementwise maximum.
+ISUB	2	1	I:*, * -> I:*	int	Wrapping signed 64-bit subtraction.
+IMUL	2	1	I:*, * -> I:*	int	Wrapping signed 64-bit multiplication.
+IMAD	3	1	I:*, *, * -> I:*	int	Fused multiply-add: a*b + c, wrapping.
+IDIV	2	1	I:*, * -> I:*	int	Truncating signed division; zero and MIN/-1 are errors.
+IMOD	2	1	I:*, * -> I:*	int	Remainder from truncating signed division.
+IDIVU	2	1	I:*, * -> I:*	int	Unsigned 64-bit division.
+IMODU	2	1	I:*, * -> I:*	int	Unsigned 64-bit remainder.
+IXOR	2	1	I:*, * -> I:*	int	Bitwise exclusive-or.
+IAND	2	1	I:*, * -> I:*	int	Bitwise and.
+IOR	2	1	I:*, * -> I:*	int	Bitwise or.
+ISAR	2	1	I:*, * -> I:*	int	Arithmetic right shift by 0..63.
+IEQ	2	1	I:*, * -> I:*	int	1 when equal, else 0.
+ILT	2	1	I:*, * -> I:*	int	1 when a < b, else 0.
+ISELECT	3	1	I:*, *, * -> I:*	int	Masked select: mask != 0 ? a : b.
+ISHL	2	1	I:*, F:SCALAR -> I:*	int	Logical left shift by a scalar 0..63.
+ISHR	2	1	I:*, F:SCALAR -> I:*	int	Logical right shift by a scalar 0..63.
+F2I	1	1	F:* -> I:*	int	Float to integer, truncating toward zero.
+I2F	1	1	I:* -> F:*	int	Integer to F64.
+MATMUL	2	1	*, * -> *	linalg	2D matrix multiply with fixed-point accumulation.
+BATCH_MATMUL	2	1	*, * -> *	linalg	Batched matmul over leading batch dimensions.
+SOFTMAX	1	1	$A -> $A	linalg	Softmax over the last axis at BIAS scale.
+SOFTMAX_WIDE	1	1	$A -> $A	linalg	Softmax with the wide fixed-point range.
+TSHIFT	1	1	$A -> $A	linalg	Subtract the per-row maximum (softmax stabilization).
+RMSNORM	2	1	$X, $W -> $X	linalg	RMSNorm over the last axis with a weight vector.
+LAYERNORM	3	1	$X, $W, $W -> $X	linalg	LayerNorm over the last axis (2D input).
+SILU	1	1	$A -> $A	linalg	SiLU activation: x * sigmoid(x).
+GELU	1	1	$A -> $A	linalg	GELU activation through frozen LUTs.
+SCAN	3	1	$X, $X, $X -> $X	linalg	Recurrence step: h * abar + bx.
+ROTARY	2	1	$X, * -> $X	linalg	Rotary embedding over triple pairs by position.
+ROPE	4	1	$A, *, F:SCALAR, F:SCALAR -> $A	linalg	Float RoPE over (rows, heads * head_dim).
+SWIGLU	2	1	$A, F:SCALAR -> $A	linalg	Gated MLP: silu(gate) * up.
+ATTN	8	1	$A,$A,$A,I:*,F:SCALAR,F:SCALAR,F:SCALAR,F:SCALAR -> $A	linalg	Multi-head attention with a causal/validity mask.
+BMMV	13	1	*13 -> *	linalg	Fused batched matrix-vector kernel with explicit strides.
+TRANSPOSE	1	1	$A -> $A^T	move	Swap the last two dimensions; layout becomes ^T.
+GAUSS	3	1	$A, F:SCALAR, F:SCALAR -> $A	move	Gaussian blur with radius and sigma.
+RESHAPE2	3	1	*, F:SCALAR, F:SCALAR -> *	move	Reshape to two dimensions.
+RESHAPE3	4	1	*, F:SCALAR, F:SCALAR, F:SCALAR -> *	move	Reshape to three dimensions.
+PERMUTE3	4	1	*, F:SCALAR, F:SCALAR, F:SCALAR -> *	move	Permute three dimensions.
+SELECT	3	1	I:*, $A, $A -> $A	move	Elementwise select: mask != 0 ? a : b.
+CONCAT	3	1	$A, $A, F:SCALAR -> $A	move	Concatenate two streams along an axis.
+ARGMAX	2	1	$A, F:SCALAR -> I:*	move	Index of the maximum along an axis.
+TOPK	2	2	$A, F:SCALAR -> $A, I:*	move	Top-k values and indices along the last axis.
+GT	2	1	$A, $A -> I:*	move	Elementwise greater-than, returning an integer mask.
+SLICE	4	1	$A, F:SCALAR, F:SCALAR, F:SCALAR -> $A	move	Slice along an axis from start to end.
+CLIP	3	1	$A, F:SCALAR, F:SCALAR -> $A	move	Clamp every value into [lo, hi].
+DIV	2	1	$A, $A -> $A	move	Elementwise division.
+SIGMOID	1	1	$A -> $A	move	Logistic sigmoid.
+RESCALE	2	1	$A, F:SCALAR -> $A	move	Rescale triples to a new fixed-point scale.
+GATHER	2	1	*, I:* -> *	move	Gather rows by an index vector.
+GATHER3	3	1	*, I:*, I:* -> *	move	Gather from a 3D table by i/j index vectors.
+SCATTER	3	1	$A, $A, I:* -> $A	move	Scatter values into a copy at the given indices.
+PRELU	2	1	$A, $A -> $A	move	PReLU with a scalar or per-channel slope.
+POOLAVG	1	1	* -> *	move	Global average pool over H,W; returns (C).
+DECONV	4	1	*, *, F:SCALAR, F:SCALAR -> *	move	Transposed convolution with stride and padding.
+INTERP	3	1	*, F:SCALAR, F:SCALAR -> *	move	Bilinear resize by dyadic scales.
+CONV	2	1	*, * -> *	move	2D convolution with an explicit kernel.
+IWINDOW	3	1	I:*, *, F:SCALAR -> I:*	bytes	Slice a 1D integer/byte stream [start, start+len).
+ICRC32	1	1	I:* -> I:*	bytes	CRC-32 (IEEE) over a byte stream.
+ICRC32C	2	1	I:*, I:* -> I:*	bytes	CRC-32C with an explicit seed.
+IINFLATE	2	1	I:*, F:SCALAR -> I:*	bytes	Raw DEFLATE decode with an expected output size.
+IVARINT	2	2	I:*, * -> I:*, I:*	bytes	Decode a varint; returns value and bytes consumed.
+IFIND	2	1	I:*, I:* -> I:*	bytes	First occurrence of a pattern; -1 when absent.
+IGATHER1	2	1	I:*, I:* -> I:*	bytes	Gather from a 1D table by indices.
+IASSEMBLE	3	1	I:*, F:SCALAR, F:SCALAR -> I:*	bytes	Assemble 1..8 little-endian bytes into an integer.
+ISUM	3	1	I:*, F:SCALAR, F:SCALAR -> I:*	bytes	Sum a slice of a 1D integer stream.
+ISCATTER1	3	1	I:*, I:*, I:* -> I:*	bytes	Scatter values into a 1D copy at indices.

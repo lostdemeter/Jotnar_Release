@@ -1,0 +1,255 @@
+{
+  "schema": "jotnar.certificate",
+  "schema_version": 1,
+  "id": "doom/native-gpu-migration/unix:1793988223",
+  "status": "current",
+  "outcome": "solved",
+  "verdict": "pass",
+  "space": {
+    "label": "doom-frame-1-2",
+    "map": "doom.bin",
+    "family": "rv32im-machine",
+    "primitive": "migration",
+    "sample": {
+      "seed": 0,
+      "size": "2 frames",
+      "domain": "RV32IM DOOM shareware title",
+      "forced_corners": [
+        "frame1",
+        "frame2"
+      ]
+    },
+    "reference": "C native frame 1 / GPU frame 2 (64 MB)",
+    "bounds": [
+      "modeled memory: 64 MB",
+      "native extra memory beyond 64 MB is outside the space"
+    ],
+    "hashes": {
+      "image": "0cd31f1dee08fd63f5e9b8123f0e2319078aeb2228c81ebcb7a412395da12531",
+      "rust_frame1": "e632d088208ae2ecab814436886847ed44e9237ab4407f521069a5fd4d57f981",
+      "rust_frame2": "e89c8b0844f238b227a1827ff4859b4dfe7c2e09d086ae5831fe88384c6f56a8",
+      "wad": "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
+    }
+  },
+  "proposal": {
+    "kind": "migration",
+    "candidate": "rust checkpoint frame 1 -> frame 2",
+    "provenance": {
+      "frame1": "/tmp/opencode/doom_parity/r1",
+      "frame2": "/tmp/opencode/doom_parity/r2",
+      "proposer": "jotnar-demo-doom",
+      "seed": "0"
+    }
+  },
+  "gate": {
+    "name": "byte_identical_migration",
+    "level": "semantic",
+    "reference": "C native frame 1; GPU frame 2; 64 MB; regs; PC; framebuffer",
+    "frozen_at": "certificate seal",
+    "gate_sha256": "873bbe3e88b9b56b3e2519b6bb97a629d824071b948c3efa8980ac1935d4efdd",
+    "can_say_no": true
+  },
+  "witness": {
+    "map": "/home/balrog/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin",
+    "input": "frame 1 checkpoint",
+    "output": "frame 2",
+    "trace": "/tmp/opencode/doom_parity/r1 + /tmp/opencode/doom_parity/r2"
+  },
+  "proof": {
+    "gate": "byte_identical_migration",
+    "contract": "native-frame1 + gpu-frame2 exactness on the modeled 64 MB"
+  },
+  "derivation": {
+    "trace": "frame1 compare; resume; frame2 compare; falsifier/null table"
+  },
+  "assumptions": [
+    "frame 1 is the checkpoint",
+    "the same image and WAD are used on both engines",
+    "the GPU checkpoint is the same machine layout (64 MB)"
+  ],
+  "unknowns": [
+    "the GPU kernel for all programs",
+    "plan completeness",
+    "memory beyond 64 MB"
+  ],
+  "proves": [
+    "Rust frame 1 matches the C native core on the first 64 MB, registers, PC, cycles, and framebuffer",
+    "Rust frame 2 matches the GPU checkpoint on the first 64 MB, registers, PC, and framebuffer"
+  ],
+  "does_not_prove": [
+    "the GPU kernel for all programs",
+    "the plan is complete",
+    "memory beyond the modeled 64 MB",
+    "fleet throughput"
+  ],
+  "falsifiers": [
+    {
+      "corruption": "framebuffer byte changed",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "frame",
+      "not_caught": false
+    },
+    {
+      "corruption": "register byte changed",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "registers",
+      "not_caught": false
+    },
+    {
+      "corruption": "PC changed",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "pc",
+      "not_caught": false
+    },
+    {
+      "corruption": "memory byte changed (no frame effect)",
+      "expected": "fail",
+      "actual": "fail (memory)",
+      "caught_by": "memory",
+      "not_caught": false
+    },
+    {
+      "corruption": "memory byte changed beyond 64 MB",
+      "expected": "fail",
+      "actual": "pass",
+      "caught_by": "nothing (outside the space)",
+      "not_caught": true
+    },
+    {
+      "corruption": "compare 128 MB native dump with 64 MB GPU dump",
+      "expected": "fail (space mismatch must be rejected by the contract)",
+      "actual": "fail (full) / pass (64 MB slice)",
+      "caught_by": "nothing (space bug: the wrong space is not caught by the frame gate)",
+      "not_caught": true
+    },
+    {
+      "corruption": "frame 2 removed",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "proof/sequence",
+      "not_caught": false
+    },
+    {
+      "corruption": "wrong frame (frame 1 vs frame 2 reference)",
+      "expected": "fail",
+      "actual": "pass (frames identical)",
+      "caught_by": "frame",
+      "not_caught": true
+    },
+    {
+      "corruption": "replace gate with m == P(spec)",
+      "expected": "pass (wrong map must pass the vacuous gate)",
+      "actual": "pass",
+      "caught_by": "none (by construction; this is the independence test)",
+      "not_caught": true
+    }
+  ],
+  "nulls": [
+    {
+      "name": "wrong_frame",
+      "control": "proposal frame 1 vs reference frame 2",
+      "expected": "reject",
+      "actual": "pass (frames identical)",
+      "effect": "confounded: the title frame is static",
+      "status": "not_tested"
+    },
+    {
+      "name": "shifted_frame",
+      "control": "reference frame shifted by one pixel",
+      "expected": "reject",
+      "actual": "reject",
+      "effect": "rejected",
+      "status": "pass"
+    }
+  ],
+  "bench": {
+    "clock": "host_wall",
+    "scope": "end_to_end",
+    "kind": "measured",
+    "runs": 3,
+    "p50_ms": 318.880923,
+    "p99_ms": 333.810524,
+    "max_ms": 333.810524,
+    "units": "ms",
+    "note": "native Rust frame 1; includes process startup and image load"
+  },
+  "refusal": null,
+  "provenance": {
+    "command": "jotnar-lab certify doom --bundle /tmp/opencode/doom_bundle/manifest.json --out /tmp/opencode/doom_cert.json",
+    "cwd": "/home/balrog/Documents/OpenCode/rewrite_in_rust",
+    "commit": "uncommitted",
+    "host": "balrog",
+    "environment": {
+      "memory_bytes": "67108864",
+      "profile": "native+gpu"
+    }
+  },
+  "artifacts": [
+    {
+      "role": "image",
+      "path": "/home/balrog/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin",
+      "sha256": "0cd31f1dee08fd63f5e9b8123f0e2319078aeb2228c81ebcb7a412395da12531",
+      "bytes": 847112
+    },
+    {
+      "role": "wad",
+      "path": "/home/balrog/Documents/OpenCode/jotnar-assets/doom1.wad",
+      "sha256": "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
+      "bytes": 4196020
+    },
+    {
+      "role": "frame1.mem",
+      "path": "/tmp/opencode/doom_parity/r1.mem",
+      "sha256": "e632d088208ae2ecab814436886847ed44e9237ab4407f521069a5fd4d57f981",
+      "bytes": 67108864
+    },
+    {
+      "role": "frame2.mem",
+      "path": "/tmp/opencode/doom_parity/r2.mem",
+      "sha256": "e89c8b0844f238b227a1827ff4859b4dfe7c2e09d086ae5831fe88384c6f56a8",
+      "bytes": 67108864
+    },
+    {
+      "role": "c_frame1.mem",
+      "path": "/tmp/opencode/doom_parity/c1.mem",
+      "sha256": "f77e3dfc01dcea738e1eb24f5255938d5033e5814d63b97094640b1b25d43f27",
+      "bytes": 134217728
+    },
+    {
+      "role": "c_frame2.mem",
+      "path": "/tmp/opencode/doom_parity/c2.mem",
+      "sha256": "e7b5e322cfd19ff2dd821af231f0864436eeffc975d72c415515192c4ec009c6",
+      "bytes": 134217728
+    },
+    {
+      "role": "gpu_frame2.mem",
+      "path": "/tmp/opencode/doom_overlay/demo_g2.mem",
+      "sha256": "e89c8b0844f238b227a1827ff4859b4dfe7c2e09d086ae5831fe88384c6f56a8",
+      "bytes": 67108864
+    },
+    {
+      "role": "gpu_frame2.x",
+      "path": "/tmp/opencode/doom_overlay/demo_g2.x",
+      "sha256": "a2f1dfd79a6cf8550a54119d3923d1fbf28e3efdec59d59d8c3950cf586ae631",
+      "bytes": 256
+    },
+    {
+      "role": "gpu_frame2.pc",
+      "path": "/tmp/opencode/doom_overlay/demo_g2.pc",
+      "sha256": "35725b1502e328984a295643fe477dce333458e2eca0c326267efa84cd36355a",
+      "bytes": 8
+    },
+    {
+      "role": "gpu_frame2.fb",
+      "path": "/tmp/opencode/doom_overlay/demo_g2.fb",
+      "sha256": "4c40d22ef99cbf87eb28fb4c23c7c73d3a1462ea189cc10c037d1e8f5ce9fff3",
+      "bytes": 256000
+    }
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "certificate_sha256": "e82eb86dc0c6147404b487d59ec1ecf2fcb91605b5f7b9572deb5d4a850da4f7"
+}

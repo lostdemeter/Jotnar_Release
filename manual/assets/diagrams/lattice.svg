@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440">
+  <g font-family="Courier Prime, monospace" fill="#171411">
+    <text x="24" y="40" font-size="20" letter-spacing="3">THE PHI LATTICE: sign × PHI^((e - 32768) / 512)</text>
+    <text x="780" y="40" font-size="13" letter-spacing="2">FIG. 03</text>
+
+    <!-- lattice grid -->
+    <g stroke="#171411" stroke-width="1" opacity=".25">
+      <path d="M80 120 H620 M80 160 H620 M80 200 H620 M80 240 H620 M80 280 H620 M80 320 H620 M80 360 H620"/>
+      <path d="M80 100 V380 M140 100 V380 M200 100 V380 M260 100 V380 M320 100 V380 M380 100 V380 M440 100 V380 M500 100 V380 M560 100 V380 M620 100 V380"/>
+    </g>
+
+    <!-- curve -->
+    <path d="M80 360 C160 350 230 330 300 292 C370 254 430 196 500 146 C550 112 590 96 620 90"
+          fill="none" stroke="#e04437" stroke-width="5"/>
+    <text x="420" y="126" font-size="13" fill="#e04437">PHI^((e-BIAS)/K)</text>
+
+    <!-- highlighted triple -->
+    <g>
+      <circle cx="320" cy="280" r="11" fill="#171411"/>
+      <circle cx="320" cy="280" r="20" fill="none" stroke="#e04437" stroke-width="3"/>
+      <line x1="320" y1="280" x2="320" y2="200" stroke="#e04437" stroke-width="2" stroke-dasharray="4 4"/>
+      <line x1="320" y1="280" x2="400" y2="280" stroke="#e04437" stroke-width="2" stroke-dasharray="4 4"/>
+      <text x="330" y="204" font-size="13" fill="#e04437">e</text>
+      <text x="404" y="285" font-size="13" fill="#e04437">index</text>
+    </g>
+
+    <!-- triple planes -->
+    <g transform="translate(650 100)">
+      <text x="0" y="0" font-size="16" font-weight="bold">TRIPLE</text>
+      <rect x="0" y="20" width="200" height="46" fill="#f2eadb" stroke="#171411" stroke-width="3"/>
+      <text x="12" y="50" font-size="15">s : sign   {-1, +1}</text>
+      <rect x="0" y="74" width="200" height="46" fill="#f2eadb" stroke="#171411" stroke-width="3"/>
+      <text x="12" y="104" font-size="15">e : exponent (i32)</text>
+      <rect x="0" y="128" width="200" height="46" fill="#e04437" stroke="#171411" stroke-width="3"/>
+      <text x="12" y="158" font-size="15">z : zero flag (u8)</text>
+      <text x="0" y="208" font-size="13">same shape on all planes</text>
+      <text x="0" y="230" font-size="13">no float in the middle</text>
+    </g>
+
+    <!-- fixed point bridge -->
+    <g transform="translate(80 300)">
+      <rect x="0" y="0" width="360" height="86" fill="#171411" stroke="#171411" stroke-width="4"/>
+      <text x="16" y="26" font-size="15" font-weight="bold" fill="#f2eadb">FIXED-POINT BRIDGE</text>
+      <text x="16" y="52" font-size="13" fill="#f2eadb">to_fixed(t, m) → int64 in 2^-18 units</text>
+      <text x="16" y="72" font-size="13" fill="#f2eadb">m_acc = 31344   m_cov = 33280</text>
+    </g>
+  </g>
+</svg>

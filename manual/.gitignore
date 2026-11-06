@@ -1,0 +1,4 @@
+press/target/
+out/preview/
+__pycache__/
+*.pyc

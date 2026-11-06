@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+__pycache__/
+*.pyc
+*.out.json
+/gallery
+/showcase/analog/out
+/showcase/futhark/payload
+/demo_out

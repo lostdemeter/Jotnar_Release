@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420">
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#171411"/>
+    </marker>
+  </defs>
+  <g font-family="Courier Prime, monospace" fill="#171411">
+    <text x="20" y="40" font-size="20" letter-spacing="3">SAXPY: OUT = A * X + Y</text>
+    <text x="760" y="40" font-size="13" letter-spacing="2">FIG. 02</text>
+
+    <!-- input nodes -->
+    <g>
+      <circle cx="80" cy="120" r="38" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <text x="64" y="126" font-size="22" font-weight="bold">A</text>
+      <circle cx="80" cy="240" r="38" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <text x="64" y="246" font-size="22" font-weight="bold">X</text>
+      <circle cx="80" cy="350" r="38" fill="#e04437" stroke="#171411" stroke-width="4"/>
+      <text x="64" y="356" font-size="22" font-weight="bold">Y</text>
+    </g>
+
+    <!-- mul node -->
+    <g>
+      <rect x="250" y="88" width="170" height="84" fill="#171411" stroke="#171411" stroke-width="4"/>
+      <text x="272" y="124" font-size="20" font-weight="bold" fill="#f2eadb">IMUL</text>
+      <text x="272" y="150" font-size="14" fill="#f2eadb">elementwise, exact</text>
+      <text x="352" y="196" font-size="14">ax = IMUL(A, X)</text>
+    </g>
+
+    <!-- add node -->
+    <g>
+      <rect x="530" y="210" width="190" height="84" fill="#f2eadb" stroke="#171411" stroke-width="4"/>
+      <text x="552" y="246" font-size="20" font-weight="bold">IADD</text>
+      <text x="552" y="272" font-size="14">wrapping int64</text>
+      <text x="552" y="318" font-size="14">OUT = IADD(ax, Y)</text>
+    </g>
+
+    <!-- output -->
+    <g>
+      <rect x="790" y="216" width="88" height="72" fill="#e04437" stroke="#171411" stroke-width="4"/>
+      <text x="812" y="260" font-size="20" font-weight="bold">OUT</text>
+    </g>
+
+    <g stroke="#171411" stroke-width="4" fill="none" marker-end="url(#b)">
+      <path d="M118 120 C180 120 190 130 246 130"/>
+      <path d="M118 240 C180 240 190 148 246 148"/>
+      <path d="M420 130 C470 130 490 220 526 238"/>
+      <path d="M118 350 C300 350 390 270 526 266"/>
+      <path d="M720 252 L786 252"/>
+    </g>
+
+    <g stroke="#e04437" stroke-width="3" stroke-dasharray="6 6" fill="none">
+      <path d="M80 158 L80 202"/>
+      <path d="M80 278 L80 312"/>
+    </g>
+    <text x="96" y="186" font-size="12" fill="#e04437">shape [4] / I64</text>
+    <text x="96" y="306" font-size="12" fill="#e04437">shape [4] / I64</text>
+  </g>
+</svg>

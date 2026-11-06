@@ -1,0 +1,84 @@
+[book]
+title = "JOTNAR FIELD MANUAL"
+subtitle = "THE GEOMETRIC ASSEMBLY LANGUAGE"
+issue = "ISSUE 01"
+edition = "DIGITAL / FIRST ROUGH DRAFT"
+date = "NOVEMBER 2026"
+tagline = "Streams, layouts, exact integers, and the machines that witness them."
+imprint = "THE DETERMINISTIC PRESS"
+author = "THE JOTNAR WORKING GROUP"
+
+[[part]]
+id = "orientation"
+number = "00"
+title = "ORIENTATION"
+deck = "What this is, who it is for, and the three ideas the rest of the book keeps using."
+theme = "paper"
+chapters = ["content/01-read-me.md", "content/02-manifesto.md"]
+
+[[part]]
+id = "language"
+number = "I"
+title = "THE LANGUAGE"
+deck = "A program is a graph of named streams. Learn to read the graph before you learn the instructions."
+theme = "red"
+chapters = [
+  "content/03-geometry.md",
+  "content/04-streams.md",
+  "content/05-layouts.md",
+  "content/06-composition.md",
+]
+
+[[part]]
+id = "instruction-set"
+number = "II"
+title = "THE INSTRUCTION SET"
+deck = "Eighty-six mnemonics, five families, one fail-loud registry. Exact in the middle, float at the edge."
+theme = "dark"
+chapters = [
+  "content/07-integers.md",
+  "content/08-triples.md",
+  "content/09-linalg.md",
+  "content/10-images.md",
+  "content/11-bytes.md",
+  "content/12-register.md",
+]
+
+[[part]]
+id = "machine"
+number = "III"
+title = "THE MACHINE"
+deck = "The same plan on a portable C target, an integer-only target, a GPU, a piece of hardware, and a 32-bit machine."
+theme = "red"
+chapters = [
+  "content/13-execution.md",
+  "content/14-emitters.md",
+  "content/15-toolchain.md",
+]
+
+[[part]]
+id = "field-notes"
+number = "IV"
+title = "FIELD NOTES"
+deck = "Four listings, a CPU, a 43-op image pipeline on three targets, a DAC-to-RC-to-ADC analog field, DOOM, Futhark, protocol, and an honest analog filter."
+theme = "dark"
+chapters = [
+  "content/15-first-listings.md",
+  "content/16-cpu8.md",
+  "content/17-image-pipeline.md",
+  "content/18-analog-field.md",
+  "content/19-showcase.md",
+]
+
+[[part]]
+id = "appendices"
+number = "V"
+title = "APPENDICES"
+deck = "The trust spine, the press, the vocabulary, and the end matter."
+theme = "paper"
+chapters = [
+  "content/22-trust-spine.md",
+  "content/19-press.md",
+  "content/20-glossary.md",
+  "content/21-colophon.md",
+]

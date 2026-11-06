@@ -1,0 +1,120 @@
+{
+  "schema": "jotnar.certificate",
+  "schema_version": 1,
+  "id": "example/tiny-identity",
+  "status": "current",
+  "outcome": "solved",
+  "verdict": "pass",
+  "space": {
+    "label": "tiny-artifact",
+    "map": "tiny.txt",
+    "family": "schema-example",
+    "primitive": "identity",
+    "sample": {
+      "seed": 0,
+      "size": "1 file",
+      "domain": "trust-spine schema example",
+      "forced_corners": [
+        "exact file"
+      ]
+    },
+    "reference": "sha256 of tiny.txt",
+    "bounds": [
+      "this is not a Jotnar execution claim"
+    ],
+    "hashes": {
+      "tiny.txt": "8e91387823670428af7b22bd5c653e5e3b8aab342d88972f910ac6baacfac464"
+    }
+  },
+  "proposal": {
+    "kind": "identity",
+    "candidate": "read the artifact bytes unchanged",
+    "provenance": {
+      "proposer": "certificates/example/README.md",
+      "seed": "0"
+    }
+  },
+  "gate": {
+    "name": "same_bytes",
+    "level": "syntactic",
+    "reference": "sha256 of tiny.txt",
+    "frozen_at": "pre-registered",
+    "gate_sha256": "2892ab50d93f3100dad93294acf621e0fa5875e2a77378c7cd456a66f6e16ff1",
+    "can_say_no": true
+  },
+  "witness": {
+    "map": "certificates/example/tiny.txt",
+    "input": "tiny.txt",
+    "output": "same bytes",
+    "trace": "sha256 readback"
+  },
+  "proof": {
+    "gate": "same_bytes",
+    "contract": "recorded artifact hash equals the file"
+  },
+  "derivation": {
+    "trace": "hash the file; compare"
+  },
+  "assumptions": [
+    "the artifact is present at verify time"
+  ],
+  "unknowns": [
+    "this is not a Jotnar program execution"
+  ],
+  "proves": [
+    "the example artifact matches its recorded sha256"
+  ],
+  "does_not_prove": [
+    "anything about Jotnar programs",
+    "any target/backend claim"
+  ],
+  "falsifiers": [
+    {
+      "corruption": "artifact byte changed",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "same_bytes",
+      "not_caught": false
+    }
+  ],
+  "nulls": [
+    {
+      "name": "wrong_bytes",
+      "control": "a different file",
+      "expected": "reject",
+      "actual": "reject",
+      "effect": "rejected",
+      "status": "pass"
+    }
+  ],
+  "bench": {
+    "clock": "none",
+    "scope": "not_tested",
+    "kind": "not_tested",
+    "runs": 0,
+    "p50_ms": null,
+    "p99_ms": null,
+    "max_ms": null,
+    "units": "ms",
+    "note": "schema example only"
+  },
+  "refusal": null,
+  "provenance": {
+    "command": "jotnar-lab seal certificates/example/certificate.json",
+    "cwd": "repo root",
+    "commit": "uncommitted",
+    "host": "example",
+    "environment": {}
+  },
+  "artifacts": [
+    {
+      "role": "tiny.txt",
+      "path": "tiny.txt",
+      "sha256": "8e91387823670428af7b22bd5c653e5e3b8aab342d88972f910ac6baacfac464",
+      "bytes": 37
+    }
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "certificate_sha256": "694c4a717aee3367ba1b59c597846ee4f0490cbd94bdca260a1b83c662ed8aec"
+}
