@@ -4,7 +4,9 @@ A listing-level autonomous circuit for Jotnar.
 
 > New session? Read
 > [`HANDOFF.md`](../../../harness_selfimprove/HANDOFF.md) for the current
-> state, artifacts, known gaps, and next-session plan.
+> state, artifacts, known gaps, and next-session plan, then
+> [`NEXT_SESSION_PROMPT.md`](../../../harness_selfimprove/NEXT_SESSION_PROMPT.md)
+> for the self-contained next prompt.
 
 This crate applies the *shape* of Harness²'s optimizer loop to the Rust Jotnar
 release, without importing Harness²'s benchmarks or runtime:
