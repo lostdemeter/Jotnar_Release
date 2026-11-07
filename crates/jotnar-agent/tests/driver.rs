@@ -28,7 +28,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn a_round_discovers_sum4_and_retains_the_incumbent() {
+fn a_round_discovers_reduce_sum_and_retains_the_incumbent() {
     let out = temp_dir("round");
     let report = run_round(&Harness::default(), &cases(), &out);
 
@@ -42,14 +42,14 @@ fn a_round_discovers_sum4_and_retains_the_incumbent() {
     assert_eq!(report.base.wrong(), 2);
     assert_eq!(report.adopted.wrong(), 0);
     assert_eq!(report.adopted_heldout.correct(), n);
-    assert!(report.edits.iter().any(|e| e.contains("sum4")));
+    assert!(report.edits.iter().any(|e| e.contains("reduce_sum")));
     assert!(report.chosen_label.contains("compose:"));
-    assert!(report.chosen_label.contains("sum4"));
+    assert!(report.chosen_label.contains("reduce_sum"));
     assert!(report.experience.is_some());
 
     let round = fs::read_to_string(out.join("round.json")).unwrap();
     assert!(round.contains("\"adopted_flag\": true"));
-    assert!(round.contains("compose[sum4]"));
+    assert!(round.contains("compose[reduce_sum]"));
 
     let exp = fs::read_to_string(out.join("experience.jsonl")).unwrap();
     assert!(exp.contains("\"lesson\""));

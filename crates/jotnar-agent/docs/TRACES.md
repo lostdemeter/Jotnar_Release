@@ -33,12 +33,12 @@ Each line is one `(candidate, case, phase)` record:
   },
   "candidate": {
     "index": 1,
-    "label": "case-union: add compose[sum4] + depth + 1",
+    "label": "case-union: add compose[reduce_sum] + depth + 1",
     "selected": true,
     "adopted": true,
     "harness": {
       "families": ["saxpy", "reduce", "matmul2", "select", "add2"],
-      "compose_consumers": ["add2", "sum4"],
+      "compose_consumers": ["add2", "reduce_sum"],
       "max_depth": 3,
       "max_refinements": 2,
       "refine_enabled": true,
@@ -119,9 +119,9 @@ and held out on a different start family (`affine -> affine_s16`). That is the
 training signal the first generated stream was missing: the held-out split was
 never moved, but the model now sees what a deep target requires.
 
-The two wide compose consumers are taught the same way: `vec9 -> vec9_sum`
-(9 outputs) and `vec16 -> vec16_sum` (16 outputs) are **training** cases on
-shapes that are not the audit shapes. `matmul3 -> matmul3_sum`,
+The geometric reduction is taught the same way: `vec9 -> vec9_sum` and
+`vec16 -> vec16_sum` are shaped vector-to-scalar **training** cases. The shaped
+`matmul2` cases also exercise `reduce_sum`. `matmul3 -> matmul3_sum`,
 `matmul4 -> matmul4_sum`, and `select16 -> select16_sum` are held out in the
 `Hard` split.
 
@@ -146,16 +146,17 @@ refusal control, and three feature-distant compose cases:
 
 | case | shape | min-dist | min solver |
 | --- | --- | ---: | --- |
-| `hard-matmul3-sum` | 18 in / 9 out | 76 | `add compose[sum9]` |
-| `hard-matmul4-sum` | 32 in / 16 out | 224 | `add compose[sum16]` |
-| `hard-select16-sum` | 32 in / 16 out | 64 | `add compose[sum16]` |
+| `hard-matmul3-sum` | `[3,3]` matmul field -> scalar | `add compose[reduce_sum]` |
+| `hard-matmul4-sum` | `[4,4]` matmul field -> scalar | `add compose[reduce_sum]` |
+| `hard-select16-sum` | `[16]` select field -> scalar | `add compose[reduce_sum]` |
 
-The two wide consumers are taught on `vec9`/`vec16` training fans; none of the
-hard shapes is trained on. `feature-audit` prints the min L1 feature distance
-from each held-out/hard case to the training task vectors, and (with
-`--state-effect-weights`) the model's learned top-k action scores. `run --hard`
-evaluates the adopted harness on the hard set and writes `hard.json`. Both are
-audits: they measure generalization, they do not tune against it.
+The geometric reduction is taught on `vec9`/`vec16` shaped training cases; none
+of the hard shapes is trained on. `feature-audit` prints the count distance and
+the geometry signature (rank, numel, op family, reduction applicability) from
+each held-out/hard case, and (with `--state-effect-weights`) the model's learned
+top-k action scores. `run --hard` evaluates the adopted harness on the hard set
+and writes `hard.json`. Both are audits: they measure generalization, they do
+not tune against it.
 
 ## Teacher distillation
 

@@ -172,7 +172,7 @@ pub fn corpus() -> Vec<CorpusCase> {
             "reduce128",
             Heldout,
         ),
-        // Matrix: the same sum4 capability over two graph shapes.
+        // Matrix: the same geometric reduction over two graph shapes.
         make(
             "matmul-sum",
             "matmul2",
@@ -407,8 +407,8 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
             Train,
         ),
         // The wide compose consumers are taught on their own shapes, not on the
-        // distant shape that is held out. `vec9` teaches sum9 on a 9-lane fan;
-        // `vec16` teaches sum16 on a 16-lane fan. The audit-only cases
+        // distant shape that is held out. `vec9` and `vec16` are shaped vector
+        // reductions; the audit-only cases
         // (`matmul3`, `matmul4`, `select16`) are a different shape each.
         make(
             "gen-vec9-sum-train",
@@ -623,7 +623,7 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
 ///
 /// The first four are novel compositions: a duplicate-line start (`*_dup`)
 /// and a deep `s16` target need a three-action solver
-/// (`sum4 + depth + refinements`) that no training case requires. The next
+/// (`reduce_sum + depth + refinements`) that no training case requires. The next
 /// three are high-feature-distance retention cases (large reduction resizes
 /// and a matrix transpose) that the base already solves. The last is a
 /// high-distance control that must stay refused.
@@ -703,7 +703,7 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             Hard,
         ),
         // Feature-distant: 18 inputs, 9 outputs, and a 9-input compose
-        // consumer. No training case has this shape or uses sum9.
+        // field. No training case has this shape signature.
         make(
             "hard-matmul3-sum",
             "matmul3",
@@ -714,7 +714,7 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             "matmul3_sum",
             Hard,
         ),
-        // Second distant shape and consumer: 32 inputs, 16 outputs. The sum16
+        // Second distant shape and consumer: a [4,4] matmul field. The geometric
         // consumer is taught on `gen-vec16-sum-train`, never on this shape.
         make(
             "hard-matmul4-sum",

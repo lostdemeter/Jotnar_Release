@@ -26,14 +26,14 @@ fn generated_train() -> Vec<jotnar_agent::Case> {
 #[test]
 fn state_features_distinguish_the_composed_harness() {
     let base = Harness::default();
-    let sum4 = apply_action(&base, 0).unwrap().harness;
+    let reduced = apply_action(&base, 0).unwrap().harness;
     let a = base.state_features();
-    let b = sum4.state_features();
+    let b = reduced.state_features();
     assert_eq!(a.len(), STATE_FEATURE_NAMES.len());
     assert_eq!(b.len(), STATE_FEATURE_NAMES.len());
     assert_ne!(a, b);
-    assert_eq!(a[0], 0, "base has no sum4 consumer");
-    assert_eq!(b[0], 1, "the sum4 state has the consumer");
+    assert_eq!(a[0], 0, "base has no reduce_sum consumer");
+    assert_eq!(b[0], 1, "the reduce_sum state has the consumer");
 }
 
 #[test]
@@ -54,25 +54,28 @@ fn transition_table_records_state_dependent_effects() {
     let matrix = rows
         .iter()
         .find(|row| row.case == "gen-matmul-colsum" && row.action == 0 && row.state[0] == 0)
-        .expect("sum4 transition from the base state for the matrix case");
+        .expect("reduce_sum transition from the base state for the matrix case");
     assert!(
         matrix.correct,
-        "sum4 should solve the generated matrix case"
+        "reduce_sum should solve the generated matrix case"
     );
     assert!(!matrix.parent_correct);
     assert_eq!(matrix.delta, 1);
 
-    // From the sum4 state, sum4 is already in the subset, so the transition
-    // table does not offer it again.
-    let sum4_state = apply_action(&base, 0).unwrap().harness.fingerprint();
-    let from_sum4 = rows
+    // From the reduce_sum state, the consumer is already in the subset, so
+    // the transition table does not offer it again.
+    let reduced_state = apply_action(&base, 0).unwrap().harness.fingerprint();
+    let from_reduced = rows
         .iter()
-        .find(|row| row.case == "gen-matmul-colsum" && row.state_key == sum4_state)
+        .find(|row| row.case == "gen-matmul-colsum" && row.state_key == reduced_state)
         .expect("a transition from the composed state");
-    assert_eq!(from_sum4.state[0], 1, "the state says sum4 is present");
+    assert_eq!(
+        from_reduced.state[0], 1,
+        "the state says reduce_sum is present"
+    );
     let repeat = rows
         .iter()
-        .find(|row| row.state_key == sum4_state && row.action == 0);
+        .find(|row| row.state_key == reduced_state && row.action == 0);
     assert!(repeat.is_none());
 }
 
@@ -163,18 +166,18 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
     let base_report = evaluate(&base, &hard, false);
     let views = jotnar_agent::case_views(&hard, &base_report);
     for (id, action) in [
-        ("hard-matmul3-sum", 10usize),
-        ("hard-matmul4-sum", 11),
-        ("hard-select16-sum", 11),
+        ("hard-matmul3-sum", 0usize),
+        ("hard-matmul4-sum", 0),
+        ("hard-select16-sum", 0),
     ] {
         let index = hard
             .iter()
             .position(|case| case.intent.id == id)
             .unwrap_or_else(|| panic!("missing hard case {id}"));
         let task = jotnar_agent::task_encoder::task_vector(&views[index], &base);
-        let mut scores = model.scores(&task, &base.state_features());
-        jotnar_agent::mask_inapplicable_consumers(&task, &mut scores);
+        let scores = model.scores(&task, &base.state_features());
         let top = (0..scores.len())
+            .filter(|action| jotnar_agent::action_applies(*action, &task))
             .max_by_key(|action| scores[*action])
             .unwrap_or(0);
         assert_eq!(
@@ -198,16 +201,16 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
             .adopted_harness
             .compose_consumers
             .iter()
-            .any(|c| c == "sum9"),
-        "learned-only harness should keep sum9"
+            .any(|c| c == "reduce_sum"),
+        "learned-only harness should keep reduce_sum"
     );
     assert!(
         report
             .adopted_harness
             .compose_consumers
             .iter()
-            .any(|c| c == "sum16"),
-        "learned-only harness should keep sum16"
+            .any(|c| c == "reduce_sum"),
+        "learned-only harness should keep reduce_sum"
     );
 
     let held = evaluate(&report.adopted_harness, &heldout, false);
@@ -249,7 +252,7 @@ fn beam_proposer_covers_triples() {
     assert!(distinct > 0);
     assert!(report.chosen_label.contains("beam") || report.chosen_label.contains("compose"));
     // The chosen harness must be at least a three-capability composition on
-    // this stream: sum4 (matrix), depth/refinements (deep), select_min
+    // this stream: reduce_sum (matrix), depth/refinements (deep), select_min
     // (select). The single actions cannot solve all three failures.
     assert!(
         report.candidates.iter().any(|candidate| {
@@ -257,12 +260,12 @@ fn beam_proposer_covers_triples() {
                 .harness
                 .compose_consumers
                 .iter()
-                .any(|c| c == "sum4")
+                .any(|c| c == "reduce_sum")
                 && (candidate.harness.max_depth > 2 || candidate.harness.max_refinements > 1)
                 && candidate.harness.families.iter().any(|f| f == "select_min")
         }),
-        "the beam should reach a sum4 + depth/refinements + select_min triple"
+        "the beam should reach a reduce_sum + depth/refinements + select_min triple"
     );
-    assert_eq!(ACTIONS.len(), 12);
+    assert_eq!(ACTIONS.len(), 10);
     let _ = generated_corpus();
 }

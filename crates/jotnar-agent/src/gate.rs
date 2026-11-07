@@ -145,6 +145,27 @@ pub fn run_outputs(
     Ok(out)
 }
 
+/// Run `state` on one example and return the concrete shape of each named
+/// output stream. This is the bridge from a listing to its geometry; a stream
+/// with an empty shape is a scalar.
+pub fn run_output_shapes(
+    state: &State,
+    example: &Example,
+    outputs: &[String],
+) -> Result<Vec<Vec<usize>>, String> {
+    let got = run_text(&state.text, &opts(), &feeds(example)?)
+        .map_err(|e| format!("run {}: {e}", state.name))?;
+    outputs
+        .iter()
+        .map(|name| {
+            let value = got
+                .get(name)
+                .ok_or_else(|| format!("run {}: missing output {name:?}", state.name))?;
+            Ok(value.shape().unwrap_or_default())
+        })
+        .collect()
+}
+
 /// Exact equality on every output and every example.
 pub fn bit_exact(
     candidate: &State,

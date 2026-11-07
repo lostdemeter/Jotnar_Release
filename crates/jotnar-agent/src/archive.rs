@@ -252,19 +252,19 @@ mod tests {
     fn keeps_diverse_correct_harnesses() {
         let mut archive = Archive::new(8, 1);
         assert!(matches!(
-            archive.insert(entry("sum4", harness(&[0]), 15, 5)),
+            archive.insert(entry("reduce_sum", harness(&[0]), 15, 5)),
             Insert::Added { .. }
         ));
         assert!(matches!(
-            archive.insert(entry("sum4+select", harness(&[0, 6]), 15, 6)),
+            archive.insert(entry("reduce_sum+select", harness(&[0, 6]), 15, 6)),
             Insert::Added { .. }
         ));
         assert!(matches!(
-            archive.insert(entry("sum4+select again", harness(&[0, 6]), 15, 6)),
+            archive.insert(entry("reduce_sum+select again", harness(&[0, 6]), 15, 6)),
             Insert::Duplicate
         ));
         assert!(matches!(
-            archive.insert(entry("sum4+depth", harness(&[0, 1]), 15, 6)),
+            archive.insert(entry("reduce_sum+depth", harness(&[0, 1]), 15, 6)),
             Insert::Added { .. }
         ));
         assert_eq!(archive.entries.len(), 3);
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn rejects_a_low_quality_duplicate_descriptor() {
         let mut archive = Archive::new(8, 100);
-        archive.insert(entry("sum4", harness(&[0]), 15, 6));
+        archive.insert(entry("reduce_sum", harness(&[0]), 15, 6));
         assert!(matches!(
             archive.insert(entry("tags off", harness(&[3]), 10, 2)),
             Insert::Rejected
@@ -285,13 +285,13 @@ mod tests {
     #[test]
     fn archive_roundtrips() {
         let mut archive = Archive::new(8, 1);
-        archive.insert(entry("sum4", harness(&[0]), 15, 6));
+        archive.insert(entry("reduce_sum", harness(&[0]), 15, 6));
         let path =
             std::env::temp_dir().join(format!("jotnar-agent-archive-{}.json", std::process::id()));
         archive.save(&path).unwrap();
         let loaded = Archive::load(&path).unwrap();
         assert_eq!(loaded.entries.len(), 1);
-        assert_eq!(loaded.entries[0].label, "sum4");
+        assert_eq!(loaded.entries[0].label, "reduce_sum");
         let _ = std::fs::remove_file(path);
     }
 }

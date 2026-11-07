@@ -77,7 +77,7 @@ fn top_action(scores: &[i64]) -> usize {
 }
 
 #[test]
-fn per_case_crossover_one_loop_fails_two_loops_succeed() {
+fn per_case_geometric_encoder_picks_reduce_sum() {
     let base = Harness::default();
     let all = all_cases();
     let report = run_round(&base, &all, &temp_dir("crossover"));
@@ -90,31 +90,21 @@ fn per_case_crossover_one_loop_fails_two_loops_succeed() {
 
     let linear = TaskEncoder::prior();
     let linear_scores = linear.scores(&task).unwrap();
-    assert_ne!(
+    assert_eq!(
         top_action(&linear_scores),
         0,
-        "linear encoder should pick the decoy, scores={linear_scores:?}"
+        "the geometric encoder should pick reduce_sum on a matrix field, scores={linear_scores:?}"
     );
 
     let looped = LoopedTaskEncoder::prior(3);
-    let one = looped.scores(&task, 1).unwrap();
-    assert_ne!(
-        top_action(&one),
-        0,
-        "one loop should still pick the decoy, scores={one:?}"
-    );
-    let two = looped.scores(&task, 2).unwrap();
-    assert_eq!(
-        top_action(&two),
-        0,
-        "two loops should pick sum4, scores={two:?}"
-    );
-    let three = looped.scores(&task, 3).unwrap();
-    assert_eq!(
-        top_action(&three),
-        0,
-        "three loops should retain sum4, scores={three:?}"
-    );
+    for loops in 1..=3 {
+        let scores = looped.scores(&task, loops).unwrap();
+        assert_eq!(
+            top_action(&scores),
+            0,
+            "loops={loops} should keep reduce_sum first, scores={scores:?}"
+        );
+    }
 }
 
 #[test]
@@ -160,7 +150,7 @@ fn family_budgets_override_the_heuristic() {
 }
 
 #[test]
-fn recurrence_region_preserves_the_crossover() {
+fn recurrence_region_keeps_reduce_sum_first() {
     let base = Harness::default();
     let all = all_cases();
     let report = run_round(&base, &all, &temp_dir("region"));
@@ -171,18 +161,16 @@ fn recurrence_region_preserves_the_crossover() {
         .unwrap();
     let task = jotnar_agent::task_encoder::task_vector(matrix, &base);
 
-    for (diag, cross) in [(4, -2), (5, -3), (6, -4)] {
+    for (diag, cross) in [(4, -2), (4, -4), (5, -3), (6, -4)] {
         let e = LoopedTaskEncoder::with_recurrence(&TaskEncoder::prior(), 3, diag, cross);
-        assert_ne!(
-            top_action(&e.scores(&task, 1).unwrap()),
-            0,
-            "diag={diag} cross={cross} should miss at one loop"
-        );
-        assert_eq!(
-            top_action(&e.scores(&task, 2).unwrap()),
-            0,
-            "diag={diag} cross={cross} should find sum4 at two loops"
-        );
+        for loops in 1..=2 {
+            let scores = e.scores(&task, loops).unwrap();
+            assert_eq!(
+                top_action(&scores),
+                0,
+                "diag={diag} cross={cross} loops={loops} should keep reduce_sum first, scores={scores:?}"
+            );
+        }
     }
 }
 

@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::driver::{evaluate, EvalReport, Experience, OutcomeKind, Proposer};
 use crate::harness::{Harness, Mutation};
 use crate::intent::Case;
-use crate::proposer::{apply_action, ACTIONS};
+use crate::proposer::{action_applies, apply_action, ACTIONS};
 use crate::view::{case_views, CaseView};
 
-pub const TASK_FEATURE_NAMES: [&str; 20] = [
+pub const TASK_FEATURE_NAMES: [&str; 32] = [
     "start_inputs",
     "start_outputs",
     "start_ops",
@@ -41,9 +41,21 @@ pub const TASK_FEATURE_NAMES: [&str; 20] = [
     "start_outputs_1",
     "start_outputs_4",
     "target_outputs_1",
-    "has_sum4",
+    "has_reduce_sum",
     "refinements",
     "tags_count",
+    "start_rank",
+    "target_rank",
+    "start_numel",
+    "target_numel",
+    "start_is_field",
+    "target_is_scalar",
+    "shape_match",
+    "reduce_applicable",
+    "start_imatmul",
+    "start_iselect",
+    "start_iadd",
+    "start_ireduce_sum",
 ];
 
 pub const LATENT_NAMES: [&str; 9] = [
@@ -54,7 +66,7 @@ pub const LATENT_NAMES: [&str; 9] = [
     "wrong_refusal",
     "start_is_four",
     "start_is_one",
-    "has_sum4",
+    "reduce_applicable",
     "target_outputs_1",
 ];
 
@@ -114,9 +126,21 @@ pub fn task_vector(view: &CaseView, base: &Harness) -> Vec<i64> {
         i64::from(view.start_outputs == 1),
         i64::from(view.start_outputs == 4),
         i64::from(view.target_outputs == 1),
-        i64::from(base.compose_consumers.iter().any(|c| c == "sum4")),
+        i64::from(base.compose_consumers.iter().any(|c| c == "reduce_sum")),
         base.max_refinements as i64,
         view.tags.len() as i64,
+        view.start_rank as i64,
+        view.target_rank as i64,
+        view.start_numel as i64,
+        view.target_numel as i64,
+        i64::from(view.start_is_field),
+        i64::from(view.target_is_scalar),
+        i64::from(view.shape_match),
+        i64::from(view.start_is_field && view.target_is_scalar && view.start_outputs == 1),
+        i64::from(view.start_imatmul),
+        i64::from(view.start_iselect),
+        i64::from(view.start_iadd),
+        i64::from(view.start_ireduce_sum),
     ]
 }
 
@@ -202,13 +226,13 @@ impl TaskEncoder {
         w_enc[5][15] = 1; // start_outputs_4
                           // start_is_one is intentionally zero in the input block; it is
                           // reinjected in the looped encoder and must grow across loops.
-        w_enc[7][17] = 1; // has_sum4
+        w_enc[7][27] = 1; // reduce_applicable
         w_enc[8][16] = 1; // target_outputs_1
 
         let mut w_out = vec![vec![0i64; d]; ACTIONS.len()];
-        // sum4: a four-output start. At one loop start_is_four is small; the
-        // shared block grows it, so this score crosses the stable decoy.
-        w_out[0] = vec![0, 0, 0, 0, 2, 4, 0, -20, 0];
+        // reduce_sum: a shaped start with a scalar target. The field signal
+        // grows with the geometric channel; the stable decoy does not.
+        w_out[0] = vec![0, 0, 0, 0, 2, 0, 0, 12, 2];
         // depth: the one-output deep fix. It grows with start_is_one.
         w_out[1] = vec![0, 0, 0, 0, 2, 0, 6, 0, 0];
         // refine off: weak probe.
@@ -467,7 +491,7 @@ impl Proposer for TaskEncoder {
                 if scores[idx] <= 0 {
                     break;
                 }
-                if apply_action(base, idx).is_some() {
+                if apply_action(base, idx).is_some() && action_applies(idx, &task) {
                     selected.insert(idx);
                     break;
                 }

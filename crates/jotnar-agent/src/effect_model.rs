@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::driver::{EvalReport, Experience, OutcomeKind, Proposer};
 use crate::effects::CaseEffects;
 use crate::harness::{Harness, Mutation};
-use crate::proposer::{action_applies, apply_action, mask_inapplicable_consumers, ACTIONS};
+use crate::proposer::{action_applies, apply_action, ACTIONS};
 use crate::task_encoder::{task_vector, TaskEncoder, LATENT_NAMES, TASK_FEATURE_NAMES};
 use crate::view::CaseView;
 
@@ -73,16 +73,14 @@ impl EffectModel {
         let lr = lr.max(1);
         for _ in 0..epochs.max(1) {
             for case in effects {
-                let start_outputs = case.task.get(1).copied().unwrap_or(0);
-                let mut scores = self.scores(&case.task);
-                mask_inapplicable_consumers(&case.task, &mut scores);
+                let scores = self.scores(&case.task);
                 let positives: Vec<usize> = case
                     .actions
                     .iter()
                     .filter(|action| {
                         action.applicable
                             && action.correct
-                            && action_applies(action.index, start_outputs)
+                            && action_applies(action.index, &case.task)
                     })
                     .map(|action| action.index)
                     .collect();
@@ -92,7 +90,7 @@ impl EffectModel {
                     .filter(|action| {
                         action.applicable
                             && !action.correct
-                            && action_applies(action.index, start_outputs)
+                            && action_applies(action.index, &case.task)
                     })
                     .map(|action| action.index)
                     .collect();
@@ -123,12 +121,11 @@ impl EffectModel {
         let correct = effects
             .iter()
             .filter(|case| {
-                let mut scores = self.scores(&case.task);
-                mask_inapplicable_consumers(&case.task, &mut scores);
+                let scores = self.scores(&case.task);
                 let top = case
                     .actions
                     .iter()
-                    .filter(|action| action.applicable)
+                    .filter(|action| action.applicable && action_applies(action.index, &case.task))
                     .max_by_key(|action| scores[action.index])
                     .map(|action| action.index)
                     .unwrap_or(0);
@@ -159,6 +156,9 @@ impl EffectModel {
         self.w.truncate(ACTIONS.len());
         while self.w.len() < ACTIONS.len() {
             self.w.push(vec![0; TASK_FEATURE_NAMES.len()]);
+        }
+        for row in &mut self.w {
+            row.resize(TASK_FEATURE_NAMES.len(), 0);
         }
         self.b.truncate(ACTIONS.len());
         while self.b.len() < ACTIONS.len() {
@@ -252,13 +252,14 @@ impl Proposer for WorldModelProposer {
                 continue;
             }
             let task = task_vector(view, base);
-            let mut scores = self.model.scores(&task);
-            mask_inapplicable_consumers(&task, &mut scores);
+            let scores = self.model.scores(&task);
             let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
             order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
             let applicable: Vec<usize> = order
                 .into_iter()
-                .filter(|action| apply_action(base, *action).is_some())
+                .filter(|action| {
+                    apply_action(base, *action).is_some() && action_applies(*action, &task)
+                })
                 .collect();
             if let Some(top) = applicable.first().copied() {
                 selected.insert(top);

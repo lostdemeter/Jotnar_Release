@@ -1,7 +1,7 @@
 //! A state-dependent action-effect world model.
 //!
 //! The first effect model was `(task, action) -> outcome`; it could not tell
-//! that `sum4` is useless once the consumer is already present, or that after
+//! that `reduce_sum` is useless once the consumer is already present, or that after
 //! a composition the remaining fix is `depth + 1`. This model is
 //! `(task, harness_state, action) -> outcome`:
 //!
@@ -23,9 +23,7 @@ use crate::driver::{EvalReport, Experience, OutcomeKind, Proposer};
 use crate::effect_model::EffectModel;
 use crate::effects::StateEffectRow;
 use crate::harness::{Harness, Mutation, STATE_FEATURE_NAMES};
-use crate::proposer::{
-    action_applies, apply_action, apply_action_set, mask_inapplicable_consumers, ACTIONS,
-};
+use crate::proposer::{action_applies, apply_action, apply_action_set, ACTIONS};
 use crate::task_encoder::{task_vector, TASK_FEATURE_NAMES};
 use crate::view::CaseView;
 
@@ -55,7 +53,7 @@ impl StateEffectModel {
         // transition fit can move them, and `apply_action` still refuses
         // actions that cannot be applied.
         let s = TASK_FEATURE_NAMES.len();
-        let has_sum4 = s;
+        let has_reduce_sum = s;
         let has_select_min = s + 1;
         let has_select_max = s + 2;
         let has_saxpy_dup = s + 3;
@@ -63,7 +61,7 @@ impl StateEffectModel {
         let has_matmul2_dup = s + 5;
         let refinements = s + 9;
         let depth_cap = s + 12;
-        w[0][has_sum4] = -64;
+        w[0][has_reduce_sum] = -64;
         w[1][depth_cap] = -64;
         w[4][has_select_max] = -64;
         w[5][refinements] = -8;
@@ -119,20 +117,18 @@ impl StateEffectModel {
         for _ in 0..epochs.max(1) {
             for group in groups.values() {
                 let sample = &group[0];
-                let start_outputs = sample.task.get(1).copied().unwrap_or(0);
                 let positives: Vec<&&StateEffectRow> = group
                     .iter()
-                    .filter(|row| row.correct && action_applies(row.action, start_outputs))
+                    .filter(|row| row.correct && action_applies(row.action, &sample.task))
                     .collect();
                 let negatives: Vec<&&StateEffectRow> = group
                     .iter()
-                    .filter(|row| row.wrong && action_applies(row.action, start_outputs))
+                    .filter(|row| row.wrong && action_applies(row.action, &sample.task))
                     .collect();
                 if positives.is_empty() || negatives.is_empty() {
                     continue;
                 }
-                let mut scores = self.scores(&sample.task, &sample.state);
-                mask_inapplicable_consumers(&sample.task, &mut scores);
+                let scores = self.scores(&sample.task, &sample.state);
                 let best_positive = positives
                     .iter()
                     .max_by_key(|row| scores[row.action])
@@ -168,29 +164,34 @@ impl StateEffectModel {
         let mut hits = 0usize;
         for group in groups.values() {
             let sample = &group[0];
-            let start_outputs = sample.task.get(1).copied().unwrap_or(0);
             let has_positive = group
                 .iter()
-                .any(|row| row.correct && action_applies(row.action, start_outputs));
+                .any(|row| row.correct && action_applies(row.action, &sample.task));
             let has_negative = group
                 .iter()
-                .any(|row| row.wrong && action_applies(row.action, start_outputs));
+                .any(|row| row.wrong && action_applies(row.action, &sample.task));
             if !has_positive || !has_negative {
                 continue;
             }
             discriminating += 1;
-            let mut scores = self.scores(&sample.task, &sample.state);
-            mask_inapplicable_consumers(&sample.task, &mut scores);
-            let top = (0..scores.len())
-                .max_by_key(|action| scores[*action])
-                .unwrap_or(0);
-            if group
+            let scores = self.scores(&sample.task, &sample.state);
+            // Rank only the actions the transition table actually offers from
+            // this state. An action that `apply_action` would reject (already
+            // present, inapplicable shape) is not a valid choice.
+            let top = group
                 .iter()
-                .find(|row| row.action == top)
-                .map(|row| row.correct)
-                .unwrap_or(false)
-            {
-                hits += 1;
+                .filter(|row| action_applies(row.action, &sample.task))
+                .max_by_key(|row| scores[row.action])
+                .map(|row| row.action);
+            if let Some(top) = top {
+                if group
+                    .iter()
+                    .find(|row| row.action == top)
+                    .map(|row| row.correct)
+                    .unwrap_or(false)
+                {
+                    hits += 1;
+                }
             }
         }
         if discriminating == 0 {
@@ -218,6 +219,9 @@ impl StateEffectModel {
         self.w.truncate(ACTIONS.len());
         while self.w.len() < ACTIONS.len() {
             self.w.push(vec![0; STATE_MODEL_INPUTS]);
+        }
+        for row in &mut self.w {
+            row.resize(STATE_MODEL_INPUTS, 0);
         }
         self.b.truncate(ACTIONS.len());
         while self.b.len() < ACTIONS.len() {
@@ -304,6 +308,9 @@ where
                 if node.subset.contains(&action) {
                     continue;
                 }
+                if !action_applies(action, task) {
+                    continue;
+                }
                 let Some(mutation) = apply_action(&node.harness, action) else {
                     continue;
                 };
@@ -342,11 +349,11 @@ where
 /// generalization potential without changing exact correctness.
 fn capability_group(action: usize) -> usize {
     match action {
-        0 | 10 | 11 => 0, // compose consumers (sum4, sum9, sum16)
-        1 => 1,           // depth
-        2 | 3 => 2,       // refine/tags policy
-        5 => 3,           // refinements
-        _ => 4,           // family adds
+        0 => 0,     // geometric compose consumer (reduce_sum)
+        1 => 1,     // depth
+        2 | 3 => 2, // refine/tags policy
+        5 => 3,     // refinements
+        _ => 4,     // family adds
     }
 }
 
@@ -397,11 +404,16 @@ where
 {
     let beam = beam.max(1);
     let max_depth = max_depth.max(1);
-    // Compose-consumer scores are only meaningful when the arity matches; mask
-    // the others so the learned ranking is among applicable actions.
+    // A geometric action is only meaningful when its shape contract holds for
+    // this case. Mask the inapplicable ones so the learned ranking is among
+    // applicable actions. This is a shape rule, not a per-arity table.
     let scored = |task: &[i64], state: &[i64]| {
         let mut scores = score(task, state);
-        mask_inapplicable_consumers(task, &mut scores);
+        for (action, value) in scores.iter_mut().enumerate() {
+            if !action_applies(action, task) {
+                *value = i64::MIN / 4;
+            }
+        }
         scores
     };
     let mut out: Vec<Mutation> = Vec::new();
@@ -433,7 +445,9 @@ where
         order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
         let applicable: Vec<usize> = order
             .into_iter()
-            .filter(|action| apply_action(base, *action).is_some())
+            .filter(|action| {
+                apply_action(base, *action).is_some() && action_applies(*action, &task)
+            })
             .collect();
         if let Some(&top) = applicable.first() {
             union.insert(top);
@@ -531,7 +545,7 @@ where
     }
 
     // Exhaustive singles: the safety net for an action the learned model has
-    // never seen (e.g. sum9 before any 9-output training case exists). The
+    // never seen (e.g. a geometric consumer before any shaped training case). The
     // ablation disables it to measure the learned ranking alone.
     if options.include_singles {
         for (action, label) in ACTIONS.iter().enumerate() {

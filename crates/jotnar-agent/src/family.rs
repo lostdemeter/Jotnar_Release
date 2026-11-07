@@ -299,196 +299,93 @@ pub fn reduce_listing(n: usize) -> String {
     lines.join("\n") + "\n"
 }
 
-pub fn build_matmul2(_: &Params) -> Result<String, String> {
-    Ok("\
-# 2x2 matrix multiply.
-IN a00
-IN a01
-IN a10
-IN a11
-IN b00
-IN b01
-IN b10
-IN b11
+/// `n x n` integer matrix multiply as a shaped field: `I:HW, I:HW -> I:HW`.
+pub fn build_matmul_n(n: usize) -> String {
+    format!(
+        "# {n}x{n} integer matrix multiply (shaped field).\n\
+         IN A AS I:HW\n\
+         IN B AS I:HW\n\
+         \n\
+         C = IMATMUL(A, B)\n"
+    )
+}
 
-t00 = IMUL(a00, b00)
-t01 = IMUL(a01, b10)
-c00 = IADD(t00, t01)
-t10 = IMUL(a10, b00)
-t11 = IMUL(a11, b10)
-c10 = IADD(t10, t11)
-t02 = IMUL(a00, b01)
-t03 = IMUL(a01, b11)
-c01 = IADD(t02, t03)
-t12 = IMUL(a10, b01)
-t13 = IMUL(a11, b11)
-c11 = IADD(t12, t13)
-"
-    .to_string())
+pub fn build_matmul_n_sum(n: usize) -> String {
+    let mut text = build_matmul_n(n);
+    text.push_str("\nOUT = IREDUCE_SUM(C)\n");
+    text
+}
+
+pub fn build_matmul_n_dup(n: usize) -> String {
+    let mut text = build_matmul_n(n);
+    text.push_str("\ndup = IMATMUL(A, B)\n");
+    text
+}
+
+pub fn build_matmul2(_: &Params) -> Result<String, String> {
+    Ok(build_matmul_n(2))
 }
 
 pub fn build_matmul2_sum(_: &Params) -> Result<String, String> {
-    let mut text = build_matmul2(&Params::new())?;
-    text.push_str("\nt0 = IADD(c00, c01)\nt1 = IADD(c10, c11)\nOUT = IADD(t0, t1)\n");
-    Ok(text)
+    Ok(build_matmul_n_sum(2))
+}
+
+pub fn build_matmul2_colsum(_: &Params) -> Result<String, String> {
+    // Exact integer addition is associative, so the column-sum order is the
+    // same field reduction. The label stays for the corpus; the geometry is
+    // one all-axis reduction, not a second consumer.
+    Ok(build_matmul_n_sum(2))
+}
+
+pub fn build_matmul2_dup(_: &Params) -> Result<String, String> {
+    Ok(build_matmul_n_dup(2))
 }
 
 pub fn build_matmul3(_: &Params) -> Result<String, String> {
-    let mut lines = vec!["# 3x3 matrix multiply.".to_string()];
-    for i in 0..3 {
-        for j in 0..3 {
-            lines.push(format!("IN a{i}{j}"));
-        }
-    }
-    for i in 0..3 {
-        for j in 0..3 {
-            lines.push(format!("IN b{i}{j}"));
-        }
-    }
-    lines.push(String::new());
-    for i in 0..3 {
-        for j in 0..3 {
-            let t0 = format!("t{i}{j}0");
-            let t1 = format!("t{i}{j}1");
-            let t2 = format!("t{i}{j}2");
-            let s = format!("s{i}{j}");
-            lines.push(format!("{t0} = IMUL(a{i}0, b0{j})"));
-            lines.push(format!("{t1} = IMUL(a{i}1, b1{j})"));
-            lines.push(format!("{s} = IADD({t0}, {t1})"));
-            lines.push(format!("{t2} = IMUL(a{i}2, b2{j})"));
-            lines.push(format!("c{i}{j} = IADD({s}, {t2})"));
-        }
-    }
-    Ok(lines.join("\n") + "\n")
+    Ok(build_matmul_n(3))
 }
 
 pub fn build_matmul3_sum(_: &Params) -> Result<String, String> {
-    let mut text = build_matmul3(&Params::new())?;
-    text.push_str(
-        "\ns0 = IADD(c00, c01)\ns1 = IADD(c02, c10)\ns2 = IADD(c11, c12)\n\
-         s3 = IADD(c20, c21)\ns4 = IADD(s0, s1)\ns5 = IADD(s2, s3)\n\
-         s6 = IADD(s4, s5)\nOUT = IADD(s6, c22)\n",
-    );
-    Ok(text)
+    Ok(build_matmul_n_sum(3))
 }
 
 pub fn build_matmul3_dup(_: &Params) -> Result<String, String> {
-    let mut text = build_matmul3(&Params::new())?;
-    text.push_str("\ndup = IMUL(a00, b00)\n");
-    Ok(text)
+    Ok(build_matmul_n_dup(3))
 }
 
-/// Append a left-to-right sum of `terms` to `text`, naming the final stream
-/// `OUT`. This is the shared shape behind the multi-output consumers.
-fn append_sum(text: &mut String, terms: &[String], prefix: &str) {
-    if terms.is_empty() {
-        return;
-    }
-    let mut acc = terms[0].clone();
-    for (i, term) in terms.iter().enumerate().skip(1) {
-        let name = if i + 1 == terms.len() {
-            "OUT".to_string()
-        } else {
-            format!("{prefix}{i}")
-        };
-        text.push_str(&format!("\n{name} = IADD({acc}, {term})"));
-        acc = name;
-    }
-    text.push('\n');
-}
-
-/// An `n`-lane elementwise fan: `n` inputs, `n` doubled outputs.
+/// An `n`-lane integer vector as one shaped field: `I:SEQ -> I:SEQ`.
 pub fn build_vec(n: usize) -> String {
-    let mut lines = vec![format!("# {n}-lane elementwise fan; each lane is doubled.")];
-    for i in 0..n {
-        lines.push(format!("IN a{i}"));
-    }
-    lines.push(String::new());
-    for i in 0..n {
-        lines.push(format!("o{i} = IADD(a{i}, a{i})"));
-    }
-    lines.join("\n") + "\n"
+    format!(
+        "# {n}-lane integer vector (shaped field).\n\
+         IN A AS I:SEQ\n\
+         \n\
+         C = IADD(A, A)\n"
+    )
 }
 
-/// The fan plus a single-output sum of its lanes. This is the training shape
-/// that teaches a wider compose consumer (`sum9`, `sum16`) without reusing the
-/// distant held-out shape.
+/// The vector plus the geometric all-element reduction.
 pub fn build_vec_sum(n: usize) -> String {
     let mut text = build_vec(n);
-    let terms: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
-    append_sum(&mut text, &terms, "s");
+    text.push_str("\nOUT = IREDUCE_SUM(C)\n");
     text
 }
 
-/// An `n` x `n` matrix multiply with `n*n` named outputs `c{i}{j}`.
-pub fn build_matmul_n(n: usize) -> String {
-    let mut lines = vec![format!("# {n}x{n} matrix multiply.")];
-    for i in 0..n {
-        for j in 0..n {
-            lines.push(format!("IN a{i}{j}"));
-        }
-    }
-    for i in 0..n {
-        for j in 0..n {
-            lines.push(format!("IN b{i}{j}"));
-        }
-    }
-    lines.push(String::new());
-    for i in 0..n {
-        for j in 0..n {
-            let t0 = format!("t{i}{j}0");
-            lines.push(format!("{t0} = IMUL(a{i}0, b0{j})"));
-            let mut acc = t0;
-            for k in 1..n {
-                let p = format!("t{i}{j}{k}");
-                lines.push(format!("{p} = IMUL(a{i}{k}, b{k}{j})"));
-                let name = if k + 1 == n {
-                    format!("c{i}{j}")
-                } else {
-                    format!("s{i}{j}{k}")
-                };
-                lines.push(format!("{name} = IADD({acc}, {p})"));
-                acc = name;
-            }
-        }
-    }
-    lines.join("\n") + "\n"
-}
-
-/// The matrix product plus a sum of all `n*n` outputs.
-pub fn build_matmul_n_sum(n: usize) -> String {
-    let mut text = build_matmul_n(n);
-    let terms: Vec<String> = (0..n)
-        .flat_map(|i| (0..n).map(move |j| format!("c{i}{j}")))
-        .collect();
-    append_sum(&mut text, &terms, "s");
-    text
-}
-
-/// A wide elementwise select: `2n` inputs, `n` outputs `max(a_i, b_i)`.
+/// An `n`-lane elementwise maximum as one shaped field.
 pub fn build_select_wide(n: usize) -> String {
-    let mut lines = vec![format!(
-        "# {n}-lane elementwise maximum via explicit predicates."
-    )];
-    for i in 0..n {
-        lines.push(format!("IN a{i}"));
-    }
-    for i in 0..n {
-        lines.push(format!("IN b{i}"));
-    }
-    lines.push(String::new());
-    for i in 0..n {
-        lines.push(format!("c{i} = ILT(a{i}, b{i})"));
-        lines.push(format!("m{i} = ISELECT(c{i}, b{i}, a{i})"));
-    }
-    lines.join("\n") + "\n"
+    format!(
+        "# {n}-lane elementwise maximum via explicit predicates (shaped field).\n\
+         IN A AS I:SEQ\n\
+         IN B AS I:SEQ\n\
+         \n\
+         C = ILT(A, B)\n\
+         M = ISELECT(C, B, A)\n"
+    )
 }
 
-/// The wide select plus a sum of its `n` outputs.
+/// The wide select plus the geometric all-element reduction.
 pub fn build_select_wide_sum(n: usize) -> String {
     let mut text = build_select_wide(n);
-    let terms: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
-    append_sum(&mut text, &terms, "s");
+    text.push_str("\nOUT = IREDUCE_SUM(M)\n");
     text
 }
 
@@ -526,10 +423,10 @@ pub fn build_select16_sum(_: &Params) -> Result<String, String> {
 
 pub fn build_select(_: &Params) -> Result<String, String> {
     Ok("\
-# Two-way select.
-IN C
-IN A
-IN B
+# Two-way select on an integer sequence.
+IN C AS I:SEQ
+IN A AS I:SEQ
+IN B AS I:SEQ
 
 OUT = ISELECT(C, A, B)
 "
@@ -539,8 +436,8 @@ OUT = ISELECT(C, A, B)
 pub fn build_select_max(_: &Params) -> Result<String, String> {
     Ok("\
 # Elementwise maximum via an explicit integer predicate.
-IN A
-IN B
+IN A AS I:SEQ
+IN B AS I:SEQ
 
 C = ILT(A, B)
 OUT = ISELECT(C, B, A)
@@ -551,50 +448,13 @@ OUT = ISELECT(C, B, A)
 pub fn build_select_min(_: &Params) -> Result<String, String> {
     Ok("\
 # Elementwise minimum via an explicit integer predicate.
-IN A
-IN B
+IN A AS I:SEQ
+IN B AS I:SEQ
 
 C = ILT(A, B)
 OUT = ISELECT(C, A, B)
 "
     .to_string())
-}
-
-pub fn build_matmul2_colsum(_: &Params) -> Result<String, String> {
-    Ok("\
-# 2x2 product, summed by columns then combined.
-IN a00
-IN a01
-IN a10
-IN a11
-IN b00
-IN b01
-IN b10
-IN b11
-
-t00 = IMUL(a00, b00)
-t01 = IMUL(a01, b10)
-c00 = IADD(t00, t01)
-t10 = IMUL(a10, b00)
-t11 = IMUL(a11, b10)
-c10 = IADD(t10, t11)
-t02 = IMUL(a00, b01)
-t03 = IMUL(a01, b11)
-c01 = IADD(t02, t03)
-t12 = IMUL(a10, b01)
-t13 = IMUL(a11, b11)
-c11 = IADD(t12, t13)
-c0 = IADD(c00, c10)
-c1 = IADD(c01, c11)
-OUT = IADD(c0, c1)
-"
-    .to_string())
-}
-
-pub fn build_matmul2_dup(_: &Params) -> Result<String, String> {
-    let mut text = build_matmul2(&Params::new())?;
-    text.push_str("\ndup = IMUL(a00, b00)\n");
-    Ok(text)
 }
 
 // ---------------------------------------------------------------------------

@@ -324,7 +324,9 @@ fn qwen_end_to_end_training_stays_below_zero_init() {
         })
         .fold(0.0f64, f64::max);
     let warm = qwen.fit_readouts(&samples, 1e-3, 3);
-    let after = qwen.fit_end_to_end(&samples, 20, 0.001);
+    // The geometric feature vector is wider; use a smaller step so the branch
+    // update stays stable relative to the readout warm start.
+    let after = qwen.fit_end_to_end(&samples, 20, 0.0001);
     assert!(warm.is_finite());
     assert!(after.is_finite());
     assert!(

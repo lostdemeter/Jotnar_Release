@@ -23,21 +23,23 @@ fn proposer_is_an_ordinary_listing() {
 }
 
 #[test]
-fn proposer_scores_choose_sum4_for_the_base_failure() {
+fn proposer_scores_choose_reduce_sum_for_the_base_failure() {
     let base = Harness::default();
     let report = run_round(&base, &cases(), &temp_dir("score"));
     let p = JotnarProposer::prior();
     let proposals = p.propose(&base, &report.base, &[]);
     assert!(
-        proposals.iter().any(|m| m.label.contains("sum4")),
-        "expected sum4 in {:?}",
+        proposals.iter().any(|m| m.label.contains("reduce_sum")),
+        "expected reduce_sum in {:?}",
         proposals.iter().map(|m| &m.label).collect::<Vec<_>>()
     );
     let f = jotnar_agent::proposer::features(&base, &report.base, &[]);
-    assert_eq!(f[1], 1, "the refused compose case starts with four outputs");
     let scores = p.scores(&f).unwrap();
     assert_eq!(scores.len(), ACTIONS.len());
-    assert!(scores[0] > scores[1], "sum4 should outrank depth here");
+    assert!(
+        scores[0] > scores[1],
+        "reduce_sum should outrank depth here, scores={scores:?}"
+    );
 }
 
 #[test]
@@ -61,17 +63,17 @@ fn fit_from_report_reinforces_the_winning_action() {
     let base = Harness::default();
     let calibration = run_round(&base, &calibration_cases(), &temp_dir("calibration"));
     let mut p = JotnarProposer::prior();
-    let before = p.weights[0][1];
+    let before = p.weights[0][0];
     let changes = p.fit_from_report(&base, &calibration, &[], 1);
     assert!(
-        changes.iter().any(|c| c.contains("sum4")),
-        "expected a sum4 update, got {changes:?}"
+        changes.iter().any(|c| c.contains("reduce_sum")),
+        "expected a reduce_sum update, got {changes:?}"
     );
     assert!(
-        p.weights[0][1] > before,
-        "the sum4 feature weight should rise"
+        p.weights[0][0] > before,
+        "the reduce_sum refusal weight should rise"
     );
-    assert!(p.bias[0] > 0, "the sum4 bias should rise");
+    assert!(p.bias[0] > 0, "the reduce_sum bias should rise");
 }
 
 #[test]

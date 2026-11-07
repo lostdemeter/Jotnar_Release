@@ -122,91 +122,24 @@ fn compose(state: &State, consumer: &str) -> Result<State, String> {
                 .with_family("compose:add2".to_string(), BTreeMap::new());
             Ok(s)
         }
-        "sum4" => {
-            if outs.len() != 4 {
+        "reduce_sum" => {
+            if outs.len() != 1 {
                 return Err(format!(
-                    "compose[sum4] needs exactly four outputs, got {}",
+                    "compose[reduce_sum] needs exactly one output stream, got {}",
                     outs.len()
                 ));
             }
-            let mut names = outs;
+            let mut name = outs[0].clone();
             let mut text = state.text.clone();
-            for name in names.iter_mut() {
-                if name == "OUT" {
-                    let fresh = fresh_name(&text, "c");
-                    text = rename_token(&text, name, &fresh);
-                    *name = fresh;
-                }
+            if name == "OUT" {
+                let fresh = fresh_name(&text, "c");
+                text = rename_token(&text, &name, &fresh);
+                name = fresh;
             }
-            text.push_str(&format!(
-                "\nt0 = IADD({}, {})\nt1 = IADD({}, {})\nOUT = IADD(t0, t1)\n",
-                names[0], names[1], names[2], names[3]
-            ));
-            let s = State::new(format!("compose[sum4]({})", state.name), text)?
+            text.push_str(&format!("\nOUT = IREDUCE_SUM({name})\n"));
+            let s = State::new(format!("compose[reduce_sum]({})", state.name), text)?
                 .with_kind(StateKind::Composed)
-                .with_family("compose:sum4".to_string(), BTreeMap::new());
-            Ok(s)
-        }
-        "sum9" => {
-            if outs.len() != 9 {
-                return Err(format!(
-                    "compose[sum9] needs exactly nine outputs, got {}",
-                    outs.len()
-                ));
-            }
-            let mut names = outs;
-            let mut text = state.text.clone();
-            for name in names.iter_mut() {
-                if name == "OUT" {
-                    let fresh = fresh_name(&text, "c");
-                    text = rename_token(&text, name, &fresh);
-                    *name = fresh;
-                }
-            }
-            let mut acc = names[0].clone();
-            for (i, term) in names.iter().enumerate().skip(1) {
-                let name = if i + 1 == names.len() {
-                    "OUT".to_string()
-                } else {
-                    fresh_name(&text, "s9")
-                };
-                text.push_str(&format!("\n{name} = IADD({acc}, {term})\n"));
-                acc = name;
-            }
-            let s = State::new(format!("compose[sum9]({})", state.name), text)?
-                .with_kind(StateKind::Composed)
-                .with_family("compose:sum9".to_string(), BTreeMap::new());
-            Ok(s)
-        }
-        "sum16" => {
-            if outs.len() != 16 {
-                return Err(format!(
-                    "compose[sum16] needs exactly sixteen outputs, got {}",
-                    outs.len()
-                ));
-            }
-            let mut names = outs;
-            let mut text = state.text.clone();
-            for name in names.iter_mut() {
-                if name == "OUT" {
-                    let fresh = fresh_name(&text, "c");
-                    text = rename_token(&text, name, &fresh);
-                    *name = fresh;
-                }
-            }
-            let mut acc = names[0].clone();
-            for (i, term) in names.iter().enumerate().skip(1) {
-                let name = if i + 1 == names.len() {
-                    "OUT".to_string()
-                } else {
-                    fresh_name(&text, "s16")
-                };
-                text.push_str(&format!("\n{name} = IADD({acc}, {term})\n"));
-                acc = name;
-            }
-            let s = State::new(format!("compose[sum16]({})", state.name), text)?
-                .with_kind(StateKind::Composed)
-                .with_family("compose:sum16".to_string(), BTreeMap::new());
+                .with_family("compose:reduce_sum".to_string(), BTreeMap::new());
             Ok(s)
         }
         other => Err(format!("unknown compose consumer {other:?}")),

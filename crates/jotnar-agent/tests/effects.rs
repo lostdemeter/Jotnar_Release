@@ -14,12 +14,15 @@ fn action_effects_expose_the_solving_action() {
         !matrix.base_correct,
         "the generated matrix case starts wrong"
     );
-    let sum4 = matrix
+    let reduce = matrix
         .actions
         .iter()
-        .find(|action| action.label.contains("sum4"))
-        .expect("sum4 action");
-    assert!(sum4.correct, "sum4 should solve the generated matrix case");
+        .find(|action| action.label.contains("reduce_sum"))
+        .expect("reduce_sum action");
+    assert!(
+        reduce.correct,
+        "reduce_sum should solve the generated matrix case"
+    );
 
     let saxpy = effects
         .iter()

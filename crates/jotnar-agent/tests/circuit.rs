@@ -44,12 +44,33 @@ fn base_harness_solves_two_and_refuses_two() {
 }
 
 #[test]
-fn sum4_is_the_bounded_extension_that_solves_matmul() {
+fn reduce_sum_solves_shaped_hard_cases() {
     let mut h = Harness::default();
-    h.compose_consumers.push("sum4".to_string());
+    h.compose_consumers.push("reduce_sum".to_string());
+    for case in jotnar_agent::hard_cases() {
+        if !matches!(
+            case.intent.id.as_str(),
+            "hard-matmul3-sum" | "hard-matmul4-sum" | "hard-select16-sum"
+        ) {
+            continue;
+        }
+        let res = solve(&case.intent, &case.examples, &h);
+        eprintln!(
+            "{}: {:?}",
+            case.intent.id,
+            res.as_ref().map(|r| r.certificate.outcome.clone())
+        );
+        assert!(res.is_ok(), "{}: {:?}", case.intent.id, res.err());
+    }
+}
+
+#[test]
+fn reduce_sum_is_the_bounded_extension_that_solves_matmul() {
+    let mut h = Harness::default();
+    h.compose_consumers.push("reduce_sum".to_string());
     let c = case("compose-matmul");
-    let res = solve(&c.intent, &c.examples, &h).expect("sum4 compose");
-    assert!(res.steps.iter().any(|s| s.name.contains("sum4")));
+    let res = solve(&c.intent, &c.examples, &h).expect("reduce_sum compose");
+    assert!(res.steps.iter().any(|s| s.name.contains("reduce_sum")));
     assert!(res.certificate.validate().is_empty());
     assert_eq!(res.certificate.outcome, jotnar_lab::model::Outcome::Solved);
 

@@ -32,7 +32,7 @@ A state is an assembled `jotnar::BoundProgram` plus provenance
 (`family`, `params`, `kind`). The bounded steps are:
 
 - `fit` — instantiate a family from the target's parameters
-- `compose` — bind the current output into a consumer (`add2`, `sum4`)
+- `compose` — bind the current output into a consumer (`add2`, `reduce_sum`)
 - `refine` — conservative CSE, accepted only if outputs stay exact
 
 The gate runs both the candidate and the target on the supplied examples and
@@ -46,10 +46,10 @@ The first proposer is itself a Jotnar listing. It is a tiny linear scoring
 unit:
 
 - inputs: 15 evidence features (`wrong_refusal`, `wrong_refusal_4out`,
-  `wrong_refusal_deep`, `correct`, `steps`, `has_sum4`, `depth`,
+  `wrong_refusal_deep`, `correct`, `steps`, `has_reduce_sum`, `depth`,
   `refinements`, …)
 - outputs: one integer score per bounded harness action
-  (`add compose[sum4]`, `depth + 1`, `refine off`, `tags off`,
+  (`add compose[reduce_sum]`, `depth + 1`, `refine off`, `tags off`,
   `add family select_max`, `refinements + 1`)
 - the driver reads the top applicable scores and probes those actions
 
@@ -93,7 +93,7 @@ four loops or ignores the deep case. See [`docs/DORY.md`](docs/DORY.md) for the
 2×2 experiment.
 
 The headline experiment: fit on four cases, hold out the deep `refine-s16`
-case, then evaluate on all five. The fit reinforces only `sum4`; the deep fix
+case, then evaluate on all five. The fit reinforces only `reduce_sum`; the deep fix
 is not taught. **One loop still picks the decoy** (`tags off`) as its second
 proposal; **two and four loops pick `refinements + 1`** and adopt the composed
 fix. That is a generalization effect from the repeated block, not memorization
@@ -118,7 +118,7 @@ cargo run -q -p jotnar-agent -- run --out runs/corpus \
 ```
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  compose: add compose[sum4] + refinements + 1
+selected:  compose: add compose[reduce_sum] + refinements + 1
 ```
 
 The corpus adds six per-family wrong-refusal features. The ordinary 5-case
@@ -149,7 +149,7 @@ cargo run -q -p jotnar-agent -- run --out runs/corpus \
 ```
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  case-union: add compose[sum4] + refinements + 1
+selected:  case-union: add compose[reduce_sum] + refinements + 1
 ```
 
 On the 5-case stream it also adopts 5/5. The matrix case and the deep case are
@@ -180,7 +180,7 @@ recurrent block with the task vector reinjected every loop.
 The prior is deliberately loop-sensitive in **two families**:
 
 - matrix: the linear/1-loop encoder picks the stable `target_outputs_1`
-  decoy; `start_is_four` grows and `sum4` takes over at two loops.
+  decoy; `start_is_four` grows and `reduce_sum` takes over at two loops.
 - deep elementwise: the same decoy wins at one loop; `start_is_one` grows and
   a deep action takes over at two loops.
 
@@ -340,7 +340,7 @@ next co-training target.
 ## The action-effect world model
 
 The teacher gives action effects; the world model learns them. `EffectModel`
-is a Jotnar-native linear map from the 20 task features to 12 action scores,
+is a Jotnar-native linear map from the 32 geometric task features to 10 action scores,
 trained on the exact `gen-effects` table.
 
 ```sh
@@ -392,15 +392,15 @@ structural safety nets for the learned-only ablation.
 ```
 generated: 17/17 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
-selected:  sum4 + depth + refinements + select_min + sum9 + sum16
+selected:  reduce_sum + depth + refinements + select_min
 learned-only (no safety nets): 17/17, 6/6, hard 11/11
 ```
 
 The generated held-out miss is closed by a deep **training** member
 (`saxpy -> saxpy_s16`), not by moving the frozen held-out case
 (`affine -> affine_s16`). The coverage union keeps `depth + 1` alive beside
-`refinements + 1`. The wide consumers `sum9` and `sum16` are **learned** from
-`vec9`/`vec16` training fans and carried by the per-case union; the
+`refinements + 1`. The consumer is the geometric `reduce_sum` action: applicability is the input
+shape, and the model learns it from the shaped training cases. The
 completeness net is still available but is no longer the explanation. See
 [`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
 
@@ -427,9 +427,9 @@ and **three feature-distant compose cases across two mechanisms**:
 
 | case | shape | min-dist | min solver |
 | --- | --- | ---: | --- |
-| `matmul3 -> matmul3_sum` | 18 in / 9 out | 76 | `add compose[sum9]` |
-| `matmul4 -> matmul4_sum` | 32 in / 16 out | 224 | `add compose[sum16]` |
-| `select16 -> select16_sum` | 32 in / 16 out | 64 | `add compose[sum16]` |
+| `matmul3 -> matmul3_sum` | `[3,3]` field -> scalar | `add compose[reduce_sum]` |
+| `matmul4 -> matmul4_sum` | `[4,4]` field -> scalar | `add compose[reduce_sum]` |
+| `select16 -> select16_sum` | `[16]` select field -> scalar | `add compose[reduce_sum]` |
 
 The wide consumers are taught on `vec9`/`vec16` training fans, never on these
 shapes. `feature-audit --state-effect-weights FILE` prints the learned top-k;
@@ -439,7 +439,7 @@ Progression:
 
 ```
 base harness:       4/11  (only retention/control)
-learned union:     11/11  (sum9 + sum16 from the training fans)
+learned union:     11/11  (reduce_sum from the shape features)
 learned-only:      11/11  (no completeness/singles/pairs safety net)
 ```
 
@@ -491,7 +491,7 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 generated: 17/17 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
-selected:  sum4 + depth + refinements + select_min + sum9 + sum16
+selected:  reduce_sum + depth + refinements + select_min
 hard:      11/11
 learned-only (no safety nets): 17/17, 6/6, hard 11/11
 ```
@@ -499,7 +499,7 @@ learned-only (no safety nets): 17/17, 6/6, hard 11/11
 `run --archive FILE` records gate-competitive candidates in a QD archive,
 selected by quality (exact correctness, then held-out) and novelty (L1
 distance in the harness-state descriptor). `archive --file FILE` prints it.
-The archive keeps the `17/17 + 6/6` seven-capability harness beside the 14/17
+The archive keeps the `17/17 + 6/6` four-capability harness beside the 14/17
 pair attractors that each miss a different capability; adoption still requires
 the exact gate, retention, and held-out non-regression.
 
@@ -542,7 +542,7 @@ cargo test -p jotnar-agent
 The base harness solves the reduction fit and the SAXPY composition, correctly
 refuses the SAXPY→matmul task, and cannot solve two independent failures:
 
-- `compose-matmul` needs a `compose[sum4]` consumer;
+- `compose-matmul` needs the geometric `compose[reduce_sum]` action;
 - `refine-s16` needs one more refinement round (`refinements + 1`).
 
 The driver probes the proposals, then **composes the top two**. The composed
@@ -559,7 +559,7 @@ refuse-saxpy-matmul      refused      refused
 incumbent: 3/5 correct, 2 wrong
 adopted:   5/5 correct, 0 wrong
 held-out:  3/5 -> 5/5
-selected:  compose: add compose[sum4] + refinements + 1
+selected:  compose: add compose[reduce_sum] + refinements + 1
 ```
 
 That is a capability extension discovered by the loop, with retention and
@@ -584,7 +584,7 @@ held-out checks — not a hand-coded feature.
   looped with a per-case compute budget, while keeping 18/18 selection and
   6/6 held-out.
 - The per-case Dory crossover is real in two families: linear and one loop miss
-  both the matrix `sum4` and the deep fix; two loops find both.
+  both the matrix `reduce_sum` and the deep fix; two loops find both.
 - The loop-cost fit chooses the smallest family budgets that still cover:
   `{matrix: 2, elementwise: 2}`, total cost 4, and preserves the held-out 6/6.
 - A learned per-case budget predictor over the task vector fits 18/18
@@ -605,13 +605,13 @@ held-out checks — not a hand-coded feature.
   exact transition table and a beam/triple proposer reaches 17/17 + 6/6 on the
   generated stream and 18/18 + 6/6 on the corpus.
 - The first causal planner composes three capabilities
-  (`sum4 + depth/refinements + select_min`), not just a pair.
+  (`reduce_sum + depth/refinements + select_min`), not just a pair.
 - The generated held-out miss is closed by adding a deep **training** member
   (`saxpy -> saxpy_s16`); the frozen held-out `affine -> affine_s16` is not
   trained on.
 - A joint latent + effect proposer (Qwen φ-ladder backbone + causal state
   model) reaches the same 17/17 + 6/6 and 18/18 + 6/6.
-- A quality-diversity archive keeps the best seven-capability harness beside the
+- A quality-diversity archive keeps the best four-capability harness beside the
   novel 14/17 pair attractors, so the loop does not collapse to one incumbent.
 - `feature-audit` shows the original held-out split is a sibling split: two
   cases are exact feature duplicates and four are within three units of a
@@ -621,10 +621,10 @@ held-out checks — not a hand-coded feature.
   three feature-distant compose cases across matrix and select) measures the
   real generalization gap. The base harness scores 4/11; the learned union
   reaches 11/11 without training on the hard set.
-- The three distant compose cases (18-in/9-out matmul3, 32-in/16-out matmul4,
-  32-in/16-out select16; min distances 76/224/64) are solved by `sum9`/`sum16`
-  consumers. Both consumers have **training** fans (`vec9`, `vec16`), and the
-  learned model ranks the matching consumer first on each held-out shape.
+- The three distant compose cases (`[3,3]` matmul, `[4,4]` matmul, `[16]`
+  select) are all field-to-scalar reductions. One geometric `reduce_sum`
+  action handles all three; the model learns its applicability from shape and
+  op-family features (`ima(t)mul`, `iselect`, `reduce_applicable`).
 - With `--no-complete --no-singles --no-pairs`, the learned-only run still
   reaches 17/17 selection, 6/6 held-out, and hard 11/11: the distant cases are
   not relying on the completeness/singles safety net.
@@ -669,9 +669,10 @@ held-out checks — not a hand-coded feature.
   feature distance is only 3–7. The three distant compose cases span two
   mechanisms but are one consumer each; that is a real but small generalization
   measurement.
-- That the wide-consumer transfer is broad. `sum9`/`sum16` are taught on
-  elementwise fans and held out on matrix/select shapes; the consumer choice is
-  one action per arity, and the arity mask is structural.
+- That the geometric consumer transfer is broad. One `reduce_sum` action is
+  taught on shaped matrix/vector fields and held out on larger/different
+  shapes; the shape contract is structural, and the model still has to rank
+  the action above other applicable edits.
 - That the four refine/deep hard cases are solved by the learned ranking alone.
   The coverage union keeps its structural deep prior beside the learned
   `refinements + 1`.

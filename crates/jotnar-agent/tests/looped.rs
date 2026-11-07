@@ -24,7 +24,7 @@ fn looped_listing_assembles_for_one_two_and_four_loops() {
 }
 
 #[test]
-fn looped_scores_keep_sum4_in_the_top_two_at_every_loop_count() {
+fn looped_scores_keep_reduce_sum_in_the_top_two_at_every_loop_count() {
     let base = Harness::default();
     let report = run_round(&base, &cases(), &temp_dir("score"));
     let f = jotnar_agent::proposer::features(&base, &report.base, &[]);
@@ -37,7 +37,7 @@ fn looped_scores_keep_sum4_in_the_top_two_at_every_loop_count() {
         ranked.sort_by_key(|i| std::cmp::Reverse(scores[*i]));
         assert!(
             ranked[..2].contains(&0),
-            "loops={loops} should keep sum4 in the top two, scores={scores:?}"
+            "loops={loops} should keep reduce_sum in the top two, scores={scores:?}"
         );
         seen.push(scores);
     }
@@ -55,21 +55,27 @@ fn recurrent_parameters_move_the_crossover() {
     let base = Harness::default();
     let report = run_round(&base, &cases(), &temp_dir("recurrence"));
     let f = jotnar_agent::proposer::features(&base, &report.base, &[]);
-    let ref_idx = jotnar_agent::ACTIONS
-        .iter()
-        .position(|a| *a == "refinements + 1")
-        .unwrap();
+    let first = |scores: Vec<i64>| {
+        let mut ranked: Vec<usize> = (0..scores.len()).collect();
+        ranked.sort_by_key(|i| std::cmp::Reverse(scores[*i]));
+        ranked.first().copied().unwrap_or(0)
+    };
 
     let prior2 = LoopedProposer::with_recurrence(2, 4, -2);
-    assert!(top2_has(&prior2.scores(&f).unwrap(), ref_idx));
+    assert_eq!(first(prior2.scores(&f).unwrap()), 0, "reduce_sum first");
 
-    let fitted2 = LoopedProposer::with_recurrence(2, 6, -4);
-    assert!(
-        !top2_has(&fitted2.scores(&f).unwrap(), ref_idx),
-        "the fitted recurrent block needs more than two loops on the held-out case"
+    let fitted2 = LoopedProposer::with_recurrence(2, 5, -4);
+    assert_eq!(
+        first(fitted2.scores(&f).unwrap()),
+        0,
+        "the fitted block still leads with reduce_sum at two loops"
     );
-    let fitted4 = LoopedProposer::with_recurrence(4, 6, -4);
-    assert!(top2_has(&fitted4.scores(&f).unwrap(), ref_idx));
+    let fitted4 = LoopedProposer::with_recurrence(4, 5, -4);
+    assert_eq!(
+        first(fitted4.scores(&f).unwrap()),
+        5,
+        "four loops let refinements overtake at the same recurrence"
+    );
 }
 
 #[test]
@@ -169,7 +175,7 @@ fn looped_from_linear_drives_adoption() {
     let out = temp_dir("adopt");
     let report = run_round_with(&base, &cases(), &out, &looped);
     assert!(report.adopted_flag);
-    assert!(report.chosen_label.contains("sum4"));
+    assert!(report.chosen_label.contains("reduce_sum"));
     assert_eq!(report.adopted.correct(), cases().len());
 }
 

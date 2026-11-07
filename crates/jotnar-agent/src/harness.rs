@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// The task vector describes the case; these describe the harness that the
 /// next action would be applied to. The state-dependent effect model consumes
-/// both, so it can learn that `sum4` is useless once the consumer is present,
+/// both, so it can learn that `reduce_sum` is useless once the consumer is present,
 /// that `depth + 1` is the remaining fix after a composition, and so on.
 pub const STATE_FEATURE_NAMES: [&str; 14] = [
-    "has_sum4",
+    "has_reduce_sum",
     "has_select_min",
     "has_select_max",
     "has_saxpy_dup",
@@ -85,7 +85,7 @@ impl Harness {
     pub fn state_features(&self) -> Vec<i64> {
         let has = |name: &str| i64::from(self.families.iter().any(|f| f == name));
         vec![
-            i64::from(self.compose_consumers.iter().any(|c| c == "sum4")),
+            i64::from(self.compose_consumers.iter().any(|c| c == "reduce_sum")),
             has("select_min"),
             has("select_max"),
             has("saxpy_dup"),
@@ -106,29 +106,11 @@ impl Harness {
     pub fn mutations(&self) -> Vec<Mutation> {
         let mut out = Vec::new();
 
-        if !self.compose_consumers.iter().any(|c| c == "sum4") {
+        if !self.compose_consumers.iter().any(|c| c == "reduce_sum") {
             let mut h = self.clone();
-            h.compose_consumers.push("sum4".into());
+            h.compose_consumers.push("reduce_sum".into());
             out.push(Mutation {
-                label: "add compose[sum4]".into(),
-                harness: h,
-            });
-        }
-
-        if !self.compose_consumers.iter().any(|c| c == "sum9") {
-            let mut h = self.clone();
-            h.compose_consumers.push("sum9".into());
-            out.push(Mutation {
-                label: "add compose[sum9]".into(),
-                harness: h,
-            });
-        }
-
-        if !self.compose_consumers.iter().any(|c| c == "sum16") {
-            let mut h = self.clone();
-            h.compose_consumers.push("sum16".into());
-            out.push(Mutation {
-                label: "add compose[sum16]".into(),
+                label: "add compose[reduce_sum]".into(),
                 harness: h,
             });
         }

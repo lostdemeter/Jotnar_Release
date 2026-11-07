@@ -26,6 +26,20 @@ pub struct CaseView {
     pub steps: usize,
     pub refined: bool,
     pub tags: Vec<String>,
+    /// Geometric summary of the start/target output streams.
+    pub start_rank: usize,
+    pub target_rank: usize,
+    pub start_numel: usize,
+    pub target_numel: usize,
+    pub start_is_field: bool,
+    pub target_is_scalar: bool,
+    pub shape_match: bool,
+    /// Start-listing op family, so two fields with the same shape but a
+    /// different mechanism (matrix vs select vs elementwise) are distinct.
+    pub start_imatmul: bool,
+    pub start_iselect: bool,
+    pub start_iadd: bool,
+    pub start_ireduce_sum: bool,
 }
 
 fn meta(label: Option<&str>, lib: &BTreeMap<String, String>) -> (usize, usize, usize) {
@@ -38,6 +52,54 @@ fn meta(label: Option<&str>, lib: &BTreeMap<String, String>) -> (usize, usize, u
     State::new(label, text.clone())
         .map(|s| (s.input_names().len(), s.outputs().len(), s.ops().len()))
         .unwrap_or((0, 0, 0))
+}
+
+fn output_shapes(
+    label: Option<&str>,
+    example: Option<&crate::gate::Example>,
+    lib: &BTreeMap<String, String>,
+) -> Vec<Vec<usize>> {
+    let (Some(label), Some(example)) = (label, example) else {
+        return Vec::new();
+    };
+    let Some(text) = lib.get(label) else {
+        return Vec::new();
+    };
+    let Ok(state) = State::new(label, text.clone()) else {
+        return Vec::new();
+    };
+    crate::gate::run_output_shapes(&state, example, &state.outputs()).unwrap_or_default()
+}
+
+fn shape_summary(shapes: &[Vec<usize>]) -> (usize, usize, bool) {
+    let rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+    let numel = shapes
+        .iter()
+        .map(|s| s.iter().product::<usize>())
+        .max()
+        .unwrap_or(0);
+    let is_field = shapes.iter().any(|s| !s.is_empty());
+    (rank, numel, is_field)
+}
+
+fn op_flags(label: Option<&str>, lib: &BTreeMap<String, String>) -> (bool, bool, bool, bool) {
+    let Some(label) = label else {
+        return (false, false, false, false);
+    };
+    let Some(text) = lib.get(label) else {
+        return (false, false, false, false);
+    };
+    let Ok(state) = State::new(label, text.clone()) else {
+        return (false, false, false, false);
+    };
+    let ops = state.ops();
+    let has = |name: &str| ops.iter().any(|op| op == name);
+    (
+        has("IMATMUL"),
+        has("ISELECT"),
+        has("IADD"),
+        has("IREDUCE_SUM"),
+    )
 }
 
 pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
@@ -69,6 +131,15 @@ pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
             } else {
                 tp
             };
+            let example = case.examples.first();
+            let start_shapes = output_shapes(case.intent.input.label.as_deref(), example, &lib);
+            let target_shapes = output_shapes(case.intent.output.label.as_deref(), example, &lib);
+            let (start_rank, start_numel, start_is_field) = shape_summary(&start_shapes);
+            let (target_rank, target_numel, _) = shape_summary(&target_shapes);
+            let target_is_scalar =
+                !target_shapes.is_empty() && target_shapes.iter().all(|s| s.is_empty());
+            let (start_imatmul, start_iselect, start_iadd, start_ireduce_sum) =
+                op_flags(case.intent.input.label.as_deref(), &lib);
             CaseView {
                 case_id: case.intent.id.clone(),
                 family: case.family.clone(),
@@ -83,6 +154,17 @@ pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
                 steps: outcome.map(|o| o.steps).unwrap_or(0),
                 refined: outcome.map(|o| o.refined).unwrap_or(false),
                 tags: case.intent.output.tags.clone(),
+                start_rank,
+                target_rank,
+                start_numel,
+                target_numel,
+                start_is_field,
+                target_is_scalar,
+                shape_match: start_shapes == target_shapes,
+                start_imatmul,
+                start_iselect,
+                start_iadd,
+                start_ireduce_sum,
             }
         })
         .collect()

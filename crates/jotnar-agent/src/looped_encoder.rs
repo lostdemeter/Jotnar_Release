@@ -20,7 +20,7 @@ use crate::backbone::Backbone;
 use crate::budget_predictor::BudgetPredictor;
 use crate::driver::{Experience, OutcomeKind, Proposer};
 use crate::harness::{Harness, Mutation};
-use crate::proposer::{apply_action, ACTIONS};
+use crate::proposer::{action_applies, apply_action, ACTIONS};
 use crate::task_encoder::{
     task_vector, EncoderWeights, TaskEncoder, LATENT_NAMES, TASK_FEATURE_NAMES,
 };
@@ -208,7 +208,7 @@ fn build_listing(w: &LoopEncoderWeights, loops: usize) -> String {
 
 impl LoopedTaskEncoder {
     pub fn from_linear(linear: &TaskEncoder, max_loops: usize) -> Self {
-        Self::with_recurrence(linear, max_loops, 4, -2)
+        Self::with_recurrence(linear, max_loops, 4, -4)
     }
 
     pub fn with_recurrence(linear: &TaskEncoder, max_loops: usize, diag: i64, cross: i64) -> Self {
@@ -229,7 +229,7 @@ impl LoopedTaskEncoder {
         }
         w_in[5][15] = 4; // start_is_four
         w_in[6][14] = 8; // start_is_one: zero at h0, grows across loops
-        w_in[7][17] = 4; // has_sum4
+        w_in[7][27] = 4; // reduce_applicable
         w_in[8][16] = 4; // target_outputs_1
         Self::from_weights(
             max_loops,
@@ -492,7 +492,7 @@ impl Proposer for LoopedTaskEncoder {
                 if scores[idx] <= 0 {
                     break;
                 }
-                if apply_action(base, idx).is_some() {
+                if apply_action(base, idx).is_some() && action_applies(idx, &task) {
                     selected.insert(idx);
                     break;
                 }

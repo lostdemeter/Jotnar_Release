@@ -25,7 +25,7 @@ pub const FEATURE_NAMES: [&str; 21] = [
     "wrong_solve",
     "correct",
     "steps",
-    "has_sum4",
+    "has_reduce_sum",
     "depth",
     "refine",
     "families",
@@ -43,8 +43,8 @@ pub const FEATURE_NAMES: [&str; 21] = [
     "wrong_refusal_control",
 ];
 
-pub const ACTIONS: [&str; 12] = [
-    "add compose[sum4]",
+pub const ACTIONS: [&str; 10] = [
+    "add compose[reduce_sum]",
     "depth + 1",
     "refine off",
     "tags off",
@@ -54,8 +54,6 @@ pub const ACTIONS: [&str; 12] = [
     "add family saxpy_dup",
     "add family affine_dup",
     "add family matmul2_dup",
-    "add compose[sum9]",
-    "add compose[sum16]",
 ];
 
 /// A corpus-shaped prior. The 24-case stream has three matrix failures and one
@@ -63,6 +61,11 @@ pub const ACTIONS: [&str; 12] = [
 /// decoy crowd out the deep fix. This prior uses the per-family counts.
 pub fn corpus_prior_weights() -> Vec<Vec<i64>> {
     let mut w = prior_weights();
+    // reduce_sum: the matrix-family failure is the signal. The same prior the
+    // old sum4 action used, now over the geometric consumer.
+    w[0] = vec![
+        2, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0,
+    ];
     // refinements row: elementwise is the deep-family signal; the family count
     // is amplified by the recurrent block.
     w[5] = vec![
@@ -78,8 +81,9 @@ pub fn corpus_prior_weights() -> Vec<Vec<i64>> {
 
 pub fn prior_weights() -> Vec<Vec<i64>> {
     vec![
-        // sum4: a matrix-family failure is the signal; not useful once the
-        // consumer is already present.
+        // reduce_sum: the aggregate prior has no shape features, so the matrix
+        // family refusal is the signal; not useful once the consumer is
+        // already present.
         vec![
             2, 0, 0, 0, 0, -20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0,
         ],
@@ -111,12 +115,6 @@ pub fn prior_weights() -> Vec<Vec<i64>> {
         vec![0; 21],
         vec![0; 21],
         vec![0; 21],
-        // sum9: a feature-distant 3x3 compose consumer. The prior is zero; it
-        // is proposed by the completeness/singles safety net, never assumed.
-        vec![0; 21],
-        // sum16: the wider feature-distant consumer taught by the 16-lane
-        // training fan and held out on the 4x4 matrix / wide-select shapes.
-        vec![0; 21],
     ]
 }
 
@@ -141,7 +139,7 @@ pub fn features(base: &Harness, train: &EvalReport, experience: &[Experience]) -
         train.wrong_solve as i64,
         train.correct() as i64,
         train.total_steps as i64,
-        i64::from(base.compose_consumers.iter().any(|c| c == "sum4")),
+        i64::from(base.compose_consumers.iter().any(|c| c == "reduce_sum")),
         base.max_depth as i64,
         i64::from(base.refine_enabled),
         base.families.len() as i64,
@@ -370,48 +368,29 @@ pub(crate) fn select_from_scores(base: &Harness, scores: &[i64]) -> Vec<Mutation
     }
 }
 
-/// The output arity a compose consumer needs, if `action` adds one.
-pub fn consumer_arity(action: usize) -> Option<usize> {
-    match action {
-        0 => Some(4),
-        10 => Some(9),
-        11 => Some(16),
-        _ => None,
+/// Whether `action` is applicable to the case's geometry.
+///
+/// `reduce_sum` is a geometric reduction: it applies only when the start has
+/// exactly one output stream and that stream has a non-empty shape. The check
+/// reads the `reduce_applicable` task feature; this is a shape contract, not a
+/// per-arity table.
+pub fn action_applies(action: usize, task: &[i64]) -> bool {
+    if action == 0 {
+        task.get(27).copied().unwrap_or(0) == 1
+    } else {
+        true
     }
-}
-
-/// Mask compose consumers whose arity does not match the case's start output
-/// count. This mirrors the applicability rule the `compose` step enforces: an
-/// add-consumer action is a no-op when the arity differs, so it is not a
-/// ranking choice. The mask is structural, not a learned preference.
-pub fn mask_inapplicable_consumers(task: &[i64], scores: &mut [i64]) {
-    let start_outputs = task.get(1).copied().unwrap_or(0);
-    for (action, score) in scores.iter_mut().enumerate() {
-        if let Some(arity) = consumer_arity(action) {
-            if start_outputs != arity as i64 {
-                *score = i64::MIN / 4;
-            }
-        }
-    }
-}
-
-/// Whether `action` can change the outcome for a task with `start_outputs`
-/// output streams. Non-consumer actions always apply.
-pub fn action_applies(action: usize, start_outputs: i64) -> bool {
-    consumer_arity(action)
-        .map(|arity| arity as i64 == start_outputs)
-        .unwrap_or(true)
 }
 
 pub fn apply_action(base: &Harness, idx: usize) -> Option<Mutation> {
     let mut h = base.clone();
     let label = match idx {
         0 => {
-            if h.compose_consumers.iter().any(|c| c == "sum4") {
+            if h.compose_consumers.iter().any(|c| c == "reduce_sum") {
                 return None;
             }
-            h.compose_consumers.push("sum4".into());
-            "add compose[sum4]"
+            h.compose_consumers.push("reduce_sum".into());
+            "add compose[reduce_sum]"
         }
         1 => {
             if h.max_depth >= 6 {
@@ -475,20 +454,6 @@ pub fn apply_action(base: &Harness, idx: usize) -> Option<Mutation> {
             }
             h.families.push("matmul2_dup".into());
             "add family matmul2_dup"
-        }
-        10 => {
-            if h.compose_consumers.iter().any(|c| c == "sum9") {
-                return None;
-            }
-            h.compose_consumers.push("sum9".into());
-            "add compose[sum9]"
-        }
-        11 => {
-            if h.compose_consumers.iter().any(|c| c == "sum16") {
-                return None;
-            }
-            h.compose_consumers.push("sum16".into());
-            "add compose[sum16]"
         }
         _ => return None,
     };

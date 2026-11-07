@@ -212,7 +212,7 @@ fn dfs(
         return None;
     }
 
-    let mut candidates = candidate_steps(state, target, intent, harness, tags);
+    let mut candidates = candidate_steps(state, target, intent, harness, tags, examples.first());
     candidates.sort_by_key(|s| s.rank());
     let mut best: Option<(usize, State, Vec<StepRecord>, GateReport)> = None;
     for step in candidates {
@@ -289,6 +289,7 @@ fn candidate_steps(
     intent: &Intent,
     harness: &Harness,
     tags: &[String],
+    example: Option<&Example>,
 ) -> Vec<Step> {
     let mut out = Vec::new();
 
@@ -342,9 +343,7 @@ fn candidate_steps(
     for consumer in &harness.compose_consumers {
         let applies = match consumer.as_str() {
             "add2" => n_out == 1,
-            "sum4" => n_out == 4,
-            "sum9" => n_out == 9,
-            "sum16" => n_out == 16,
+            "reduce_sum" => n_out == 1 && output_is_field(state, example),
             _ => false,
         };
         if applies {
@@ -364,6 +363,18 @@ fn candidate_steps(
     let _ = target;
     let _ = intent;
     out
+}
+
+/// A geometric reduction applies only to a shaped output stream, not to a
+/// scalar. The shape comes from the current state and the first example.
+fn output_is_field(state: &State, example: Option<&Example>) -> bool {
+    let Some(example) = example else {
+        return false;
+    };
+    let outputs = state.outputs();
+    crate::gate::run_output_shapes(state, example, &outputs)
+        .map(|shapes| shapes.iter().any(|shape| !shape.is_empty()))
+        .unwrap_or(false)
 }
 
 fn resolve_start(intent: &Intent, lib: &BTreeMap<String, String>) -> Result<State, String> {

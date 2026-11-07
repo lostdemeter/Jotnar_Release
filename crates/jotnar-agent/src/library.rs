@@ -102,6 +102,13 @@ pub fn library() -> BTreeMap<String, String> {
     out
 }
 
+fn tensor(n: usize, start: i64) -> TestVec {
+    TestVec {
+        shape: vec![n, n],
+        data: (0..n * n).map(|i| start + i as i64).collect(),
+    }
+}
+
 pub fn example_set(label: &str, variant: u64) -> Vec<Example> {
     let label = label.strip_suffix("_dup").unwrap_or(label);
     match label {
@@ -137,72 +144,51 @@ pub fn example_set(label: &str, variant: u64) -> Vec<Example> {
         }
         "matmul2" | "matmul2_sum" | "matmul2_colsum" => {
             let base = if variant == 0 { 1 } else { 2 };
-            let names = ["a00", "a01", "a10", "a11", "b00", "b01", "b10", "b11"];
-            let inputs = names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| ((*name).to_string(), TestVec::scalar(base + i as i64)))
-                .collect::<BTreeMap<_, _>>();
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[
+                ("A", tensor(2, base)),
+                ("B", tensor(2, base + 4)),
+            ])]
         }
         "matmul3" | "matmul3_sum" => {
             let base = if variant == 0 { 1 } else { 2 };
-            let mut inputs = BTreeMap::new();
-            let mut n = 0i64;
-            for i in 0..3 {
-                for j in 0..3 {
-                    inputs.insert(format!("a{i}{j}"), TestVec::scalar(base + n));
-                    n += 1;
-                }
-            }
-            for i in 0..3 {
-                for j in 0..3 {
-                    inputs.insert(format!("b{i}{j}"), TestVec::scalar(base + n));
-                    n += 1;
-                }
-            }
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[
+                ("A", tensor(3, base)),
+                ("B", tensor(3, base + 9)),
+            ])]
         }
         "matmul4" | "matmul4_sum" => {
             let base = if variant == 0 { 1 } else { 2 };
-            let mut inputs = BTreeMap::new();
-            let mut n = 0i64;
-            for i in 0..4 {
-                for j in 0..4 {
-                    inputs.insert(format!("a{i}{j}"), TestVec::scalar(base + n));
-                    n += 1;
-                }
-            }
-            for i in 0..4 {
-                for j in 0..4 {
-                    inputs.insert(format!("b{i}{j}"), TestVec::scalar(base + n));
-                    n += 1;
-                }
-            }
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[
+                ("A", tensor(4, base)),
+                ("B", tensor(4, base + 16)),
+            ])]
         }
         "vec9" | "vec9_sum" => {
             let base = if variant == 0 { 1 } else { 101 };
-            let inputs = (0..9)
-                .map(|i| (format!("a{i}"), TestVec::scalar(base + i as i64)))
-                .collect::<BTreeMap<_, _>>();
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[(
+                "A",
+                TestVec::vector((0..9).map(|i| base + i as i64).collect()),
+            )])]
         }
         "vec16" | "vec16_sum" => {
             let base = if variant == 0 { 1 } else { 101 };
-            let inputs = (0..16)
-                .map(|i| (format!("a{i}"), TestVec::scalar(base + i as i64)))
-                .collect::<BTreeMap<_, _>>();
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[(
+                "A",
+                TestVec::vector((0..16).map(|i| base + i as i64).collect()),
+            )])]
         }
         "select16" | "select16_sum" => {
             let base = if variant == 0 { 1 } else { 41 };
-            let mut inputs = BTreeMap::new();
-            for i in 0..16 {
-                inputs.insert(format!("a{i}"), TestVec::scalar(base + i as i64));
-                inputs.insert(format!("b{i}"), TestVec::scalar(base + 20 - i as i64));
-            }
-            vec![Example::new(inputs)]
+            vec![Example::from_pairs(&[
+                (
+                    "A",
+                    TestVec::vector((0..16).map(|i| base + i as i64).collect()),
+                ),
+                (
+                    "B",
+                    TestVec::vector((0..16).map(|i| base + 20 - i as i64).collect()),
+                ),
+            ])]
         }
         "select" => {
             let (c, a, b) = if variant == 0 {

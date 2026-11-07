@@ -1,8 +1,8 @@
 use std::fs;
 
 use jotnar_agent::{
-    action_effects, evaluate, generated_split_cases, mask_inapplicable_consumers, run_round_with,
-    EffectModel, Harness, Split, WorldModelProposer,
+    action_effects, evaluate, generated_split_cases, run_round_with, EffectModel, Harness, Split,
+    WorldModelProposer,
 };
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -28,30 +28,34 @@ fn effect_model_ranks_the_solving_actions() {
         .iter()
         .find(|case| case.case == "gen-matmul-sum-cal")
         .expect("matrix case");
-    let mut scores = model.scores(&matrix.task);
-    mask_inapplicable_consumers(&matrix.task, &mut scores);
-    let top = (0..scores.len())
-        .max_by_key(|action| scores[*action])
-        .unwrap();
+    let scores = model.scores(&matrix.task);
+    let top = matrix
+        .actions
+        .iter()
+        .filter(|a| a.applicable && jotnar_agent::action_applies(a.index, &matrix.task))
+        .max_by_key(|a| scores[a.index])
+        .expect("an applicable action");
     assert!(
-        matrix.actions[top].label.contains("sum4"),
-        "top matrix action should be sum4, got {}",
-        matrix.actions[top].label
+        top.label.contains("reduce_sum"),
+        "top matrix action should be reduce_sum, got {}",
+        top.label
     );
 
     let select = effects
         .iter()
         .find(|case| case.case == "gen-select-min")
         .expect("select case");
-    let mut scores = model.scores(&select.task);
-    mask_inapplicable_consumers(&select.task, &mut scores);
-    let top = (0..scores.len())
-        .max_by_key(|action| scores[*action])
-        .unwrap();
+    let scores = model.scores(&select.task);
+    let top = select
+        .actions
+        .iter()
+        .filter(|a| a.applicable && jotnar_agent::action_applies(a.index, &select.task))
+        .max_by_key(|a| scores[a.index])
+        .expect("an applicable action");
     assert!(
-        select.actions[top].label.contains("select_min"),
+        top.label.contains("select_min"),
         "top select action should be select_min, got {}",
-        select.actions[top].label
+        top.label
     );
 }
 

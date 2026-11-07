@@ -35,7 +35,7 @@ cargo run -q -p jotnar-agent -- fit-effect-model \
 Generated result:
 
 ```text
-effect model: 17 cases, 12 actions, epochs=10, lr=1, train top-1 accuracy=1.000
+effect model: 17 cases, 10 actions, epochs=10, lr=1, train top-1 accuracy=1.000
 ```
 
 `WorldModelProposer` ranks single actions and proposes every action **pair**, so
@@ -50,8 +50,7 @@ cargo run -q -p jotnar-agent -- run --out runs/world \
 ```text
 selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  world: add compose[sum4] + refinements + 1 + add family select_min
-           + add compose[sum9] + add compose[sum16]
+selected:  world: add compose[reduce_sum] + refinements + 1 + add family select_min
 adopted:   true
 ```
 
@@ -60,29 +59,32 @@ The original 24-case corpus with the same generated-trained model:
 ```text
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  world: add compose[sum4] + depth + 1
+selected:  world: add compose[reduce_sum] + depth + 1
 adopted:   true
 ```
 
 ## The state-dependent model
 
-The first model cannot tell that `sum4` is useless once the consumer is already
+The first model cannot tell that `reduce_sum` is useless once the consumer is already
 present, or that after a composition the remaining fix is `depth + 1`. The
 state-dependent model takes the harness with the task:
 
 ```text
-20 task features + 14 harness-state features -> 12 action scores
+32 geometric task features + 14 harness-state features -> 10 action scores
 ```
 
-State features (`Harness::state_features`): `has_sum4`, `has_select_min`,
+State features (`Harness::state_features`): `has_reduce_sum`, `has_select_min`,
 `has_select_max`, the three duplicate families, family/consumer counts, depth,
 refinements, refine/tag flags, the depth cap, and `has_add2`.
 
-Compose consumers are arity-bound (`sum4`, `sum9`, `sum16`). The scorer masks a
-consumer whose arity does not match the case's start output count, because the
-`compose` step itself would make it a no-op. This is a structural applicability
-rule, not a learned preference: the learned choice is which applicable consumer
-to add, and whether to add it at all.
+The consumer is one geometric action: `add compose[reduce_sum]`. Its
+applicability is a shape contract, not an arity name: the start must have one
+output stream with a non-empty shape, and the target must be a scalar. The task
+vector carries `start_rank`, `start_numel`, `target_rank`, `target_numel`,
+`start_is_field`, `target_is_scalar`, `shape_match`, `reduce_applicable`, and
+the start op family (`start_imatmul`, `start_iselect`, `start_iadd`,
+`start_ireduce_sum`). The model learns from those features; `action_applies`
+only enforces the contract. There is no `sum4`/`sum9`/`sum16` action.
 
 `gen-transitions` builds the causal transition table with the exact gate. It
 enumerates every distinct harness reachable with up to `--depth` actions
@@ -99,7 +101,7 @@ cargo run -q -p jotnar-agent -- fit-state-effect-model \
 ```
 
 ```text
-state effect model: 17 cases, 67 states, 1904 transitions, 12 actions,
+state effect model: 17 cases, 46 states, 1275 transitions, 10 actions,
 depth=2, epochs=10, lr=1, discriminating top-1 accuracy=1.000
 ```
 
@@ -131,21 +133,19 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```text
 selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-coverage: add compose[sum4] + depth + 1 + refinements + 1
-           + add family select_min + add compose[sum9] + add compose[sum16]
+selected:  beam-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
+           + add family select_min
 adopted:   true
 ```
 
 The coverage candidate keeps the second capability alive: the top union is
-`sum4 + refinements + select_min`, but the deep case also supports `depth + 1`,
-and the coverage union adds it. The `sum9` and `sum16` consumers are now
-**learned**: `gen-vec9-sum-train` and `gen-vec16-sum-train` are training cases
-with 9 and 16 outputs, so the per-case top action for each is the matching
-consumer, and the union carries both. The exact gate accepts the seven-capability
-harness at the same steps.
+`reduce_sum + refinements + select_min`, but the deep case also supports `depth + 1`,
+and the coverage union adds it. The geometric `reduce_sum` action is learned
+from the shaped matrix/vector training cases, and the exact gate accepts the
+four-capability harness at the same steps.
 
 Depth-3 training (`--depth 3`) and `--depth 3` beam expansion produce the
-explicit triple `compose[sum4] + depth + 1 + select_min` with the same
+explicit triple `compose[reduce_sum] + depth + 1 + select_min` with the same
 selection and held-out results.
 
 The 24-case corpus:
@@ -153,8 +153,7 @@ The 24-case corpus:
 ```text
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-complete: add compose[sum4] + depth + 1 + refinements + 1
-           + add compose[sum9] + add compose[sum16]
+selected:  beam-complete: add compose[reduce_sum] + depth + 1 + refinements + 1
 adopted:   true
 ```
 
@@ -211,8 +210,8 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```text
 selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  joint-coverage: add compose[sum4] + depth + 1 + refinements + 1
-           + add family select_min + add compose[sum9] + add compose[sum16]
+selected:  joint-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
+           + add family select_min
 adopted:   true
 ```
 
@@ -233,10 +232,10 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-archive \
 cargo run -q -p jotnar-agent -- archive --file runs/archive.json
 ```
 
-The first archive run kept 16 entries: the 17/17 + 6/6 seven-capability
+The first archive run kept 16 entries: the 17/17 + 6/6 four-capability
 harness, the 14/17 pair attractors (each missing a different capability), and
 the novel near-misses.
-That is the point: `sum4 + refinements` and `sum4 + select_min` are different
+That is the point: `reduce_sum + refinements` and `reduce_sum + select_min` are different
 basins, even when both are one case short. The archive is analysis/proposal
 state; adoption still requires the gate, retention, and held-out
 non-regression.
@@ -277,15 +276,16 @@ that is never used for fitting, selection, or adoption:
 
   | case | shape | min-dist | minimum solver |
   | --- | --- | ---: | --- |
-  | `matmul3 -> matmul3_sum` | 18 in / 9 out | 76 | `add compose[sum9]` |
-  | `matmul4 -> matmul4_sum` | 32 in / 16 out | 224 | `add compose[sum16]` |
-  | `select16 -> select16_sum` | 32 in / 16 out | 64 | `add compose[sum16]` |
+  | `matmul3 -> matmul3_sum` | `[3,3]` field -> scalar | `add compose[reduce_sum]` |
+  | `matmul4 -> matmul4_sum` | `[4,4]` field -> scalar | `add compose[reduce_sum]` |
+  | `select16 -> select16_sum` | `[16]` select field -> scalar | `add compose[reduce_sum]` |
 
 - one high-distance refusal control (`reduce128 -> matmul2`, distance 493).
 
-`sum9` and `sum16` are taught by `gen-vec9-sum-train` and
-`gen-vec16-sum-train`, which have the same output arity but a different shape
-from every audit case. Nothing in the hard split is trained on.
+The consumer is taught by `gen-vec9-sum-train` and `gen-vec16-sum-train`
+(shaped vectors that reduce to a scalar) and by the shaped `matmul2` training
+cases. The audit shapes are different rank/size/mechanism signatures. Nothing
+in the hard split is trained on.
 
 ```sh
 cargo run -q -p jotnar-agent -- feature-audit --generated \
@@ -301,9 +301,9 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 The learned top-1 on each distant shape is the taught consumer:
 
 ```text
-hard-matmul3-sum    learned top-1 add compose[sum9]  (1890)
-hard-matmul4-sum    learned top-1 add compose[sum16] (7510)
-hard-select16-sum   learned top-1 add compose[sum16] (3750)
+hard-matmul3-sum    learned top-1 add compose[reduce_sum] (240)
+hard-matmul4-sum    learned top-1 add compose[reduce_sum] (296)
+hard-select16-sum   learned top-1 add compose[reduce_sum] (296)
 ```
 
 `--hard` only audits the final adopted harness:
@@ -316,7 +316,7 @@ Progression:
 
 ```text
 base harness:       4/11  (retention + refusal control only)
-learned union:     11/11  (sum9 + sum16 from the training fans)
+learned union:     11/11  (reduce_sum from the shape features)
 learned-only:      11/11  (no completeness/singles/pairs safety net)
 ```
 
@@ -326,7 +326,7 @@ cases. The gap was real and measurable, not hidden by the sibling held-out.
 
 ## Capability coverage / neutral drift
 
-The top union is `sum4 + refinements + select_min + sum9 + sum16`; it is 17/17
+The top union is `reduce_sum + refinements + select_min`; it is 17/17
 on the selection stream, but it does not carry `depth + 1`. The deep case
 supports both `refinements` and `depth`, so the proposer adds a **coverage
 union**: the top action from each capability group (compose, depth, refinements,
@@ -344,17 +344,15 @@ capability.
 
 The **compose-completeness** candidate is still available: it adds every
 configured consumer for free (a mismatched consumer is a no-op). But it is no
-longer what solves the distant cases. `sum9` and `sum16` are in the learned
-per-case union because their training fans are the top action on those cases.
-The exact gate still verifies the result; the completeness net is a fallback,
-not the explanation.
+longer what solves the distant cases. `reduce_sum` is the learned per-case top
+action for every shaped field-to-scalar case. The exact gate still verifies the
+result; the completeness net is a fallback, not the explanation.
 
-Compose consumers are arity-bound. The scorer masks a consumer when the start
-output count does not match (`sum4` for 4 outputs, `sum9` for 9, `sum16` for
-16), mirroring the `compose` step. Without the mask, a consumer that is merely a
-no-op on a wrong case is pushed down as a negative in almost every group, which
-destroys its learned score. With the mask, the fit only compares applicable
-actions, and the learned ranking is clean.
+The reduction is shape-bound, not arity-bound. `action_applies` requires a
+single shaped start output and a scalar target. The fit only compares actions
+the transition table offers from a state, and the proposer filters
+inapplicable actions. The model sees the shape/op-family features and learns
+when the reduction is the right edit; it is not handed a per-arity table.
 
 ## Learned vs safety-net ablation
 
@@ -367,7 +365,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-learned \
   --no-complete --no-singles --no-pairs --hard
 ```
 
-Both runs select the same seven-capability harness:
+Both runs select the same four-capability harness:
 
 ```text
 with safety nets:   17/17 selection, 6/6 held-out, hard 11/11
@@ -398,7 +396,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
 ```
 
 ```text
-cost model: 17 cases, 1904 transitions, depth=2, lambda=1, mae=0.359
+cost model: 17 cases, 1275 transitions, depth=2, lambda=1, mae=0.686
 ```
 
 The beam score is `effect - cost_weight * predicted_steps`. The exact gate and
@@ -417,7 +415,7 @@ cargo run -q -p jotnar-agent -- run --out runs/qd \
   --proposer qd --generated --archive runs/archive.json --qd-seeds 4 --hard
 ```
 
-The first run with the wide consumers started from the 16-entry archive and
+The first run with the geometric consumer started from the 16-entry archive and
 selected a hop from the `beam-union` seed adding `depth + 1`:
 
 ```text
@@ -445,8 +443,8 @@ back to the incumbent.
 
 - State enumeration is over distinct action subsets; repeated `depth + 1` is
   represented by one action.
-- The transition table grows with `--depth` (67 states / 1904 transitions at
-  depth 2 with 12 actions); depth 3 is not yet bounded.
+- The transition table grows with `--depth` (46 states / 1275 transitions at
+  depth 2 with 10 actions); depth 3 is not yet bounded.
 - The effect model is linear. The state split helps, but the joint interaction
   is still additive.
 - The Qwen backbone is an exact zero-init/pass-through block on the current
@@ -456,16 +454,17 @@ back to the incumbent.
   hopping, but it is not yet a full quality-diversity search with continuous
   descriptors.
 - The hard set is eleven audit cases, not a benchmark. Its four refine/deep
-  compositions share one mechanism (`*_dup -> *_s16`) and their feature
-  distance is only 3–7. Three distant compose cases (two mechanisms) is still a
-  small generalization measurement.
-- The wide consumers are taught on elementwise fans (`vec9`, `vec16`), not on
-  matrix or select shapes. The learned ranking transfers the consumer to a
-  distant matrix/select shape, but the transfer is one action per consumer.
-- The arity mask is a structural applicability rule. It tells the scorer which
-  consumer is meaningful for a shape; it does not choose the consumer for the
-  model. The learned fit still has to rank it above the other applicable
-  actions.
+  compositions share one mechanism (`*_dup -> *_s16`) and their count distance
+  is small. The three distant compose cases are distinct in rank, numel, and op
+  family (`[3,3]` matmul, `[4,4]` matmul, `[16]` select).
+- One `reduce_sum` action handles every field-to-scalar reduction. It is taught
+  on shaped matrix/vector cases and held out on larger/different shapes. It is
+  not a general axis-reduction language yet; arbitrary `reduce(axis)` is future
+  work.
+- The shape contract (`start_is_field && target_is_scalar`) is structural. It
+  tells the scorer which edits are meaningful; the learned fit still has to
+  rank `reduce_sum` above the other applicable actions using the shape and
+  op-family features.
 - The four refine/deep hard cases still use the coverage union's structural
   deep prior to keep `depth + 1` beside the learned `refinements + 1`.
 - The coverage/completeness tie-breaks are heuristics. They are safe because

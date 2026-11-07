@@ -88,9 +88,9 @@ fn hard_cases_are_audit_only_and_require_composition() {
     // The feature-distant compose cases need the wide consumers. They are
     // audit-only and were never trained on directly.
     for (id, consumer) in [
-        ("hard-matmul3-sum", 10usize),
-        ("hard-matmul4-sum", 11),
-        ("hard-select16-sum", 11),
+        ("hard-matmul3-sum", 0usize),
+        ("hard-matmul4-sum", 0),
+        ("hard-select16-sum", 0),
     ] {
         let case = hard
             .iter()
@@ -160,15 +160,37 @@ fn feature_distance_audit_exposes_the_sibling_heldout() {
         "the hard reduction case should be feature-distant"
     );
 
+    // The old scalar-count L1 distance is no longer the right metric: the
+    // shaped tasks have similar counts but different geometry/mechanism. The
+    // meaningful held-out test is that the shape + op-family signature does
+    // not appear in training.
+    let signature = |view: &jotnar_agent::CaseView| {
+        (
+            view.start_rank,
+            view.start_numel,
+            view.start_imatmul,
+            view.start_iselect,
+            view.start_iadd,
+            view.target_is_scalar,
+        )
+    };
+    let train_signatures: std::collections::BTreeSet<_> = case_views(&train, &train_report)
+        .iter()
+        .map(signature)
+        .collect();
     for id in ["hard-matmul3-sum", "hard-matmul4-sum", "hard-select16-sum"] {
         let idx = hard
             .iter()
             .position(|case| case.intent.id == id)
             .unwrap_or_else(|| panic!("missing distant case {id}"));
-        let distance = min_dist(&task_vector(&hard_views[idx], &base));
+        let sig = signature(&hard_views[idx]);
         assert!(
-            distance > 50,
-            "{id} has min feature distance {distance}; it must be > 50"
+            !train_signatures.contains(&sig),
+            "{id} shape/mechanism signature {sig:?} appears in training"
+        );
+        assert!(
+            hard_views[idx].start_is_field && hard_views[idx].target_is_scalar,
+            "{id} must be a field-to-scalar reduction"
         );
     }
 }
@@ -219,7 +241,10 @@ fn corpus_prior_selects_both_capabilities() {
         .iter()
         .map(|m| m.label.as_str())
         .collect::<Vec<_>>();
-    assert!(labels.iter().any(|l| l.contains("sum4")), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l.contains("reduce_sum")),
+        "{labels:?}"
+    );
     assert!(
         labels.iter().any(|l| l.contains("refinements")),
         "{labels:?}"

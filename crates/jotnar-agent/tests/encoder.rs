@@ -39,9 +39,10 @@ fn encoder_reads_a_named_latent_and_scores_actions() {
     let latent = e.latent(&task).unwrap();
     assert_eq!(latent.len(), LATENT_NAMES.len());
     let scores = e.scores(&task).unwrap();
-    assert!(
-        scores[0] < *scores.iter().max().unwrap(),
-        "the linear/one-loop encoder should prefer the decoy on a matrix case, scores={scores:?}"
+    assert_eq!(
+        scores[0],
+        *scores.iter().max().unwrap(),
+        "the geometric encoder should prefer reduce_sum on a matrix field, scores={scores:?}"
     );
 
     let deep = views

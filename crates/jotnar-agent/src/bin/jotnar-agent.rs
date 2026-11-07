@@ -1824,17 +1824,29 @@ fn feature_audit(
                 })
                 .unwrap_or_else(|| "-".to_string());
             println!(
-                "  {:32} min-dist {:3}  base {:14}  min-solver-size {}  [{}]",
+                "  {:32} count-dist {:3}  base {:14}  min-solver-size {}  [{}]",
                 case.intent.id,
                 distance,
                 outcome,
                 best.map(|s| s.len()).unwrap_or(0),
                 names
             );
+            println!(
+                "    geom: start rank {} numel {} -> target rank {} numel {}; ops imatmul={} iselect={} iadd={}; reduce_applicable={}",
+                view.start_rank,
+                view.start_numel,
+                view.target_rank,
+                view.target_numel,
+                view.start_imatmul,
+                view.start_iselect,
+                view.start_iadd,
+                view.start_is_field && view.target_is_scalar && view.start_outputs == 1
+            );
             if let Some(model) = &model {
-                let mut scores = model.scores(&task, &base.state_features());
-                jotnar_agent::mask_inapplicable_consumers(&task, &mut scores);
-                let mut order: Vec<usize> = (0..scores.len()).collect();
+                let scores = model.scores(&task, &base.state_features());
+                let mut order: Vec<usize> = (0..scores.len())
+                    .filter(|action| jotnar_agent::action_applies(*action, &task))
+                    .collect();
                 order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
                 let top = order
                     .iter()
@@ -2480,11 +2492,11 @@ fn fit_recurrent(
             .map(|c| c.train.correct() as i64 - calib.base.correct() as i64)
             .unwrap_or(0)
     };
-    let need_sum4 = delta("add compose[sum4]") > 0;
+    let need_reduce_sum = delta("add compose[reduce_sum]") > 0;
     let need_deep = delta("depth + 1") > 0 || delta("refinements + 1") > 0;
 
     println!(
-        "calibration: {} cases; deep_train={deep_train} efficient={efficient} need_sum4={need_sum4} need_deep={need_deep}",
+        "calibration: {} cases; deep_train={deep_train} efficient={efficient} need_reduce_sum={need_reduce_sum} need_deep={need_deep}",
         calibration_cases.len()
     );
     println!(
@@ -2495,14 +2507,14 @@ fn fit_recurrent(
     for diag in 2..=6 {
         for cross in -4..=1 {
             let mut margin_total = 0i64;
-            let mut loop_cost = if need_sum4 || need_deep { 8 } else { 0 };
-            let mut retained = !(need_sum4 || need_deep);
+            let mut loop_cost = if need_reduce_sum || need_deep { 8 } else { 0 };
+            let mut retained = !(need_reduce_sum || need_deep);
             let mut marks = [false; 3];
             for (k, loops) in [1usize, 2, 4].into_iter().enumerate() {
                 let p = LoopedProposer::with_recurrence(loops, diag, cross);
                 let s_calib = p.scores(&f_calib).unwrap_or_default();
                 margin_total += top2_margin(&s_calib);
-                let sum_ok = !need_sum4 || top2_has(&s_calib, 0);
+                let sum_ok = !need_reduce_sum || top2_has(&s_calib, 0);
                 let deep_ok = !need_deep || top2_has(&s_calib, 1) || top2_has(&s_calib, 5);
                 if sum_ok && deep_ok {
                     loop_cost = loop_cost.min(loops as i64);
@@ -2552,7 +2564,7 @@ fn fit_recurrent(
         let p = LoopedProposer::with_recurrence(loops, diag, cross);
         let s = p.scores(&f_full).unwrap_or_default();
         let calib_scores = p.scores(&f_calib).unwrap_or_default();
-        let sum_ok = !need_sum4 || top2_has(&calib_scores, 0);
+        let sum_ok = !need_reduce_sum || top2_has(&calib_scores, 0);
         let deep_ok = !need_deep || top2_has(&calib_scores, 1) || top2_has(&calib_scores, 5);
         println!(
             "  loops={loops} calib_covered={} heldout_refinements={} scores={s:?}",
