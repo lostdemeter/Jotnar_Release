@@ -65,6 +65,49 @@ fn reduce_sum_solves_shaped_hard_cases() {
 }
 
 #[test]
+fn affine_s64_step_chain_is_exact() {
+    use jotnar_agent::gate::bit_exact;
+    use jotnar_agent::library::library;
+    use jotnar_agent::{State, Step};
+    let lib = library();
+    let mut s = State::new("affine", lib["affine"].clone()).unwrap();
+    for _ in 0..6 {
+        s = Step::Compose {
+            consumer: "add2".into(),
+            rank: 20,
+        }
+        .apply(&s)
+        .unwrap();
+    }
+    let t = State::new("affine_s64", lib["affine_s64"].clone()).unwrap();
+    let ex = jotnar_agent::example_set("affine_s64", 0);
+    let gate = bit_exact(&s, &t, &ex, &["OUT".to_string()]);
+    assert!(gate.passed, "{:?}", gate.detail);
+}
+
+#[test]
+fn s64_needs_repeated_depth() {
+    let base = Harness::default();
+    let case = jotnar_agent::hard_cases()
+        .into_iter()
+        .find(|c| c.intent.id == "hard-affine-s64")
+        .expect("hard affine s64 case");
+    let weak = solve(&case.intent, &case.examples, &base);
+    assert!(
+        weak.is_err(),
+        "the default depth 2 harness should miss the 64x target"
+    );
+    let mut deep = base.clone();
+    deep.max_depth = 6;
+    let strong = solve(&case.intent, &case.examples, &deep).expect("depth 6 solves s64");
+    assert!(strong.certificate.validate().is_empty());
+    assert_eq!(
+        strong.certificate.outcome,
+        jotnar_lab::model::Outcome::Solved
+    );
+}
+
+#[test]
 fn reduce_sum_is_the_bounded_extension_that_solves_matmul() {
     let mut h = Harness::default();
     h.compose_consumers.push("reduce_sum".to_string());

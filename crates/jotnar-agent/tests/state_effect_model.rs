@@ -96,12 +96,12 @@ fn state_model_closes_the_generated_heldout() {
     let base = Harness::default();
     let train = generated_train();
     let heldout = generated_split_cases(Split::Heldout);
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
     let accuracy = model.fit(&rows, 10, 1);
     assert!(accuracy >= 0.99, "discriminating accuracy {accuracy}");
 
-    let proposer = BeamProposer::new(model, 4, 2);
+    let proposer = BeamProposer::new(model, 8, 4);
     let report = run_round_with(&base, &train, &temp_dir("adopt"), &proposer);
     assert!(report.adopted_flag);
     assert_eq!(report.adopted.correct(), train.len());
@@ -124,15 +124,20 @@ fn beam_coverage_generalizes_to_hard_compositions() {
     let train = generated_train();
     let heldout = generated_split_cases(Split::Heldout);
     let hard = hard_cases();
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
     model.fit(&rows, 10, 1);
 
-    let proposer = BeamProposer::new(model, 4, 3);
+    let proposer = BeamProposer::new(model, 8, 4);
     let report = run_round_with(&base, &train, &temp_dir("hard-coverage"), &proposer);
     assert!(report.adopted_flag);
     assert_eq!(report.adopted.correct(), train.len());
     assert_eq!(report.adopted.wrong(), 0);
+    assert!(
+        report.chosen_label.contains("path-union"),
+        "the deep table should select the learned path-union, got {}",
+        report.chosen_label
+    );
 
     let held = evaluate(&report.adopted_harness, &heldout, false);
     assert_eq!(held.correct(), heldout.len());
@@ -156,7 +161,7 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
     let train = generated_train();
     let heldout = generated_split_cases(Split::Heldout);
     let hard = hard_cases();
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
     let accuracy = model.fit(&rows, 10, 1);
     assert!(accuracy >= 0.99, "discriminating accuracy {accuracy}");
@@ -191,7 +196,7 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
     // Learned-only: disable the compose-completeness, exhaustive-singles, and
     // exhaustive-pair safety nets. The learned per-case union must still carry
     // the wide consumers into the adopted harness.
-    let proposer = BeamProposer::new(model, 4, 2).learned_only();
+    let proposer = BeamProposer::new(model, 8, 4).learned_only();
     let report = run_round_with(&base, &train, &temp_dir("learned-only"), &proposer);
     assert!(report.adopted_flag, "learned-only adoption");
     assert_eq!(report.adopted.correct(), train.len());
@@ -236,10 +241,10 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
 fn beam_proposer_covers_triples() {
     let base = Harness::default();
     let train = generated_train();
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
     model.fit(&rows, 10, 1);
-    let proposer = BeamProposer::new(model, 4, 2);
+    let proposer = BeamProposer::new(model, 8, 4);
     let report = run_round_with(&base, &train, &temp_dir("triples"), &proposer);
     let distinct = report
         .candidates
@@ -268,4 +273,50 @@ fn beam_proposer_covers_triples() {
     );
     assert_eq!(ACTIONS.len(), 10);
     let _ = generated_corpus();
+}
+
+#[test]
+fn repeated_depth_and_refinements_are_reachable() {
+    let states = jotnar_agent::reachable_states(&Harness::default(), 3);
+    assert!(
+        states
+            .iter()
+            .any(|(_, path, _)| path.iter().filter(|a| **a == 1).count() >= 2),
+        "depth + 1 should repeat in the bounded BFS"
+    );
+    assert!(
+        states
+            .iter()
+            .any(|(_, path, _)| path.iter().filter(|a| **a == 5).count() >= 2),
+        "refinements + 1 should repeat in the bounded BFS"
+    );
+    assert!(
+        states.iter().any(|(_, _, harness)| harness.max_depth >= 4),
+        "a repeated depth state should reach max_depth >= 4"
+    );
+    assert!(
+        states
+            .iter()
+            .any(|(_, _, harness)| harness.max_refinements >= 3),
+        "a repeated refinements state should reach max_refinements >= 3"
+    );
+}
+
+#[test]
+fn wbp_interaction_features_are_an_ordinary_listing() {
+    let model = StateEffectModel::prior().with_interactions(vec![35]);
+    assert_eq!(model.feature_len(), STATE_MODEL_INPUTS + 11);
+    let bound = asm::assemble(&model.listing, &AsmOptions::new("."))
+        .expect("the WBP interaction model must assemble");
+    assert_eq!(bound.inputs.len(), STATE_MODEL_INPUTS);
+    // lag 35 maps task[6] (depth_delta) onto state[9] (refinements) at i=41.
+    assert!(
+        model.listing.contains("x35_41"),
+        "lag 35 should include the refinements x depth_delta product"
+    );
+    let scores = model.scores(
+        &vec![0; TASK_FEATURE_NAMES.len()],
+        &vec![0; STATE_FEATURE_NAMES.len()],
+    );
+    assert_eq!(scores.len(), ACTIONS.len());
 }

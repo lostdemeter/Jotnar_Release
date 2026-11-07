@@ -23,13 +23,13 @@ fn joint_model_fits_action_prototypes_and_closes_the_stream() {
     let base = Harness::default();
     let train = train_cases();
     let heldout = generated_split_cases(Split::Heldout);
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
     let mut effect = StateEffectModel::prior();
     effect.fit(&rows, 10, 1);
 
     let named = TaskEncoder::prior();
     let backbone = Backbone::named(&named.w_enc, &named.b_enc);
-    let joint: JointProposer = fit_joint(effect, backbone, &rows, 4, 2);
+    let joint: JointProposer = fit_joint(effect, backbone, &rows, 8, 4);
 
     assert_eq!(joint.prototypes.len(), ACTIONS.len());
     assert!(joint

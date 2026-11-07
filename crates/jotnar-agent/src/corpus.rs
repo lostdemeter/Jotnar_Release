@@ -406,6 +406,19 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
             "saxpy_s16",
             Train,
         ),
+        // Deeper than s16: this needs repeated `depth + 1` (or equivalent
+        // refinement rounds), so the transition table must allow repeated
+        // actions. The held-out deeper shape is a different start family.
+        make(
+            "gen-elem-saxpy-s64-train",
+            "saxpy",
+            "saxpy_s64",
+            "elementwise",
+            Solve,
+            1,
+            "saxpy_s64",
+            Train,
+        ),
         // The wide compose consumers are taught on their own shapes, not on the
         // distant shape that is held out. `vec9` and `vec16` are shaped vector
         // reductions; the audit-only cases
@@ -670,6 +683,18 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             Solve,
             2,
             "saxpy_s16",
+            Hard,
+        ),
+        // Deeper than s16: six doublings. The adopted harness must either
+        // repeat `depth + 1` or use the refinement rounds.
+        make(
+            "hard-affine-s64",
+            "affine",
+            "affine_s64",
+            "elementwise",
+            Solve,
+            2,
+            "affine_s64",
             Hard,
         ),
         make(

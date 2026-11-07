@@ -25,11 +25,16 @@ pub fn library() -> BTreeMap<String, String> {
     );
     out.insert("saxpy_oct".into(), family::build_saxpy_oct(&empty).unwrap());
     out.insert("saxpy_s16".into(), family::build_saxpy_s16(&empty).unwrap());
+    out.insert("saxpy_s64".into(), family::build_saxpy_s64(&empty).unwrap());
     out.insert("saxpy_dup".into(), family::build_saxpy_dup(&empty).unwrap());
     out.insert("affine".into(), family::build_affine(&empty).unwrap());
     out.insert(
         "affine_s16".into(),
         family::build_affine_s16(&empty).unwrap(),
+    );
+    out.insert(
+        "affine_s64".into(),
+        family::build_affine_s64(&empty).unwrap(),
     );
     out.insert(
         "affine_quad".into(),
@@ -112,8 +117,8 @@ fn tensor(n: usize, start: i64) -> TestVec {
 pub fn example_set(label: &str, variant: u64) -> Vec<Example> {
     let label = label.strip_suffix("_dup").unwrap_or(label);
     match label {
-        "saxpy" | "saxpy_double" | "saxpy_quad" | "saxpy_oct" | "saxpy_s16" | "affine"
-        | "affine_quad" | "affine_oct" | "affine_s16" => {
+        "saxpy" | "saxpy_double" | "saxpy_quad" | "saxpy_oct" | "saxpy_s16" | "saxpy_s64"
+        | "affine" | "affine_quad" | "affine_oct" | "affine_s16" | "affine_s64" => {
             let (a, x, y) = if variant == 0 {
                 (vec![1, 2, 3, 4], vec![5, 6, 7, 8], vec![9, 10, 11, 12])
             } else {

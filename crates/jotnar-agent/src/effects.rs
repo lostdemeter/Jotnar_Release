@@ -142,43 +142,40 @@ pub struct StateEffectRow {
     pub steps: usize,
 }
 
-/// All distinct action subsets of size at most `max_depth`.
-fn action_subsets(n: usize, max_depth: usize) -> Vec<Vec<usize>> {
-    fn walk(start: usize, n: usize, left: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
-        out.push(cur.clone());
-        if left == 0 {
-            return;
-        }
-        for i in start..n {
-            cur.push(i);
-            walk(i + 1, n, left - 1, cur, out);
-            cur.pop();
-        }
-    }
-    let mut out = Vec::new();
-    walk(0, n, max_depth.min(n), &mut Vec::new(), &mut out);
-    out
-}
-
-/// Every reachable harness state up to `max_depth` distinct actions.
+/// Every reachable harness state up to `max_depth` **steps**.
 ///
-/// States are keyed by [`Harness::fingerprint`], so different action orders
-/// that reach the same harness collapse to one node.
+/// Unlike the old distinct-subset enumeration, this is a bounded BFS over
+/// action sequences. Idempotent actions stop naturally because `apply_action`
+/// returns `None` once the family/consumer is present; `depth + 1` and
+/// `refinements + 1` can repeat up to their caps. States are keyed by
+/// [`Harness::fingerprint`], so different orders that reach the same harness
+/// collapse to one node. The first (shortest) path is kept for reporting.
 pub fn reachable_states(base: &Harness, max_depth: usize) -> Vec<(String, Vec<usize>, Harness)> {
+    use std::collections::VecDeque;
+
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for subset in action_subsets(ACTIONS.len(), max_depth) {
-        let mut harness = base.clone();
-        let mut applied = Vec::new();
-        for action in &subset {
-            if let Some(mutation) = apply_action(&harness, *action) {
-                harness = mutation.harness;
-                applied.push(*action);
-            }
+    let base_key = base.fingerprint();
+    seen.insert(base_key.clone());
+    out.push((base_key, Vec::new(), base.clone()));
+    let mut queue = VecDeque::new();
+    queue.push_back((base.clone(), Vec::new(), 0usize));
+
+    while let Some((harness, path, steps)) = queue.pop_front() {
+        if steps >= max_depth {
+            continue;
         }
-        let key = harness.fingerprint();
-        if seen.insert(key.clone()) {
-            out.push((key, applied, harness));
+        for action in 0..ACTIONS.len() {
+            let Some(mutation) = apply_action(&harness, action) else {
+                continue;
+            };
+            let key = mutation.harness.fingerprint();
+            if seen.insert(key.clone()) {
+                let mut next_path = path.clone();
+                next_path.push(action);
+                out.push((key, next_path.clone(), mutation.harness.clone()));
+                queue.push_back((mutation.harness, next_path, steps + 1));
+            }
         }
     }
     out
@@ -221,17 +218,11 @@ pub fn state_effects(cases: &[Case], base: &Harness, max_depth: usize) -> Vec<St
             .get(case_id)
             .cloned()
             .unwrap_or_else(|| "stream".to_string());
-        for (key, subset, harness) in &states {
-            if subset.len() >= max_depth {
-                continue;
-            }
+        for (key, _path, harness) in &states {
             let Some(parent) = outcomes.get(&(key.clone(), case_id.clone())) else {
                 continue;
             };
             for (action, action_label) in ACTIONS.iter().enumerate() {
-                if subset.contains(&action) {
-                    continue;
-                }
                 let Some(mutation) = apply_action(harness, action) else {
                     continue;
                 };

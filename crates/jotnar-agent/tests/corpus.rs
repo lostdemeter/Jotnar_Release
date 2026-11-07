@@ -19,7 +19,7 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
     let train = all.iter().filter(|c| c.split == Split::Train).count();
     let calibration = all.iter().filter(|c| c.split == Split::Calibration).count();
     let heldout = all.iter().filter(|c| c.split == Split::Heldout).count();
-    assert_eq!((train, calibration, heldout), (10, 7, 6));
+    assert_eq!((train, calibration, heldout), (11, 7, 6));
 
     // The wide compose consumers are taught on their own shapes; the distant
     // matrix/select shapes stay audit-only.
@@ -45,12 +45,12 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
 #[test]
 fn hard_cases_are_audit_only_and_require_composition() {
     let hard = hard_cases();
-    assert_eq!(hard.len(), 11);
+    assert_eq!(hard.len(), 12);
     let base = Harness::default();
     let report = evaluate(&base, &hard, false);
     assert_eq!(
-        report.wrong_refusal, 7,
-        "four refine/deep + matmul3 + matmul4 + select16"
+        report.wrong_refusal, 8,
+        "four refine/deep + matmul3 + matmul4 + select16 + affine_s64"
     );
     assert_eq!(report.solved, 3, "three high-distance retention cases");
     assert_eq!(report.refused, 1, "one high-distance refusal control");
@@ -111,6 +111,21 @@ fn hard_cases_are_audit_only_and_require_composition() {
             jotnar_agent::ACTIONS[consumer]
         );
     }
+    // The deeper affine_s64 target needs repeated depth. The minimal path is
+    // three `depth + 1` actions; the default depth-2 harness cannot reach it.
+    let s64 = hard
+        .iter()
+        .find(|c| c.intent.id == "hard-affine-s64")
+        .expect("hard affine s64 case");
+    let s64_min = states
+        .iter()
+        .filter_map(|(_, subset, harness)| {
+            let r = evaluate(harness, std::slice::from_ref(s64), false);
+            r.outcomes[0].kind.correct().then_some(subset.clone())
+        })
+        .min_by_key(|subset| subset.len())
+        .expect("affine_s64 is solvable with repeated depth");
+    assert_eq!(s64_min, vec![1, 1, 1], "affine_s64 needs repeated depth");
 }
 
 #[test]

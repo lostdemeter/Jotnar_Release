@@ -185,6 +185,25 @@ OUT = IADD(s4, s4)
     .to_string())
 }
 
+pub fn build_saxpy_s64(_: &Params) -> Result<String, String> {
+    Ok("\
+# SAXPY, then six doublings (64x). This needs repeated depth.
+IN A
+IN X
+IN Y
+
+ax = IMUL(A, X)
+s1 = IADD(ax, Y)
+s2 = IADD(s1, s1)
+s3 = IADD(s2, s2)
+s4 = IADD(s3, s3)
+s5 = IADD(s4, s4)
+s6 = IADD(s5, s5)
+OUT = IADD(s6, s6)
+"
+    .to_string())
+}
+
 pub fn build_affine(_: &Params) -> Result<String, String> {
     Ok("\
 # Affine: OUT = A*X + Y.
@@ -209,6 +228,24 @@ s1 = IADD(ax, ax)
 s2 = IADD(s1, s1)
 s3 = IADD(s2, s2)
 OUT = IADD(s3, s3)
+"
+    .to_string())
+}
+
+pub fn build_affine_s64(_: &Params) -> Result<String, String> {
+    Ok("\
+# Affine, then six doublings (64x). This needs repeated depth.
+IN A
+IN X
+IN Y
+
+ax = IMAD(A, X, Y)
+s1 = IADD(ax, ax)
+s2 = IADD(s1, s1)
+s3 = IADD(s2, s2)
+s4 = IADD(s3, s3)
+s5 = IADD(s4, s4)
+OUT = IADD(s5, s5)
 "
     .to_string())
 }

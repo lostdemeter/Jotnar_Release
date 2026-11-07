@@ -5,6 +5,15 @@ use jotnar_agent::{
     WorldModelProposer,
 };
 
+/// The legacy effect model is a single-action table; the repeated-depth s64
+/// training case is out of its scope. The state model + path union owns it.
+fn single_action_train() -> Vec<jotnar_agent::Case> {
+    let mut train = generated_split_cases(Split::Train);
+    train.extend(generated_split_cases(Split::Calibration));
+    train.retain(|case| case.intent.id != "gen-elem-saxpy-s64-train");
+    train
+}
+
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
         "jotnar-agent-effect-model-{tag}-{}",
@@ -17,8 +26,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn effect_model_ranks_the_solving_actions() {
-    let mut train = generated_split_cases(Split::Train);
-    train.extend(generated_split_cases(Split::Calibration));
+    let train = single_action_train();
     let effects = action_effects(&train, &Harness::default());
     let mut model = EffectModel::prior();
     let accuracy = model.fit(&effects, 10, 1);
@@ -62,8 +70,7 @@ fn effect_model_ranks_the_solving_actions() {
 #[test]
 fn world_model_composes_the_generated_stream() {
     let base = Harness::default();
-    let mut train = generated_split_cases(Split::Train);
-    train.extend(generated_split_cases(Split::Calibration));
+    let train = single_action_train();
     let heldout = generated_split_cases(Split::Heldout);
     let effects = action_effects(&train, &base);
     let mut model = EffectModel::prior();

@@ -25,7 +25,7 @@ fn usage() -> &'static str {
        jotnar-agent fit-backbone [--out DIR] [--corpus] [--generated] [--qwen] [--hidden N] [--mix N] [--dim N] [--inter N] [--lr N] [--max-loops N]\n\
        jotnar-agent fit-qwen [--out DIR] [--generated] [--masks N] [--mask-rate F] [--ridge F] [--rounds N] [--seed N] [--scale F] [--dim N] [--inter N] [--max-loops N]\n\
        jotnar-agent fit-effect-model [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
-       jotnar-agent fit-state-effect-model [--out DIR] [--corpus] [--generated] [--depth N] [--epochs N] [--lr N]\n\
+       jotnar-agent fit-state-effect-model [--out DIR] [--corpus] [--generated] [--depth N] [--epochs N] [--lr N] [--interaction-lags CSV]\n\
        jotnar-agent fit-cost-model [--out DIR] [--corpus] [--generated] [--depth N] [--lambda F]\n\
        jotnar-agent fit-joint-model --out DIR --state-effect-weights FILE --backbone FILE [--corpus] [--generated] [--depth N] [--beam N]\n\
        jotnar-agent gen-tasks [--out FILE]\n\
@@ -547,7 +547,7 @@ fn run() -> Result<ExitCode, String> {
         "gen-transitions" => {
             let mut out: Option<PathBuf> = None;
             let mut corpus_mode = false;
-            let mut depth = 2usize;
+            let mut depth = 3usize;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => {
@@ -590,9 +590,10 @@ fn run() -> Result<ExitCode, String> {
             let mut out = PathBuf::from("runs/state-effect-model");
             let mut corpus_mode = false;
             let mut generated = true;
-            let mut depth = 2usize;
+            let mut depth = 3usize;
             let mut epochs = 10usize;
             let mut lr = 1i64;
+            let mut interaction_lags: Vec<usize> = Vec::new();
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => {
@@ -627,16 +628,35 @@ fn run() -> Result<ExitCode, String> {
                             .parse()
                             .map_err(|_| "--lr needs a number".to_string())?;
                     }
+                    "--interaction-lags" => {
+                        let csv = args.next().ok_or("--interaction-lags needs CSV")?;
+                        interaction_lags = csv
+                            .split(',')
+                            .map(|v| {
+                                v.trim()
+                                    .parse::<usize>()
+                                    .map_err(|_| format!("bad interaction lag {v:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
                     other => return Err(format!("unknown option {other}")),
                 }
             }
-            fit_state_effect_model(&out, corpus_mode, generated, depth, epochs, lr)
+            fit_state_effect_model(
+                &out,
+                corpus_mode,
+                generated,
+                depth,
+                epochs,
+                lr,
+                &interaction_lags,
+            )
         }
         "fit-cost-model" => {
             let mut out = PathBuf::from("runs/cost-model");
             let mut corpus_mode = false;
             let mut generated = true;
-            let mut depth = 2usize;
+            let mut depth = 3usize;
             let mut lambda = 1.0f64;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -676,8 +696,8 @@ fn run() -> Result<ExitCode, String> {
             let mut backbone: Option<PathBuf> = None;
             let mut corpus_mode = false;
             let mut generated = true;
-            let mut depth = 2usize;
-            let mut beam = 4usize;
+            let mut depth = 3usize;
+            let mut beam = 8usize;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => {
@@ -981,8 +1001,8 @@ fn run() -> Result<ExitCode, String> {
             let mut joint_weights: Option<PathBuf> = None;
             let mut cost_weights: Option<PathBuf> = None;
             let mut cost_weight = 4i64;
-            let mut beam = 4usize;
-            let mut depth = 2usize;
+            let mut beam = 8usize;
+            let mut depth = 4usize;
             let mut archive_path: Option<PathBuf> = None;
             let mut archive_novelty = 2usize;
             let mut archive_capacity = 16usize;
@@ -1952,6 +1972,7 @@ fn fit_state_effect_model(
     depth: usize,
     epochs: usize,
     lr: i64,
+    interaction_lags: &[usize],
 ) -> Result<ExitCode, String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let (train, _) = if generated {
@@ -1962,7 +1983,7 @@ fn fit_state_effect_model(
     let base = Harness::default();
     let states = jotnar_agent::effects::reachable_states(&base, depth);
     let rows = state_effects(&train, &base, depth);
-    let mut model = StateEffectModel::prior();
+    let mut model = StateEffectModel::prior().with_interactions(interaction_lags.to_vec());
     let accuracy = model.fit(&rows, epochs, lr);
     model
         .save(&out.join("state-effect-model.weights.json"))

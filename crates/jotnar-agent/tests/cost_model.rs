@@ -62,7 +62,7 @@ fn cost_aware_beam_still_adopts_the_stream() {
     let mut train = generated_split_cases(Split::Train);
     train.extend(generated_split_cases(Split::Calibration));
     let heldout = generated_split_cases(Split::Heldout);
-    let rows = state_effects(&train, &base, 2);
+    let rows = state_effects(&train, &base, 3);
 
     let mut effect = StateEffectModel::prior();
     effect.fit(&rows, 10, 1);
@@ -70,7 +70,7 @@ fn cost_aware_beam_still_adopts_the_stream() {
     let mae = cost.fit(&rows, 1.0);
     assert!(mae < 1.0, "cost MAE {mae}");
 
-    let proposer = BeamProposer::new(effect, 4, 3).with_cost(cost, 4);
+    let proposer = BeamProposer::new(effect, 8, 4).with_cost(cost, 4);
     let report = run_round_with(&base, &train, &temp_dir("adopt"), &proposer);
     assert!(report.adopted_flag);
     assert_eq!(report.adopted.correct(), train.len());

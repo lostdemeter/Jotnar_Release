@@ -31,11 +31,15 @@ pub const STATE_MODEL_INPUTS: usize = TASK_FEATURE_NAMES.len() + STATE_FEATURE_N
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateEffectModel {
-    /// ACTIONS.len() x STATE_MODEL_INPUTS
+    /// ACTIONS.len() x feature_len (task + state + self-similar products)
     pub w: Vec<Vec<i64>>,
     pub b: Vec<i64>,
     #[serde(default)]
     pub listing: String,
+    /// WBP self-similar product lags over `[task, state]`. Empty is the plain
+    /// additive model. A lag `L` appends `f[i] * f[i-L]` for `i >= L`.
+    #[serde(default)]
+    pub interaction_lags: Vec<usize>,
 }
 
 impl StateEffectModel {
@@ -75,15 +79,61 @@ impl StateEffectModel {
             w,
             b,
             listing: String::new(),
+            interaction_lags: Vec::new(),
         };
         model.listing = build_listing(&model);
         model
     }
 
+    /// Add WBP self-similar product features over `[task, state]`.
+    pub fn with_interactions(mut self, lags: Vec<usize>) -> Self {
+        let mut valid: Vec<usize> = lags
+            .into_iter()
+            .filter(|lag| *lag > 0 && *lag < STATE_MODEL_INPUTS)
+            .collect();
+        valid.sort_unstable();
+        valid.dedup();
+        self.interaction_lags = valid;
+        let len = self.feature_len();
+        self.w.truncate(ACTIONS.len());
+        while self.w.len() < ACTIONS.len() {
+            self.w.push(vec![0; len]);
+        }
+        for row in &mut self.w {
+            row.resize(len, 0);
+        }
+        self.b.truncate(ACTIONS.len());
+        while self.b.len() < ACTIONS.len() {
+            self.b.push(0);
+        }
+        self.listing = build_listing(&self);
+        self
+    }
+
+    pub fn feature_len(&self) -> usize {
+        let base = STATE_MODEL_INPUTS;
+        let extra: usize = self
+            .interaction_lags
+            .iter()
+            .filter(|lag| **lag > 0 && **lag < base)
+            .map(|lag| base - *lag)
+            .sum();
+        base + extra
+    }
+
     pub fn features(&self, task: &[i64], state: &[i64]) -> Vec<i64> {
-        let mut out = Vec::with_capacity(STATE_MODEL_INPUTS);
-        out.extend_from_slice(task);
-        out.extend_from_slice(state);
+        let mut base = Vec::with_capacity(STATE_MODEL_INPUTS);
+        base.extend_from_slice(task);
+        base.extend_from_slice(state);
+        let mut out = base.clone();
+        for lag in &self.interaction_lags {
+            if *lag == 0 || *lag >= base.len() {
+                continue;
+            }
+            for i in *lag..base.len() {
+                out.push(base[i].wrapping_mul(base[i - lag]));
+            }
+        }
         out
     }
 
@@ -216,12 +266,13 @@ impl StateEffectModel {
     /// Pad or truncate to the current action space. Old artifact files remain
     /// loadable when a new action is added; the new rows start at zero.
     pub fn normalize(&mut self) {
+        let len = self.feature_len();
         self.w.truncate(ACTIONS.len());
         while self.w.len() < ACTIONS.len() {
-            self.w.push(vec![0; STATE_MODEL_INPUTS]);
+            self.w.push(vec![0; len]);
         }
         for row in &mut self.w {
-            row.resize(STATE_MODEL_INPUTS, 0);
+            row.resize(len, 0);
         }
         self.b.truncate(ACTIONS.len());
         while self.b.len() < ACTIONS.len() {
@@ -243,10 +294,29 @@ fn build_listing(model: &StateEffectModel) -> String {
         lines.push(format!("IN u{j}  # {name}"));
     }
     lines.push(String::new());
-    let names: Vec<String> = (0..TASK_FEATURE_NAMES.len())
+    let base_names: Vec<String> = (0..TASK_FEATURE_NAMES.len())
         .map(|j| format!("t{j}"))
         .chain((0..STATE_FEATURE_NAMES.len()).map(|j| format!("u{j}")))
         .collect();
+    let mut names = base_names.clone();
+    // WBP self-similar products: x_i * x_{i-lag} over [task, state].
+    for lag in &model.interaction_lags {
+        if *lag == 0 || *lag >= base_names.len() {
+            continue;
+        }
+        for i in *lag..base_names.len() {
+            let name = format!("x{lag}_{i}");
+            lines.push(format!(
+                "{name} = IMUL({}, {})",
+                base_names[i],
+                base_names[i - lag]
+            ));
+            names.push(name);
+        }
+    }
+    if !model.interaction_lags.is_empty() {
+        lines.push(String::new());
+    }
     for (action, row) in model.w.iter().enumerate() {
         let mut products = Vec::new();
         for (j, weight) in row.iter().enumerate() {
@@ -276,7 +346,7 @@ fn build_listing(model: &StateEffectModel) -> String {
 
 #[derive(Clone, Debug)]
 struct BeamNode {
-    subset: BTreeSet<usize>,
+    path: Vec<usize>,
     harness: Harness,
     state: Vec<i64>,
     score: i64,
@@ -294,7 +364,7 @@ where
     S: Fn(&[i64], &[i64]) -> Vec<i64>,
 {
     let mut frontier = vec![BeamNode {
-        subset: BTreeSet::new(),
+        path: Vec::new(),
         harness: base.clone(),
         state: base.state_features(),
         score: 0,
@@ -305,9 +375,6 @@ where
         for node in &frontier {
             let scores = score(task, &node.state);
             for action in 0..ACTIONS.len() {
-                if node.subset.contains(&action) {
-                    continue;
-                }
                 if !action_applies(action, task) {
                     continue;
                 }
@@ -317,7 +384,7 @@ where
                 let key = mutation.harness.fingerprint();
                 let predicted = scores.get(action).copied().unwrap_or(0);
                 let candidate = BeamNode {
-                    subset: node.subset.iter().copied().chain([action]).collect(),
+                    path: node.path.iter().copied().chain([action]).collect(),
                     state: mutation.harness.state_features(),
                     harness: mutation.harness,
                     score: node.score + predicted,
@@ -516,6 +583,41 @@ where
         );
     }
 
+    // Union the learned top path per wrong case, preserving repeated
+    // `depth + 1` / `refinements + 1` actions. The plain union is a set and
+    // collapses repeats; this candidate keeps the counts the beam found.
+    let mut path_actions: Vec<usize> = Vec::new();
+    for (_, paths) in &per_case {
+        if let Some(best) = paths.first() {
+            path_actions.extend(best.path.iter().copied());
+        }
+    }
+    if !path_actions.is_empty() {
+        let mut harness = base.clone();
+        let mut applied = Vec::new();
+        for action in path_actions {
+            if let Some(mutation) = apply_action(&harness, action) {
+                harness = mutation.harness;
+                applied.push(action);
+            }
+        }
+        if harness != *base {
+            let names = applied
+                .iter()
+                .map(|action| ACTIONS[*action])
+                .collect::<Vec<_>>()
+                .join(" + ");
+            push(
+                Mutation {
+                    label: format!("{prefix}-path-union: {names}"),
+                    harness,
+                },
+                &mut out,
+                &mut seen,
+            );
+        }
+    }
+
     // Compose completeness: keep every available compose consumer alive. A
     // consumer that does not match the current output arity is a safe no-op,
     // and it is exactly what a feature-distant shape may need. This is a
@@ -567,7 +669,7 @@ where
     for (case, paths) in &per_case {
         for (rank, node) in paths.iter().take(2).enumerate() {
             let names = node
-                .subset
+                .path
                 .iter()
                 .map(|action| ACTIONS[*action])
                 .collect::<Vec<_>>()
@@ -596,7 +698,7 @@ where
     ranked.sort_by_key(|node| std::cmp::Reverse(node.score));
     for node in ranked.into_iter().take(beam) {
         let names = node
-            .subset
+            .path
             .iter()
             .map(|action| ACTIONS[*action])
             .collect::<Vec<_>>()
