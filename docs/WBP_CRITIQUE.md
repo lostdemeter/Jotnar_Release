@@ -64,6 +64,49 @@ is the part worth keeping and extending.
    procedure. A stronger test is: hold out the interaction, run the protocol,
    and see whether it selects the right lag without being told.
 
+## The row-space versus feature-space residual problem
+
+This is the most important limitation found after the first port.
+
+`resfrac`/`peel` operate on a **sequence of rows/groups** — in the agent, the
+held-out `(case, state)` groups ordered by key. The peeled layer is a row-space
+filter. It can say “the error pattern across cases/states is structured”, but it
+does **not** say which feature interaction is missing.
+
+Selecting a self-similar lag such as lag 35 (`refinements * depth_delta`) was a
+hand choice, not something the peel produced. That is a category error: the
+residual was structured in row space, while the candidate basis lived in feature
+space.
+
+Future WBP work must separate:
+
+- **row-space residual** — is the error pattern across cases/states structured?
+- **feature-space attribution** — which feature or feature pair carries the
+  error? (e.g. per-feature gradient/attribution, a low-rank bilinear fit, or a
+  held-out gain sweep over candidate products.)
+
+Without that separation, “add the product at the peeled lag” is not a justified
+inference.
+
+## The held-out mechanism wall (Stage 3)
+
+The first honest held-out split holds out the last four generated cases:
+`gen-select-max-cal`, `gen-select-min`, `gen-vec16-sum-train`, and
+`gen-vec9-sum-train`. The linear model is 1.000 on the training groups and
+**0.667–0.682** on the held-out groups. The WBP lag-35 interaction is neutral.
+
+The held-out residual is structured in row order (`rho ~ 0.494`, and `~0.392`
+after sorting), so it is not pure noise. But the peel layer is in row space; it
+does not identify a feature pair. The wall is most likely **mechanism coverage /
+target representation**: the model never sees a `select_min` target mechanism,
+and the task vector does not encode the target operand semantics.
+
+That is a real result: a held-out mechanism wall is not automatically a
+nonlinearity. The first fixes to try are target-program features, a different
+training mechanism, or a learned program encoder — not a bigger φ product.
+
+
+
 ## Future work, in priority order
 
 1. **Port the calibration guardrail to Jotnar.** Precision re-check, restricted
@@ -72,25 +115,31 @@ is the part worth keeping and extending.
 2. **Replace the magic constants with a frequency sweep.** Keep φ/√5/π as
    pre-registered priors, but compare against random frequencies and require the
    result to beat the sweep’s decoys.
-3. **Make the residual ordering explicit and permutation-aware.** Support
+3. **Separate row-space and feature-space residuals.** Add per-feature
+   attribution/gradient or a low-rank bilinear fit; do not treat a row-space
+   peel layer as a feature lag.
+4. **Make the residual ordering explicit and permutation-aware.** Support
    multiple orders, graph orders, and a permutation-invariant summary. Report
    whether the diagnosis survives the order change.
-4. **Select lags by held-out gain, not by hand.** Enumerate candidate lags,
+5. **Select lags by held-out gain, not by hand.** Enumerate candidate lags,
    fit on train, score on held-out transition groups, and report the selected
    lag plus the decoy distribution. No hand-picked lag 35.
-5. **Extend `resfrac` beyond AR(1)/AR(2).** Order-k Levinson or a least-squares
+6. **Extend `resfrac` beyond AR(1)/AR(2).** Order-k Levinson or a least-squares
    AR; axis-aware reductions; a scale/height sweep.
-6. **Add a path/value residual diagnostic.** For search-composition walls like
+7. **Add a path/value residual diagnostic.** For search-composition walls like
    the repeated `depth + 1` case, diagnose the beam/path score residual, not
    only the per-transition residual.
-7. **Build a real residual-wall benchmark.** A dataset where the nonlinearity
+8. **Build a real residual-wall benchmark.** A dataset where the nonlinearity
    is genuinely in the held-out labels, not injected by the feature we add.
    Report negative results as first-class outcomes.
-8. **Test outside the agent.** Time series, tabular interactions, and a genuine
-   black-box linear layer (PEP). If the protocol only works on our synthetic
-   examples, say so.
-9. **Keep the exact gate as the judge.** WBP is a proposer/diagnostic. It never
-   grades itself and never overrides the gate.
+9. **Add target-program features / mechanism coverage.** The held-out
+   select/vec wall is a representation/coverage problem; encode the target op
+   family and operand semantics, or add a different training mechanism.
+10. **Test outside the agent.** Time series, tabular interactions, and a genuine
+    black-box linear layer (PEP). If the protocol only works on our synthetic
+    examples, say so.
+11. **Keep the exact gate as the judge.** WBP is a proposer/diagnostic. It never
+    grades itself and never overrides the gate.
 
 ## Scorecard for future WBP claims
 

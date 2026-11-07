@@ -439,6 +439,33 @@ back to the incumbent.
 - The archive prevents the loop from collapsing back to one incumbent.
 - In every path the model **proposes**; the exact gate **judges**.
 
+## Held-out transition evaluation
+
+`eval-state-effect` splits the exact transition rows and reports discriminating
+top-1 on train and held-out groups. It is the Stage 3 wall measurement:
+
+```sh
+cargo run -q -p jotnar-agent -- eval-state-effect --generated \
+  --depth 3 --holdout-cases 4 --interaction-lags 35
+```
+
+The first held-out split is the last four generated cases
+(`gen-select-max-cal`, `gen-select-min`, `gen-vec16-sum-train`,
+`gen-vec9-sum-train`). Result:
+
+```text
+linear:              train 1.000, heldout 0.682
+interactions[[35]]:  train 1.000, heldout 0.682
+```
+
+The held-out residual is structured in row order (`rho ~ 0.494`, `~0.392` after
+sorting), but the peel layer lives in **row space**, not feature space. The
+hand-picked lag-35 product (`refinements * depth_delta`) is neutral. This is a
+mechanism/representation wall: the model never sees a `select_min` target
+mechanism, and the task vector does not encode the target operand semantics. The
+first fixes to try are target-program features, a different training mechanism,
+or a program encoder — not a bigger nonlinear layer.
+
 ## Known limits
 
 - State enumeration is over distinct action subsets; repeated `depth + 1` is

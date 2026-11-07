@@ -18,6 +18,7 @@ fn usage() -> &'static str {
        jotnar-agent archive --file FILE\n\
        jotnar-agent feature-audit [--corpus] [--generated] [--state-effect-weights FILE] [--top-k N]\n\
        jotnar-agent wbp-audit [--signal CSV] [--file FILE] [--order N] [--layers N]\n\
+       jotnar-agent eval-state-effect [--corpus] [--generated] [--depth N] [--holdout-depth N] [--holdout-refinements N] [--holdout-cases N] [--interaction-lags CSV] [--epochs N] [--lr N]\n\
        jotnar-agent fit-recurrent [--out DIR] [--deep-train] [--efficient]\n\
        jotnar-agent fit-encoder [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-looped-encoder [--out DIR] [--corpus] [--generated] [--max-loops N] [--encoder-weights FILE]\n\
@@ -978,6 +979,169 @@ fn run() -> Result<ExitCode, String> {
                     "  jump {}: rho {:.3} -> {:.3} (delta {:+.3})",
                     jump.label, jump.rho_before, jump.rho_after, jump.delta
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        "eval-state-effect" => {
+            let mut corpus_mode = false;
+            let mut generated = true;
+            let mut depth = 3usize;
+            let mut holdout_depth = 3usize;
+            let mut holdout_refinements = 0usize;
+            let mut holdout_cases = 0usize;
+            let mut interaction_lags: Vec<usize> = Vec::new();
+            let mut epochs = 10usize;
+            let mut lr = 1i64;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--corpus" => {
+                        corpus_mode = true;
+                        generated = false;
+                    }
+                    "--generated" => {
+                        generated = true;
+                        corpus_mode = false;
+                    }
+                    "--depth" => {
+                        depth = args
+                            .next()
+                            .ok_or("--depth needs a number")?
+                            .parse()
+                            .map_err(|_| "--depth needs a number".to_string())?;
+                    }
+                    "--holdout-depth" => {
+                        holdout_depth = args
+                            .next()
+                            .ok_or("--holdout-depth needs a number")?
+                            .parse()
+                            .map_err(|_| "--holdout-depth needs a number".to_string())?;
+                    }
+                    "--holdout-refinements" => {
+                        holdout_refinements = args
+                            .next()
+                            .ok_or("--holdout-refinements needs a number")?
+                            .parse()
+                            .map_err(|_| "--holdout-refinements needs a number".to_string())?;
+                    }
+                    "--holdout-cases" => {
+                        holdout_cases = args
+                            .next()
+                            .ok_or("--holdout-cases needs a number")?
+                            .parse()
+                            .map_err(|_| "--holdout-cases needs a number".to_string())?;
+                    }
+                    "--interaction-lags" => {
+                        let csv = args.next().ok_or("--interaction-lags needs CSV")?;
+                        interaction_lags = csv
+                            .split(',')
+                            .map(|v| {
+                                v.trim()
+                                    .parse::<usize>()
+                                    .map_err(|_| format!("bad interaction lag {v:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                    "--epochs" => {
+                        epochs = args
+                            .next()
+                            .ok_or("--epochs needs a number")?
+                            .parse()
+                            .map_err(|_| "--epochs needs a number".to_string())?;
+                    }
+                    "--lr" => {
+                        lr = args
+                            .next()
+                            .ok_or("--lr needs a number")?
+                            .parse()
+                            .map_err(|_| "--lr needs a number".to_string())?;
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            let (train, _) = if generated {
+                fit_splits(true, true)
+            } else {
+                fit_splits(false, corpus_mode)
+            };
+            let base = Harness::default();
+            let rows = state_effects(&train, &base, depth);
+            let mut train_rows: Vec<_> = rows.clone();
+            let mut test_rows: Vec<_> = Vec::new();
+            let split = if holdout_cases > 0 {
+                let mut ids: Vec<String> =
+                    train.iter().map(|case| case.intent.id.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                let held: std::collections::BTreeSet<String> =
+                    ids.iter().rev().take(holdout_cases).cloned().collect();
+                train_rows.retain(|row| !held.contains(&row.case));
+                test_rows = rows
+                    .into_iter()
+                    .filter(|row| held.contains(&row.case))
+                    .collect();
+                format!("last {holdout_cases} cases")
+            } else if holdout_refinements > 0 {
+                train_rows.retain(|row| row.state[9] < holdout_refinements as i64);
+                test_rows = rows
+                    .into_iter()
+                    .filter(|row| row.state[9] >= holdout_refinements as i64)
+                    .collect();
+                format!("state refinements >= {holdout_refinements}")
+            } else if holdout_depth > 0 {
+                train_rows.retain(|row| row.state[8] < holdout_depth as i64);
+                test_rows = rows
+                    .into_iter()
+                    .filter(|row| row.state[8] >= holdout_depth as i64)
+                    .collect();
+                format!("state depth >= {holdout_depth}")
+            } else {
+                "all rows".to_string()
+            };
+            println!(
+                "state-effect eval: {} cases, depth {}, split {split}",
+                train.len(),
+                depth
+            );
+            println!(
+                "rows: train {} / heldout {}",
+                train_rows.len(),
+                test_rows.len()
+            );
+            let mut linear = StateEffectModel::prior();
+            linear.fit(&train_rows, epochs, lr);
+            let tr = linear.evaluate(&train_rows);
+            let te = linear.evaluate(&test_rows);
+            println!(
+                "linear:              train {:.3} ({}/{}), heldout {:.3} ({}/{})",
+                tr.accuracy, tr.hits, tr.groups, te.accuracy, te.hits, te.groups
+            );
+            if !interaction_lags.is_empty() {
+                let mut inter =
+                    StateEffectModel::prior().with_interactions(interaction_lags.clone());
+                inter.fit(&train_rows, epochs, lr);
+                let itr = inter.evaluate(&train_rows);
+                let ite = inter.evaluate(&test_rows);
+                println!(
+                    "interactions[{:?}]: train {:.3} ({}/{}), heldout {:.3} ({}/{})",
+                    interaction_lags,
+                    itr.accuracy,
+                    itr.hits,
+                    itr.groups,
+                    ite.accuracy,
+                    ite.hits,
+                    ite.groups
+                );
+            }
+            if !te.residual.is_empty() {
+                match jotnar_agent::wall_breaking::peel(&te.residual, 2, 5, 0.85) {
+                    Ok(p) => println!(
+                        "wbp residual: n={} final-rho={:.3} layers={}",
+                        te.residual.len(),
+                        p.rhos.last().copied().unwrap_or(1.0),
+                        p.layers.len()
+                    ),
+                    Err(e) => println!("wbp residual: {e}"),
+                }
             }
             Ok(ExitCode::SUCCESS)
         }

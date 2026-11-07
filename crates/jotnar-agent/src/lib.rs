@@ -76,7 +76,9 @@ pub use proposer::{
 };
 pub use solve::{solve, SolveError, SolveResult};
 pub use state::{State, StateKind};
-pub use state_effect_model::{BeamProposer, ProposalOptions, StateEffectModel, STATE_MODEL_INPUTS};
+pub use state_effect_model::{
+    BeamProposer, DiscriminatingEval, ProposalOptions, StateEffectModel, STATE_MODEL_INPUTS,
+};
 pub use step::{Step, StepRecord};
 pub use task_encoder::{
     calibration_dataset, EncoderSample, EncoderWeights, FitReport, TaskEncoder, LATENT_NAMES,

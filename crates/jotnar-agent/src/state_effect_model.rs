@@ -29,6 +29,16 @@ use crate::view::CaseView;
 
 pub const STATE_MODEL_INPUTS: usize = TASK_FEATURE_NAMES.len() + STATE_FEATURE_NAMES.len();
 
+#[derive(Clone, Debug, Default)]
+pub struct DiscriminatingEval {
+    pub groups: usize,
+    pub hits: usize,
+    pub accuracy: f64,
+    /// Per-group `max(wrong score) - max(correct score)`. Positive means the
+    /// wrong action outranked the correct one.
+    pub residual: Vec<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateEffectModel {
     /// ACTIONS.len() x feature_len (task + state + self-similar products)
@@ -248,6 +258,76 @@ impl StateEffectModel {
             1.0
         } else {
             hits as f64 / discriminating as f64
+        }
+    }
+
+    /// Evaluate on held-out transition rows. Returns the discriminating top-1
+    /// accuracy and the per-group score residual (wrong-best minus right-best).
+    /// Only groups with both a correct and a wrong action are counted; groups
+    /// where every applicable action is safe are not ranking problems.
+    pub fn evaluate(&self, rows: &[StateEffectRow]) -> DiscriminatingEval {
+        let mut groups: BTreeMap<(String, String), Vec<&StateEffectRow>> = BTreeMap::new();
+        for row in rows {
+            groups
+                .entry((row.case.clone(), row.state_key.clone()))
+                .or_default()
+                .push(row);
+        }
+        let mut total = 0usize;
+        let mut hits = 0usize;
+        let mut residual = Vec::new();
+        for group in groups.values() {
+            if group.is_empty() {
+                continue;
+            }
+            let sample = group[0];
+            let scores = self.scores(&sample.task, &sample.state);
+            let applicable: Vec<&&StateEffectRow> = group
+                .iter()
+                .filter(|row| action_applies(row.action, &sample.task))
+                .collect();
+            let has_pos = applicable.iter().any(|row| row.correct);
+            let has_neg = applicable.iter().any(|row| row.wrong);
+            if !has_pos || !has_neg {
+                continue;
+            }
+            total += 1;
+            let best_pos = applicable
+                .iter()
+                .filter(|row| row.correct)
+                .map(|row| scores[row.action])
+                .max()
+                .unwrap_or(i64::MIN);
+            let best_neg = applicable
+                .iter()
+                .filter(|row| row.wrong)
+                .map(|row| scores[row.action])
+                .max()
+                .unwrap_or(i64::MIN);
+            residual.push(best_neg.saturating_sub(best_pos));
+            let top = applicable
+                .iter()
+                .max_by_key(|row| scores[row.action])
+                .map(|row| row.action)
+                .unwrap_or(0);
+            if applicable
+                .iter()
+                .find(|row| row.action == top)
+                .map(|row| row.correct)
+                .unwrap_or(false)
+            {
+                hits += 1;
+            }
+        }
+        DiscriminatingEval {
+            groups: total,
+            hits,
+            accuracy: if total == 0 {
+                1.0
+            } else {
+                hits as f64 / total as f64
+            },
+            residual,
         }
     }
 

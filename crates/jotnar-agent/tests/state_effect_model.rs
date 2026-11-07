@@ -276,6 +276,67 @@ fn beam_proposer_covers_triples() {
 }
 
 #[test]
+fn held_out_case_split_is_a_mechanism_wall() {
+    let base = Harness::default();
+    let all = generated_train();
+    let held_ids = [
+        "gen-select-max-cal",
+        "gen-select-min",
+        "gen-vec16-sum-train",
+        "gen-vec9-sum-train",
+    ];
+    let rows = state_effects(&all, &base, 2);
+    let train_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| !held_ids.contains(&row.case.as_str()))
+        .cloned()
+        .collect();
+    let test_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| held_ids.contains(&row.case.as_str()))
+        .cloned()
+        .collect();
+
+    let mut linear = StateEffectModel::prior();
+    linear.fit(&train_rows, 10, 1);
+    let held = linear.evaluate(&test_rows);
+    assert!(held.groups >= 10, "held-out groups {}", held.groups);
+    assert!(
+        held.accuracy < 0.9,
+        "the held-out select/vec mechanisms should expose a wall, got {:.3}",
+        held.accuracy
+    );
+
+    // WBP lag 35 does not break this wall, and the residual is ergodic.
+    let mut inter = StateEffectModel::prior().with_interactions(vec![35]);
+    inter.fit(&train_rows, 10, 1);
+    let inter_held = inter.evaluate(&test_rows);
+    assert!(
+        (inter_held.accuracy - held.accuracy).abs() < 0.05,
+        "lag 35 should be neutral on the mechanism wall: {:.3} vs {:.3}",
+        held.accuracy,
+        inter_held.accuracy
+    );
+    let r = jotnar_agent::wall_breaking::resfrac(&held.residual, 2).unwrap();
+    let mut sorted = held.residual.clone();
+    sorted.sort_unstable();
+    let rs = jotnar_agent::wall_breaking::resfrac(&sorted, 2).unwrap();
+    eprintln!(
+        "mechanism wall: rho(case-order)={:.3} rho(sorted)={:.3}",
+        r.rho, rs.rho
+    );
+    assert!(r.rho.is_finite() && rs.rho.is_finite());
+    // The WBP ordering caveat: this residual is ordered by (case, state), so the
+    // rho is a case-block signal, not a feature-lag signal. Lag 35 is neutral.
+    assert!(
+        (r.rho - rs.rho).abs() > 0.05 || r.rho > 0.85,
+        "the diagnosis should be sensitive to ordering or genuinely ergodic: {:.3} vs {:.3}",
+        r.rho,
+        rs.rho
+    );
+}
+
+#[test]
 fn repeated_depth_and_refinements_are_reachable() {
     let states = jotnar_agent::reachable_states(&Harness::default(), 3);
     assert!(

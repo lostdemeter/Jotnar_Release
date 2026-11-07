@@ -565,6 +565,23 @@ selected:  compose: add compose[reduce_sum] + refinements + 1
 That is a capability extension discovered by the loop, with retention and
 held-out checks — not a hand-coded feature.
 
+## Held-out transition evaluation
+
+`eval-state-effect` splits the exact transition rows and reports discriminating
+top-1 on train and held-out groups:
+
+```sh
+cargo run -q -p jotnar-agent -- eval-state-effect --generated \
+  --depth 3 --holdout-cases 4 --interaction-lags 35
+```
+
+The first held-out split (the select/vec cases) gives `train 1.000 / heldout
+0.682`; the WBP lag-35 interaction is neutral. The residual is structured in
+row order but the peel layer is not a feature-space attribution; see
+[`docs/WBP_CRITIQUE.md`](../../docs/WBP_CRITIQUE.md) and
+[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md). The wall is mechanism/
+representation, not model capacity.
+
 ## Wall-Breaking Protocol (side quest)
 
 The additive state model is still linear. The Wall-Breaking Protocol asks
