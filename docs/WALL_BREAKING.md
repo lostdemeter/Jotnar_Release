@@ -60,7 +60,7 @@ We then built the deeper, repeated-action table:
 
 - `reachable_states` is a bounded BFS over action sequences, not distinct
   subsets; `depth + 1` and `refinements + 1` repeat up to their caps.
-- depth 3: **205 states / 7380 transitions / 10 actions**, still
+- depth 3: **205 states / 7790 transitions / 10 actions**, still
   `discriminating top-1 = 1.000` for the plain linear model.
 - `affine_s64` is the wall: a 64x deep chain that needs three `depth + 1`
   steps. The default depth-2 harness misses it; the exact gate solves it at 6
@@ -73,8 +73,8 @@ collapsed the repeated `depth + 1` actions to one. The fix is a learned
 repeated depth/refinement counts. Result:
 
 ```text
-generated 18/18 selection, 6/6 held-out
-hard      12/12 (affine_s64 solved at 6 steps)
+generated 19/19 selection, 6/6 held-out
+hard      13/13 (affine_s64 at 6 steps; held-out pair -> select_min)
 learned-only the same
 ```
 

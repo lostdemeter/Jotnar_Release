@@ -133,7 +133,7 @@ The aggregate proposer cannot say *which* case needs *which* action. The task
 encoder works per case:
 
 ```
-CaseView -> 20-dim task vector -> 9 named latent channels -> 6 action scores
+CaseView -> 39-dim task vector -> 9 named latent channels -> 6 action scores
 ```
 
 The latent channels are legible (`start_outputs`, `depth_delta`,
@@ -308,9 +308,9 @@ cargo run -q -p jotnar-agent -- run --out runs/generated \
   --proposer task --generated
 ```
 
-The generated corpus recombines library start/target pairs into 11 train /
-7 calibration / 6 held-out cases. The task prior is 11/18 with 3/6 held-out;
-the causal planner reaches 18/18 and 6/6. The held-out gain comes from the
+The generated corpus recombines library start/target pairs into 12 train /
+7 calibration / 6 held-out cases. The task prior is 11/19 with 3/6 held-out;
+the causal planner reaches 19/19 and 6/6. The held-out gain comes from the
 deep **training** member (`saxpy -> saxpy_s16`); the held-out member
 (`affine -> affine_s16`) is unchanged. The wide consumers are taught by the
 `vec9`/`vec16` training fans, not by the audit shapes. See
@@ -340,7 +340,7 @@ next co-training target.
 ## The action-effect world model
 
 The teacher gives action effects; the world model learns them. `EffectModel`
-is a Jotnar-native linear map from the 32 geometric task features to 10 action scores,
+is a Jotnar-native linear map from the 39 geometric task features to 10 action scores,
 trained on the exact `gen-effects` table.
 
 ```sh
@@ -356,7 +356,7 @@ cargo run -q -p jotnar-agent -- run --out runs/world \
 the exact gate can choose a composition:
 
 ```
-generated: 18/18 selection, 6/6 held-out, adopted=true
+generated: 19/19 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
 ```
 
@@ -373,12 +373,12 @@ cargo run -q -p jotnar-agent -- gen-transitions \
   --out runs/transitions.jsonl --depth 2
 
 cargo run -q -p jotnar-agent -- fit-state-effect-model \
-  --out runs/state-effect-model --generated --depth 2 --epochs 10 --lr 1
+  --out runs/state-effect-model --generated --depth 3 --epochs 20 --lr 1
 
 cargo run -q -p jotnar-agent -- run --out runs/beam \
   --proposer beam --generated \
   --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
-  --beam 4 --depth 2
+  --beam 8 --depth 4
 ```
 
 `BeamProposer` unions the predicted best action per wrong case, adds a
@@ -390,10 +390,10 @@ actual steps tie. `--no-complete --no-singles --no-pairs` disables the
 structural safety nets for the learned-only ablation.
 
 ```
-generated: 18/18 selection, 6/6 held-out, adopted=true
+generated: 19/19 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
 selected:  reduce_sum + depth + refinements + select_min
-learned-only (no safety nets): 18/18, 6/6, hard 12/12
+learned-only (no safety nets): 19/19, 6/6, hard 13/13
 ```
 
 The generated held-out miss is closed by a deep **training** member
@@ -423,13 +423,15 @@ cargo run -q -p jotnar-agent -- run --out runs/hard \
 
 The hard set has four novel `depth + refinements` compositions
 (`*_dup -> *_s16`), three high-distance retention cases, one refusal control,
-and **three feature-distant compose cases across two mechanisms**:
+**three feature-distant compose cases across two mechanisms**, and a
+held-out `pair -> select_min` mechanism case:
 
 | case | shape | min-dist | min solver |
 | --- | --- | ---: | --- |
 | `matmul3 -> matmul3_sum` | `[3,3]` field -> scalar | `add compose[reduce_sum]` |
 | `matmul4 -> matmul4_sum` | `[4,4]` field -> scalar | `add compose[reduce_sum]` |
 | `select16 -> select16_sum` | `[16]` select field -> scalar | `add compose[reduce_sum]` |
+| `pair -> select_min` | pair -> min select | `add family select_min` |
 
 The wide consumers are taught on `vec9`/`vec16` training fans, never on these
 shapes. `feature-audit --state-effect-weights FILE` prints the learned top-k;
@@ -438,9 +440,9 @@ the learned top-1 on each distant case is the taught consumer.
 Progression:
 
 ```
-base harness:       4/11  (only retention/control)
-learned union:     12/12  (reduce_sum from the shape features)
-learned-only:      12/12  (no completeness/singles/pairs safety net)
+base harness:       4/12  (only retention/control)
+learned union:     13/13  (reduce_sum + select_min from the target features)
+learned-only:      13/13  (no completeness/singles/pairs safety net)
 ```
 
 The hard set measures the gap; it does not tune against it. The distant
@@ -456,7 +458,7 @@ to a listing with `IDIV`.
 
 ```sh
 cargo run -q -p jotnar-agent -- fit-cost-model \
-  --out runs/cost-model --generated --depth 2 --lambda 1
+  --out runs/cost-model --generated --depth 3 --lambda 1
 
 cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
   --proposer beam --generated \
@@ -481,7 +483,7 @@ cargo run -q -p jotnar-agent -- fit-joint-model \
   --out runs/joint-model --generated \
   --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
   --backbone runs/backbone-qwen/backbone.weights.json \
-  --depth 2 --beam 4
+  --depth 3 --beam 8
 
 cargo run -q -p jotnar-agent -- run --out runs/joint \
   --proposer joint --generated \
@@ -489,11 +491,11 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 
 ```
-generated: 18/18 selection, 6/6 held-out, adopted=true
+generated: 19/19 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
 selected:  reduce_sum + depth + refinements + select_min
-hard:      12/12
-learned-only (no safety nets): 18/18, 6/6, hard 12/12
+hard:      13/13
+learned-only (no safety nets): 19/19, 6/6, hard 13/13
 ```
 
 `run --archive FILE` records gate-competitive candidates in a QD archive,
@@ -514,7 +516,7 @@ cargo run -q -p jotnar-agent -- run --out runs/qd \
 ```
 
 The first run selected a hop from the `beam-union` seed adding `depth + 1`,
-then passed the hard audit 12/12.
+then passed the hard audit 13/13.
 
 ## The driver
 
@@ -572,15 +574,20 @@ top-1 on train and held-out groups:
 
 ```sh
 cargo run -q -p jotnar-agent -- eval-state-effect --generated \
-  --depth 3 --holdout-cases 4 --interaction-lags 35
+  --depth 3 --epochs 20 \
+  --holdout-ids gen-select-max-cal,gen-select-min,gen-vec16-sum-train,gen-vec9-sum-train
 ```
 
-The first held-out split (the select/vec cases) gives `train 1.000 / heldout
-0.682`; the WBP lag-35 interaction is neutral. The residual is structured in
-row order but the peel layer is not a feature-space attribution; see
+The select/vec held-out split now gives `train 1.000 / heldout 1.000`
+(132 held-out groups at depth 3), up from `0.682`. The mechanism fix is a
+cross-start training case (`select_max -> select_min`) plus the target-program
+features: the task vector now encodes the target op family and the
+`ISELECT(C,A,B)` / `ISELECT(C,B,A)` operand orientation. The target features
+are what separate `select_min` from `select_max` when the start shape is the
+same; the synthetic min/max ablation in `tests/state_effect_model.rs` fails
+without them. The WBP lag-35 interaction is neutral on this split. See
 [`docs/WBP_CRITIQUE.md`](../../docs/WBP_CRITIQUE.md) and
-[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md). The wall is mechanism/
-representation, not model capacity.
+[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
 
 ## Wall-Breaking Protocol (side quest)
 
@@ -602,9 +609,9 @@ cargo run -q -p jotnar-agent -- wbp-audit --file runs/wbp-signal.json
 The synthetic wall result is `linear=0.583 -> wbp-product=1.000`: a product
 interaction the additive scorer cannot represent is broken by the Jotnar
 self-similar product feature. The deeper repeated-action table is now in place
-(205 states / 7380 transitions, depth 3). Its wall — `affine_s64` needing three
+(205 states / 7790 transitions, depth 3). Its wall — `affine_s64` needing three
 `depth + 1` steps — was in proposal composition, not per-transition
-linearity; the learned path-union fixes it (18/18 + 6/6, hard 12/12). The WBP
+linearity; the learned path-union fixes it (19/19 + 6/6, hard 13/13). The WBP
 interaction lag 35 is available and neutral on that wall.
 
 ## What it proves
@@ -644,7 +651,7 @@ interaction lag 35 is available and neutral on that wall.
   recurrent block that generalizes to the held-out deep case at two loops and
   retains the fix at four.
 - A state-dependent `(task, harness_state, action)` world model learns the
-  exact transition table and a beam/triple proposer reaches 18/18 + 6/6 on the
+  exact transition table and a beam/triple proposer reaches 19/19 + 6/6 on the
   generated stream and 18/18 + 6/6 on the corpus.
 - The first causal planner composes three capabilities
   (`reduce_sum + depth/refinements + select_min`), not just a pair.
@@ -652,7 +659,7 @@ interaction lag 35 is available and neutral on that wall.
   (`saxpy -> saxpy_s16`); the frozen held-out `affine -> affine_s16` is not
   trained on.
 - A joint latent + effect proposer (Qwen φ-ladder backbone + causal state
-  model) reaches the same 18/18 + 6/6 and 18/18 + 6/6.
+  model) reaches the same 19/19 + 6/6 and 18/18 + 6/6.
 - A quality-diversity archive keeps the best four-capability harness beside the
   novel 14/17 pair attractors, so the loop does not collapse to one incumbent.
 - `feature-audit` shows the original held-out split is a sibling split: two
@@ -660,15 +667,16 @@ interaction lag 35 is available and neutral on that wall.
   training task.
 - A separate audit-only hard set (four novel `depth + refinements`
   compositions, three high-distance retention cases, one refusal control, and
-  three feature-distant compose cases across matrix and select) measures the
-  real generalization gap. The base harness scores 4/11; the learned union
-  reaches 12/12 without training on the hard set.
+  three feature-distant compose cases across matrix and select, and a
+  held-out `pair -> select_min` mechanism case) measures the real
+  generalization gap. The base harness scores 4/12; the learned union reaches
+  13/13 without training on the hard set.
 - The three distant compose cases (`[3,3]` matmul, `[4,4]` matmul, `[16]`
   select) are all field-to-scalar reductions. One geometric `reduce_sum`
   action handles all three; the model learns its applicability from shape and
   op-family features (`ima(t)mul`, `iselect`, `reduce_applicable`).
 - With `--no-complete --no-singles --no-pairs`, the learned-only run still
-  reaches 18/18 selection, 6/6 held-out, and hard 12/12: the distant cases are
+  reaches 19/19 selection, 6/6 held-out, and hard 13/13: the distant cases are
   not relying on the completeness/singles safety net.
 - A Jotnar-native cost head (`(task, state) -> predicted steps`, ridge fit,
   `IDIV` scale) lets the beam rank by `effect - lambda * cost`.
@@ -679,7 +687,8 @@ interaction lag 35 is available and neutral on that wall.
 ## What it does not prove
 
 - C / non-FPU / CUDA parity for the adopted paths (the gate is the interpreter).
-- Cost or performance claims (the cost model is not implemented).
+- Hardware cost or performance claims (the cost head predicts bounded steps,
+  not machine time).
 - The spatial-map/refine layer from the Python circuit.
 - Generalization beyond the supplied and frozen examples.
 - That the chosen path is the only path.

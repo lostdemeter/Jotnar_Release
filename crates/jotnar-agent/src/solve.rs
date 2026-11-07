@@ -440,7 +440,14 @@ fn family_of_label(label: &str) -> Option<(String, BTreeMap<String, String>)> {
             return Some(("reduce".to_string(), p));
         }
     }
-    for name in ["saxpy", "matmul2", "select_max", "select", "add2"] {
+    for name in [
+        "saxpy",
+        "matmul2",
+        "select_max",
+        "select_min",
+        "select",
+        "add2",
+    ] {
         if label == name {
             return Some((name.to_string(), BTreeMap::new()));
         }

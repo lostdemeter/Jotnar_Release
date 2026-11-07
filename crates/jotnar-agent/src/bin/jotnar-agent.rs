@@ -18,7 +18,7 @@ fn usage() -> &'static str {
        jotnar-agent archive --file FILE\n\
        jotnar-agent feature-audit [--corpus] [--generated] [--state-effect-weights FILE] [--top-k N]\n\
        jotnar-agent wbp-audit [--signal CSV] [--file FILE] [--order N] [--layers N]\n\
-       jotnar-agent eval-state-effect [--corpus] [--generated] [--depth N] [--holdout-depth N] [--holdout-refinements N] [--holdout-cases N] [--interaction-lags CSV] [--epochs N] [--lr N]\n\
+       jotnar-agent eval-state-effect [--corpus] [--generated] [--depth N] [--holdout-depth N] [--holdout-refinements N] [--holdout-cases N] [--holdout-ids CSV] [--no-target-features] [--interaction-lags CSV] [--epochs N] [--lr N]\n\
        jotnar-agent fit-recurrent [--out DIR] [--deep-train] [--efficient]\n\
        jotnar-agent fit-encoder [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-looped-encoder [--out DIR] [--corpus] [--generated] [--max-loops N] [--encoder-weights FILE]\n\
@@ -592,7 +592,7 @@ fn run() -> Result<ExitCode, String> {
             let mut corpus_mode = false;
             let mut generated = true;
             let mut depth = 3usize;
-            let mut epochs = 10usize;
+            let mut epochs = 20usize;
             let mut lr = 1i64;
             let mut interaction_lags: Vec<usize> = Vec::new();
             while let Some(arg) = args.next() {
@@ -989,8 +989,10 @@ fn run() -> Result<ExitCode, String> {
             let mut holdout_depth = 3usize;
             let mut holdout_refinements = 0usize;
             let mut holdout_cases = 0usize;
+            let mut holdout_ids: Vec<String> = Vec::new();
+            let mut no_target_features = false;
             let mut interaction_lags: Vec<usize> = Vec::new();
-            let mut epochs = 10usize;
+            let mut epochs = 20usize;
             let mut lr = 1i64;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -1030,6 +1032,15 @@ fn run() -> Result<ExitCode, String> {
                             .parse()
                             .map_err(|_| "--holdout-cases needs a number".to_string())?;
                     }
+                    "--holdout-ids" => {
+                        let csv = args.next().ok_or("--holdout-ids needs CSV")?;
+                        holdout_ids = csv
+                            .split(',')
+                            .map(|v| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .collect();
+                    }
+                    "--no-target-features" => no_target_features = true,
                     "--interaction-lags" => {
                         let csv = args.next().ok_or("--interaction-lags needs CSV")?;
                         interaction_lags = csv
@@ -1064,10 +1075,27 @@ fn run() -> Result<ExitCode, String> {
                 fit_splits(false, corpus_mode)
             };
             let base = Harness::default();
-            let rows = state_effects(&train, &base, depth);
+            let mut rows = state_effects(&train, &base, depth);
+            if no_target_features {
+                let target_start = jotnar_agent::TASK_FEATURE_NAMES.len() - 7;
+                for row in &mut rows {
+                    for feature in row.task.iter_mut().skip(target_start) {
+                        *feature = 0;
+                    }
+                }
+            }
             let mut train_rows: Vec<_> = rows.clone();
             let mut test_rows: Vec<_> = Vec::new();
-            let split = if holdout_cases > 0 {
+            let split = if !holdout_ids.is_empty() {
+                let held: std::collections::BTreeSet<String> =
+                    holdout_ids.iter().cloned().collect();
+                train_rows.retain(|row| !held.contains(&row.case));
+                test_rows = rows
+                    .into_iter()
+                    .filter(|row| held.contains(&row.case))
+                    .collect();
+                format!("explicit ids {}", holdout_ids.join(","))
+            } else if holdout_cases > 0 {
                 let mut ids: Vec<String> =
                     train.iter().map(|case| case.intent.id.clone()).collect();
                 ids.sort();
@@ -1602,7 +1630,7 @@ fn run() -> Result<ExitCode, String> {
                         serde_json::json!({
                             "kind": "task-encoder",
                             "encoder_loops": encoder_loops,
-                            "task_features": jotnar_agent::TASK_FEATURE_NAMES,
+                            "task_features": jotnar_agent::TASK_FEATURE_NAMES.as_slice(),
                             "latent": jotnar_agent::LATENT_NAMES,
                             "actions": jotnar_agent::ACTIONS,
                         })

@@ -2,9 +2,10 @@ use std::fs;
 
 use jotnar::asm::{self, AsmOptions};
 use jotnar_agent::{
-    apply_action, evaluate, generated_corpus, generated_split_cases, hard_cases, run_round_with,
-    state_effects, BeamProposer, Harness, Split, StateEffectModel, ACTIONS, STATE_FEATURE_NAMES,
-    STATE_MODEL_INPUTS, TASK_FEATURE_NAMES,
+    apply_action, case_views, evaluate, generated_corpus, generated_split_cases, hard_cases,
+    run_round_with, state_effects, task_encoder::task_vector, BeamProposer, Harness, Split,
+    StateEffectModel, StateEffectRow, ACTIONS, STATE_FEATURE_NAMES, STATE_MODEL_INPUTS,
+    TASK_FEATURE_NAMES,
 };
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -98,7 +99,7 @@ fn state_model_closes_the_generated_heldout() {
     let heldout = generated_split_cases(Split::Heldout);
     let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
-    let accuracy = model.fit(&rows, 10, 1);
+    let accuracy = model.fit(&rows, 20, 1);
     assert!(accuracy >= 0.99, "discriminating accuracy {accuracy}");
 
     let proposer = BeamProposer::new(model, 8, 4);
@@ -126,7 +127,7 @@ fn beam_coverage_generalizes_to_hard_compositions() {
     let hard = hard_cases();
     let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
-    model.fit(&rows, 10, 1);
+    model.fit(&rows, 20, 1);
 
     let proposer = BeamProposer::new(model, 8, 4);
     let report = run_round_with(&base, &train, &temp_dir("hard-coverage"), &proposer);
@@ -163,7 +164,7 @@ fn learned_ranking_solves_distant_shapes_without_safety_nets() {
     let hard = hard_cases();
     let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
-    let accuracy = model.fit(&rows, 10, 1);
+    let accuracy = model.fit(&rows, 20, 1);
     assert!(accuracy >= 0.99, "discriminating accuracy {accuracy}");
 
     // The learned model ranks the taught consumer first on every held-out
@@ -243,7 +244,7 @@ fn beam_proposer_covers_triples() {
     let train = generated_train();
     let rows = state_effects(&train, &base, 3);
     let mut model = StateEffectModel::prior();
-    model.fit(&rows, 10, 1);
+    model.fit(&rows, 20, 1);
     let proposer = BeamProposer::new(model, 8, 4);
     let report = run_round_with(&base, &train, &temp_dir("triples"), &proposer);
     let distinct = report
@@ -276,7 +277,7 @@ fn beam_proposer_covers_triples() {
 }
 
 #[test]
-fn held_out_case_split_is_a_mechanism_wall() {
+fn target_features_close_the_held_out_select_cases() {
     let base = Harness::default();
     let all = generated_train();
     let held_ids = [
@@ -298,41 +299,106 @@ fn held_out_case_split_is_a_mechanism_wall() {
         .collect();
 
     let mut linear = StateEffectModel::prior();
-    linear.fit(&train_rows, 10, 1);
+    linear.fit(&train_rows, 20, 1);
     let held = linear.evaluate(&test_rows);
     assert!(held.groups >= 10, "held-out groups {}", held.groups);
     assert!(
-        held.accuracy < 0.9,
-        "the held-out select/vec mechanisms should expose a wall, got {:.3}",
+        held.accuracy >= 0.95,
+        "target features should close the held-out select/vec split, got {:.3}",
         held.accuracy
     );
+}
 
-    // WBP lag 35 does not break this wall, and the residual is ergodic.
-    let mut inter = StateEffectModel::prior().with_interactions(vec![35]);
-    inter.fit(&train_rows, 10, 1);
-    let inter_held = inter.evaluate(&test_rows);
+fn without_target_features(rows: &[StateEffectRow]) -> Vec<StateEffectRow> {
+    let start = TASK_FEATURE_NAMES.len() - 7;
+    rows.iter()
+        .cloned()
+        .map(|mut row| {
+            for feature in row.task.iter_mut().skip(start) {
+                *feature = 0;
+            }
+            row
+        })
+        .collect()
+}
+
+#[test]
+fn target_select_orientation_features_are_parsed() {
+    let base = Harness::default();
+    let cases = generated_corpus();
+    for (id, min, max) in [
+        ("gen-select-min", 1, 0),
+        ("gen-select-max-cal", 0, 1),
+        ("gen-select-min-cross-train", 1, 0),
+    ] {
+        let case = cases
+            .iter()
+            .find(|c| c.case.intent.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+            .case
+            .clone();
+        let report = evaluate(&base, std::slice::from_ref(&case), false);
+        let views = case_views(std::slice::from_ref(&case), &report);
+        let task = task_vector(&views[0], &base);
+        assert_eq!(task[37], min, "{id} target_select_min");
+        assert_eq!(task[38], max, "{id} target_select_max");
+        assert_eq!(task[33], 1, "{id} target_iselect");
+    }
+}
+
+#[test]
+fn target_features_resolve_the_select_min_max_ambiguity() {
+    // Two otherwise identical states: one target is select_min and one is
+    // select_max. Only the target-program flags distinguish them, so the
+    // matching family actions are unlearnable without those features.
+    let mut rows = Vec::new();
+    for (i, is_min) in [true, false].into_iter().enumerate() {
+        let mut task = vec![0i64; TASK_FEATURE_NAMES.len()];
+        task[33] = 1; // target_iselect
+        if is_min {
+            task[37] = 1; // target_select_min
+        } else {
+            task[38] = 1; // target_select_max
+        }
+        for action in [4usize, 6] {
+            let correct = if is_min { action == 6 } else { action == 4 };
+            rows.push(StateEffectRow {
+                case: format!("select-{i}"),
+                split: "train".to_string(),
+                task: task.clone(),
+                state_key: "base".to_string(),
+                state: vec![0; STATE_FEATURE_NAMES.len()],
+                action,
+                label: ACTIONS[action].to_string(),
+                parent_outcome: "wrong-refusal".to_string(),
+                outcome: if correct { "solved" } else { "wrong-refusal" }.to_string(),
+                parent_correct: false,
+                correct,
+                wrong: !correct,
+                delta: i64::from(correct),
+                steps: 1,
+            });
+        }
+    }
+
+    let mut with_target = StateEffectModel::prior();
+    with_target.fit(&rows, 20, 1);
+    let with_eval = with_target.evaluate(&rows);
     assert!(
-        (inter_held.accuracy - held.accuracy).abs() < 0.05,
-        "lag 35 should be neutral on the mechanism wall: {:.3} vs {:.3}",
-        held.accuracy,
-        inter_held.accuracy
+        with_eval.accuracy >= 0.99,
+        "target features should separate min/max, got {:.3}",
+        with_eval.accuracy
     );
-    let r = jotnar_agent::wall_breaking::resfrac(&held.residual, 2).unwrap();
-    let mut sorted = held.residual.clone();
-    sorted.sort_unstable();
-    let rs = jotnar_agent::wall_breaking::resfrac(&sorted, 2).unwrap();
-    eprintln!(
-        "mechanism wall: rho(case-order)={:.3} rho(sorted)={:.3}",
-        r.rho, rs.rho
-    );
-    assert!(r.rho.is_finite() && rs.rho.is_finite());
-    // The WBP ordering caveat: this residual is ordered by (case, state), so the
-    // rho is a case-block signal, not a feature-lag signal. Lag 35 is neutral.
+
+    let no_target_rows = without_target_features(&rows);
+    let mut without_target = StateEffectModel::prior();
+    without_target.fit(&no_target_rows, 20, 1);
+    let without_eval = without_target.evaluate(&no_target_rows);
     assert!(
-        (r.rho - rs.rho).abs() > 0.05 || r.rho > 0.85,
-        "the diagnosis should be sensitive to ordering or genuinely ergodic: {:.3} vs {:.3}",
-        r.rho,
-        rs.rho
+        with_eval.accuracy > without_eval.accuracy + 0.25,
+        "target features should be the separator: {:.3} vs {:.3}",
+        with_eval.accuracy,
+        without_eval.accuracy
     );
 }
 
@@ -366,7 +432,7 @@ fn repeated_depth_and_refinements_are_reachable() {
 #[test]
 fn wbp_interaction_features_are_an_ordinary_listing() {
     let model = StateEffectModel::prior().with_interactions(vec![35]);
-    assert_eq!(model.feature_len(), STATE_MODEL_INPUTS + 11);
+    assert_eq!(model.feature_len(), STATE_MODEL_INPUTS + 18);
     let bound = asm::assemble(&model.listing, &AsmOptions::new("."))
         .expect("the WBP interaction model must assemble");
     assert_eq!(bound.inputs.len(), STATE_MODEL_INPUTS);

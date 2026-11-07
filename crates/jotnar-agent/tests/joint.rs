@@ -25,7 +25,7 @@ fn joint_model_fits_action_prototypes_and_closes_the_stream() {
     let heldout = generated_split_cases(Split::Heldout);
     let rows = state_effects(&train, &base, 3);
     let mut effect = StateEffectModel::prior();
-    effect.fit(&rows, 10, 1);
+    effect.fit(&rows, 20, 1);
 
     let named = TaskEncoder::prior();
     let backbone = Backbone::named(&named.w_enc, &named.b_enc);

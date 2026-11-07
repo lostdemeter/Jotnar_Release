@@ -10,7 +10,14 @@ use jotnar_agent::{
 fn single_action_train() -> Vec<jotnar_agent::Case> {
     let mut train = generated_split_cases(Split::Train);
     train.extend(generated_split_cases(Split::Calibration));
-    train.retain(|case| case.intent.id != "gen-elem-saxpy-s64-train");
+    train.retain(|case| {
+        !matches!(
+            case.intent.id.as_str(),
+            "gen-elem-saxpy-s64-train"
+                | "gen-select-min-cross-train"
+                | "gen-select-max-cross-train"
+        )
+    });
     train
 }
 

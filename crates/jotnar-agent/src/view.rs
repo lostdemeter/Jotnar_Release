@@ -40,6 +40,15 @@ pub struct CaseView {
     pub start_iselect: bool,
     pub start_iadd: bool,
     pub start_ireduce_sum: bool,
+    /// Target-listing op family and operand semantics. This is what lets the
+    /// model connect a held-out target mechanism to the family action.
+    pub target_imatmul: bool,
+    pub target_iselect: bool,
+    pub target_iadd: bool,
+    pub target_ireduce_sum: bool,
+    pub target_imul: bool,
+    pub target_select_min: bool,
+    pub target_select_max: bool,
 }
 
 fn meta(label: Option<&str>, lib: &BTreeMap<String, String>) -> (usize, usize, usize) {
@@ -102,6 +111,56 @@ fn op_flags(label: Option<&str>, lib: &BTreeMap<String, String>) -> (bool, bool,
     )
 }
 
+fn target_op_flags(
+    label: Option<&str>,
+    lib: &BTreeMap<String, String>,
+) -> (bool, bool, bool, bool, bool) {
+    let Some(label) = label else {
+        return (false, false, false, false, false);
+    };
+    let Some(text) = lib.get(label) else {
+        return (false, false, false, false, false);
+    };
+    let Ok(state) = State::new(label, text.clone()) else {
+        return (false, false, false, false, false);
+    };
+    let ops = state.ops();
+    let has = |name: &str| ops.iter().any(|op| op == name);
+    (
+        has("IMATMUL"),
+        has("ISELECT"),
+        has("IADD"),
+        has("IREDUCE_SUM"),
+        has("IMUL"),
+    )
+}
+
+/// `ISELECT(C, A, B)` is min-like; `ISELECT(C, B, A)` is max-like.
+fn select_orientation(label: Option<&str>, lib: &BTreeMap<String, String>) -> (bool, bool) {
+    let Some(label) = label else {
+        return (false, false);
+    };
+    let Some(text) = lib.get(label) else {
+        return (false, false);
+    };
+    let Ok(state) = State::new(label, text.clone()) else {
+        return (false, false);
+    };
+    let mut min = false;
+    let mut max = false;
+    for ins in &state.bound.instrs {
+        if ins.mn == "ISELECT" && ins.args.len() == 3 {
+            if ins.args[1] == "A" && ins.args[2] == "B" {
+                min = true;
+            }
+            if ins.args[1] == "B" && ins.args[2] == "A" {
+                max = true;
+            }
+        }
+    }
+    (min, max)
+}
+
 pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
     let lib = library();
     cases
@@ -140,6 +199,10 @@ pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
                 !target_shapes.is_empty() && target_shapes.iter().all(|s| s.is_empty());
             let (start_imatmul, start_iselect, start_iadd, start_ireduce_sum) =
                 op_flags(case.intent.input.label.as_deref(), &lib);
+            let (target_imatmul, target_iselect, target_iadd, target_ireduce_sum, target_imul) =
+                target_op_flags(case.intent.output.label.as_deref(), &lib);
+            let (target_select_min, target_select_max) =
+                select_orientation(case.intent.output.label.as_deref(), &lib);
             CaseView {
                 case_id: case.intent.id.clone(),
                 family: case.family.clone(),
@@ -165,6 +228,13 @@ pub fn case_views(cases: &[Case], report: &EvalReport) -> Vec<CaseView> {
                 start_iselect,
                 start_iadd,
                 start_ireduce_sum,
+                target_imatmul,
+                target_iselect,
+                target_iadd,
+                target_ireduce_sum,
+                target_imul,
+                target_select_min,
+                target_select_max,
             }
         })
         .collect()

@@ -546,6 +546,18 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
             "select_min",
             Train,
         ),
+        // Teach the select mechanisms on a *different* start shape, so the
+        // target-program features can carry them to the held-out shapes.
+        make(
+            "gen-select-min-cross-train",
+            "select_max",
+            "select_min",
+            "select",
+            Solve,
+            1,
+            "select_min",
+            Train,
+        ),
         make(
             "gen-select-max-cal",
             "select_max",
@@ -761,6 +773,19 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             Solve,
             2,
             "select16_sum",
+            Hard,
+        ),
+        // A second held-out select shape: pair -> select_min. The training
+        // stream teaches select_min from a select_max start, so the target-
+        // program features must carry the mechanism across starts.
+        make(
+            "hard-select-min-pair",
+            "pair",
+            "select_min",
+            "select",
+            Solve,
+            2,
+            "select_min",
             Hard,
         ),
         make(

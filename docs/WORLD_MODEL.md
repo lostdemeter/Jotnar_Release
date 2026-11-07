@@ -70,7 +70,7 @@ present, or that after a composition the remaining fix is `depth + 1`. The
 state-dependent model takes the harness with the task:
 
 ```text
-32 geometric task features + 14 harness-state features -> 10 action scores
+39 geometric task features + 14 harness-state features -> 10 action scores
 ```
 
 State features (`Harness::state_features`): `has_reduce_sum`, `has_select_min`,
@@ -83,8 +83,13 @@ output stream with a non-empty shape, and the target must be a scalar. The task
 vector carries `start_rank`, `start_numel`, `target_rank`, `target_numel`,
 `start_is_field`, `target_is_scalar`, `shape_match`, `reduce_applicable`, and
 the start op family (`start_imatmul`, `start_iselect`, `start_iadd`,
-`start_ireduce_sum`). The model learns from those features; `action_applies`
-only enforces the contract. There is no `sum4`/`sum9`/`sum16` action.
+`start_ireduce_sum`) and the target-program features (`target_imatmul`,
+`target_iselect`, `target_iadd`, `target_ireduce_sum`, `target_imul`,
+`target_select_min`, `target_select_max`). The select flags are parsed from the
+target listing's `ISELECT` operand order: `ISELECT(C,A,B)` is min-like and
+`ISELECT(C,B,A)` is max-like. The model learns from those features;
+`action_applies` only enforces the contract. There is no `sum4`/`sum9`/`sum16`
+action.
 
 `gen-transitions` builds the causal transition table with the exact gate. It
 enumerates every distinct harness reachable with up to `--depth` actions
@@ -93,19 +98,20 @@ enumerates every distinct harness reachable with up to `--depth` actions
 
 ```sh
 cargo run -q -p jotnar-agent -- gen-transitions \
-  --out runs/transitions.jsonl --depth 2
+  --out runs/transitions.jsonl --depth 3
 
 cargo run -q -p jotnar-agent -- fit-state-effect-model \
   --out runs/state-effect-model --generated \
-  --depth 2 --epochs 10 --lr 1
+  --depth 3 --epochs 20 --lr 1
 ```
 
 ```text
-state effect model: 18 cases, 205 states, 7380 transitions, 10 actions,
-depth=2, epochs=10, lr=1, discriminating top-1 accuracy=1.000
+state effect model: 19 cases, 205 states, 7790 transitions, 10 actions,
+depth=3, epochs=20, lr=1, discriminating top-1 accuracy=1.000
 ```
 
-The listing is `IN t0..t19, u0..u13 -> s0..s9`. `fit` is a per-`(case, state)`
+The listing is `IN t0..t38, u0..u13 -> s0..s9`. Deep training needs 20 epochs
+now that the stream includes the cross-start select case. `fit` is a per-`(case, state)`
 ranking perceptron: correct children are positives, wrong children are
 negatives, and breaking an already-correct state is weighted double. The
 `discriminating` accuracy counts only groups that actually contain a choice,
@@ -127,14 +133,14 @@ not the many already-solved groups where every action is a safe no-op.
 cargo run -q -p jotnar-agent -- run --out runs/beam \
   --proposer beam --generated \
   --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
-  --beam 4 --depth 2
+  --beam 8 --depth 4
 ```
 
 ```text
-selection: 11/18 correct, 7 wrong -> 18/18 correct, 0 wrong
+selection: 11/19 correct, 8 wrong -> 19/19 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
-           + add family select_min
+selected:  beam-path-union: depth + 1 + depth + 1 + depth + 1 + depth + 1
+           + add family select_min + add compose[reduce_sum]
 adopted:   true
 ```
 
@@ -172,9 +178,9 @@ make("gen-elem-saxpy-s16-train", "saxpy", "saxpy_s16", ..., Train)
 The held-out row is still `gen-elem-affine-s16-holdout` (`affine -> affine_s16`)
 and is never trained on. The new row is a different start family and example
 set, so the model sees the deep mechanism and generalizes to the affine target.
-The generated stream is now 11 train / 7 calibration / 6 held-out = 24 cases.
+The generated stream is now 12 train / 7 calibration / 6 held-out = 25 cases.
 
-Result: generated `beam` and `joint` reach **18/18 selection, 6/6 held-out**;
+Result: generated `beam` and `joint` reach **19/19 selection, 6/6 held-out**;
 the legacy single-action `world` model excludes the repeated-depth `s64` case.
 
 ## The joint latent + causal model
@@ -200,7 +206,7 @@ cargo run -q -p jotnar-agent -- fit-joint-model \
   --out runs/joint-model --generated \
   --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
   --backbone runs/backbone-qwen/backbone.weights.json \
-  --depth 2 --beam 4
+  --depth 3 --beam 8
 
 cargo run -q -p jotnar-agent -- run --out runs/joint \
   --proposer joint --generated \
@@ -208,14 +214,14 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 
 ```text
-selection: 11/18 correct, 7 wrong -> 18/18 correct, 0 wrong
+selection: 11/19 correct, 8 wrong -> 19/19 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  joint-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
-           + add family select_min
+selected:  joint-path-union: depth + 1 + depth + 1 + depth + 1 + depth + 1
+           + add family select_min + add compose[reduce_sum]
 adopted:   true
 ```
 
-Corpus: 18/18 selection, 6/6 held-out. Hard audit: 12/12.
+Corpus: 18/18 selection, 6/6 held-out. Hard audit: 13/13.
 
 ## The quality-diversity archive
 
@@ -232,7 +238,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-archive \
 cargo run -q -p jotnar-agent -- archive --file runs/archive.json
 ```
 
-The first archive run kept 16 entries: the 18/18 + 6/6 path-union harness,
+The first archive run kept 16 entries: the 19/19 + 6/6 path-union harness,
 the 14/18 pair attractors (each missing a different capability), and
 the novel near-misses.
 That is the point: `reduce_sum + refinements` and `reduce_sum + select_min` are different
@@ -301,23 +307,24 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 The learned top-1 on each distant shape is the taught consumer:
 
 ```text
-hard-matmul3-sum    learned top-1 add compose[reduce_sum] (240)
-hard-matmul4-sum    learned top-1 add compose[reduce_sum] (296)
-hard-select16-sum   learned top-1 add compose[reduce_sum] (296)
+hard-matmul3-sum    learned top-1 add compose[reduce_sum]
+hard-matmul4-sum    learned top-1 add compose[reduce_sum]
+hard-select16-sum   learned top-1 add compose[reduce_sum]
+hard-select-min-pair learned top-1 add family select_min
 ```
 
 `--hard` only audits the final adopted harness:
 
 ```text
-hard audit: 12/12 correct, 0 wrong (never used for selection or adoption)
+hard audit: 13/13 correct, 0 wrong (never used for selection or adoption)
 ```
 
 Progression:
 
 ```text
-base harness:       4/11  (retention + refusal control only)
-learned union:     12/12  (reduce_sum from the shape features)
-learned-only:      12/12  (no completeness/singles/pairs safety net)
+base harness:       4/12  (retention + refusal control only)
+learned union:     13/13  (reduce_sum + select_min from the learned features)
+learned-only:      13/13  (no completeness/singles/pairs safety net)
 ```
 
 Before the coverage candidate the run solved only the retention/control cases
@@ -326,7 +333,7 @@ cases. The gap was real and measurable, not hidden by the sibling held-out.
 
 ## Capability coverage / neutral drift
 
-The top union is `reduce_sum + refinements + select_min`; it is 18/18
+The top union is `reduce_sum + refinements + select_min`; it is 19/19
 on the selection stream, but it does not carry `depth + 1`. The deep case
 supports both `refinements` and `depth`, so the proposer adds a **coverage
 union**: the top action from each capability group (compose, depth, refinements,
@@ -337,7 +344,7 @@ capability coverage as a **tie-break after correctness and step count**:
 (correct, wrong, steps, capability_coverage, candidate index)
 ```
 
-The coverage harness has the same 18/18 and step count as the union, so the
+The coverage harness has the same 19/19 and step count as the union, so the
 tie-break selects it. That is neutral drift: the gate cannot tell the two apart
 on the selection stream, so the loop keeps the harness that preserves the second
 capability.
@@ -368,8 +375,8 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-learned \
 Both runs select the same four-capability harness:
 
 ```text
-with safety nets:   18/18 selection, 6/6 held-out, hard 12/12
-learned-only:       18/18 selection, 6/6 held-out, hard 12/12
+with safety nets:   19/19 selection, 6/6 held-out, hard 13/13
+learned-only:       19/19 selection, 6/6 held-out, hard 13/13
 ```
 
 The ablation is the scientific result: the distant compose cases are reached by
@@ -387,7 +394,7 @@ features. It predicts bounded steps, is fitted by ridge regression on the
 
 ```sh
 cargo run -q -p jotnar-agent -- fit-cost-model \
-  --out runs/cost-model --generated --depth 2 --lambda 1
+  --out runs/cost-model --generated --depth 3 --lambda 1
 
 cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
   --proposer beam --generated \
@@ -396,7 +403,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
 ```
 
 ```text
-cost model: 18 cases, 7380 transitions, depth=3, lambda=1, mae=0.482
+cost model: 19 cases, 7790 transitions, depth=3, lambda=1, mae=0.307
 ```
 
 The beam score is `effect - cost_weight * predicted_steps`. The exact gate and
@@ -421,7 +428,7 @@ selected a hop from the `beam-union` seed adding `depth + 1`:
 ```text
 selected:  qd-hop[beam-union: ...]: depth + 1
 adopted:   true
-hard audit: 12/12 correct, 0 wrong
+hard audit: 13/13 correct, 0 wrong
 ```
 
 That is the archive doing real work: the loop improves by starting from a
@@ -446,31 +453,46 @@ top-1 on train and held-out groups. It is the Stage 3 wall measurement:
 
 ```sh
 cargo run -q -p jotnar-agent -- eval-state-effect --generated \
-  --depth 3 --holdout-cases 4 --interaction-lags 35
+  --depth 3 --epochs 20 \
+  --holdout-ids gen-select-max-cal,gen-select-min,gen-vec16-sum-train,gen-vec9-sum-train
 ```
 
-The first held-out split is the last four generated cases
-(`gen-select-max-cal`, `gen-select-min`, `gen-vec16-sum-train`,
-`gen-vec9-sum-train`). Result:
+The held-out split is the original select/vec group. Result:
 
 ```text
-linear:              train 1.000, heldout 0.682
-interactions[[35]]:  train 1.000, heldout 0.682
+linear:              train 1.000 (170/170), heldout 1.000 (132/132)
+interactions[[35]]:  neutral
 ```
 
-The held-out residual is structured in row order (`rho ~ 0.494`, `~0.392` after
-sorting), but the peel layer lives in **row space**, not feature space. The
-hand-picked lag-35 product (`refinements * depth_delta`) is neutral. This is a
-mechanism/representation wall: the model never sees a `select_min` target
-mechanism, and the task vector does not encode the target operand semantics. The
-first fixes to try are target-program features, a different training mechanism,
-or a program encoder — not a bigger nonlinear layer.
+That closes the previous `0.682` mechanism wall. The root cause was that the
+model never saw a `select_min` target mechanism, and the task vector did not
+encode the target operand semantics. The fix has two parts:
+
+1. a **cross-start training case**, `select_max -> select_min`, teaches the
+   `select_min` family on a different start shape while the held-out
+   `pair -> select_min` stays untouched;
+2. the task vector now carries the **target-program features** (target op
+   family plus `target_select_min` / `target_select_max`, parsed from the
+   `ISELECT` operand order).
+
+The target/no-target ablation on this particular held-out split is equal
+because the start shape already separates the cases. The target features matter
+when the start shape is shared: the synthetic min/max test in
+`tests/state_effect_model.rs` reaches 1.000 with them and fails without them.
+The WBP lag-35 product is neutral; the fix is representation/training, not a
+nonlinear layer. See [`WBP_CRITIQUE.md`](WBP_CRITIQUE.md).
+
+The hard set is now thirteen audit cases: the four refine/deep compositions,
+three distant compose cases, three retention cases, the refusal control, and
+the held-out `pair -> select_min` mechanism case. Its base score is 4/12; the
+learned union and learned-only runs both reach 13/13.
 
 ## Known limits
 
-- State enumeration is over distinct action subsets; repeated `depth + 1` is
-  represented by one action.
-- The transition table grows with `--depth` (205 states / 7380 transitions at
+- State enumeration is over distinct action subsets plus bounded BFS paths;
+  repeated `depth + 1` / `refinements + 1` are preserved by the path-union
+  candidate.
+- The transition table grows with `--depth` (205 states / 7790 transitions at
   depth 3 with 10 actions, including repeated depth/refinements).
 - The effect model is linear. The state split helps, but the joint interaction
   is still additive.
@@ -480,7 +502,7 @@ or a program encoder — not a bigger nonlinear layer.
 - The archive records gate-correct/near-correct candidates and now seeds basin
   hopping, but it is not yet a full quality-diversity search with continuous
   descriptors.
-- The hard set is twelve audit cases, not a benchmark. Its four refine/deep
+- The hard set is thirteen audit cases, not a benchmark. Its four refine/deep
   compositions share one mechanism (`*_dup -> *_s16`) and their count distance
   is small. The three distant compose cases are distinct in rank, numel, and op
   family (`[3,3]` matmul, `[4,4]` matmul, `[16]` select).

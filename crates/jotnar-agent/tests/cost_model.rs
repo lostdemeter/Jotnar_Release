@@ -65,7 +65,7 @@ fn cost_aware_beam_still_adopts_the_stream() {
     let rows = state_effects(&train, &base, 3);
 
     let mut effect = StateEffectModel::prior();
-    effect.fit(&rows, 10, 1);
+    effect.fit(&rows, 20, 1);
     let mut cost = CostModel::prior();
     let mae = cost.fit(&rows, 1.0);
     assert!(mae < 1.0, "cost MAE {mae}");

@@ -23,7 +23,7 @@ use crate::intent::Case;
 use crate::proposer::{action_applies, apply_action, ACTIONS};
 use crate::view::{case_views, CaseView};
 
-pub const TASK_FEATURE_NAMES: [&str; 32] = [
+pub const TASK_FEATURE_NAMES: [&str; 39] = [
     "start_inputs",
     "start_outputs",
     "start_ops",
@@ -56,6 +56,13 @@ pub const TASK_FEATURE_NAMES: [&str; 32] = [
     "start_iselect",
     "start_iadd",
     "start_ireduce_sum",
+    "target_imatmul",
+    "target_iselect",
+    "target_iadd",
+    "target_ireduce_sum",
+    "target_imul",
+    "target_select_min",
+    "target_select_max",
 ];
 
 pub const LATENT_NAMES: [&str; 9] = [
@@ -141,6 +148,13 @@ pub fn task_vector(view: &CaseView, base: &Harness) -> Vec<i64> {
         i64::from(view.start_iselect),
         i64::from(view.start_iadd),
         i64::from(view.start_ireduce_sum),
+        i64::from(view.target_imatmul),
+        i64::from(view.target_iselect),
+        i64::from(view.target_iadd),
+        i64::from(view.target_ireduce_sum),
+        i64::from(view.target_imul),
+        i64::from(view.target_select_min),
+        i64::from(view.target_select_max),
     ]
 }
 

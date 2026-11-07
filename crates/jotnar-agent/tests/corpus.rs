@@ -19,7 +19,7 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
     let train = all.iter().filter(|c| c.split == Split::Train).count();
     let calibration = all.iter().filter(|c| c.split == Split::Calibration).count();
     let heldout = all.iter().filter(|c| c.split == Split::Heldout).count();
-    assert_eq!((train, calibration, heldout), (11, 7, 6));
+    assert_eq!((train, calibration, heldout), (12, 7, 6));
 
     // The wide compose consumers are taught on their own shapes; the distant
     // matrix/select shapes stay audit-only.
@@ -45,12 +45,12 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
 #[test]
 fn hard_cases_are_audit_only_and_require_composition() {
     let hard = hard_cases();
-    assert_eq!(hard.len(), 12);
+    assert_eq!(hard.len(), 13);
     let base = Harness::default();
     let report = evaluate(&base, &hard, false);
     assert_eq!(
-        report.wrong_refusal, 8,
-        "four refine/deep + matmul3 + matmul4 + select16 + affine_s64"
+        report.wrong_refusal, 9,
+        "four refine/deep + matmul3 + matmul4 + select16 + affine_s64 + select_min pair"
     );
     assert_eq!(report.solved, 3, "three high-distance retention cases");
     assert_eq!(report.refused, 1, "one high-distance refusal control");

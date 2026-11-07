@@ -105,6 +105,14 @@ That is a real result: a held-out mechanism wall is not automatically a
 nonlinearity. The first fixes to try are target-program features, a different
 training mechanism, or a learned program encoder — not a bigger φ product.
 
+**Update (target-program features).** That is the fix that worked. The task
+vector now encodes the target op family and the `ISELECT` operand orientation,
+and `gen-select-min-cross-train` (`select_max -> select_min`) teaches the
+mechanism on a different start shape. The held-out select/vec split is now
+**train 1.000 / heldout 1.000** (132 groups at depth 3). The lag-35 interaction
+remained neutral. This is the protocol applied correctly: the wall was in
+mechanism coverage/representation, not in the per-transition residual.
+
 
 
 ## Future work, in priority order
