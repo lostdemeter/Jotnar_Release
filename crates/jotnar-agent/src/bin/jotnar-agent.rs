@@ -17,6 +17,7 @@ fn usage() -> &'static str {
        jotnar-agent run [--out DIR] [--rounds N] [--proposer jotnar|looped|task|teacher|world|beam|joint|qd|deterministic] [--loops N] [--encoder-loops N] [--fit] [--deep-train] [--weights FILE] [--encoder-weights FILE] [--looped-encoder-weights FILE] [--budget-predictor FILE] [--backbone FILE] [--teacher-actions FILE] [--effect-weights FILE] [--state-effect-weights FILE] [--joint-weights FILE] [--cost-weights FILE] [--cost-weight N] [--beam N] [--depth N] [--archive FILE] [--archive-novelty N] [--archive-capacity N] [--qd-seeds N] [--no-complete] [--no-singles] [--no-pairs] [--hard] [--corpus] [--generated]\n\
        jotnar-agent archive --file FILE\n\
        jotnar-agent feature-audit [--corpus] [--generated] [--state-effect-weights FILE] [--top-k N]\n\
+       jotnar-agent wbp-audit [--signal CSV] [--file FILE] [--order N] [--layers N]\n\
        jotnar-agent fit-recurrent [--out DIR] [--deep-train] [--efficient]\n\
        jotnar-agent fit-encoder [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-looped-encoder [--out DIR] [--corpus] [--generated] [--max-loops N] [--encoder-weights FILE]\n\
@@ -883,6 +884,81 @@ fn run() -> Result<ExitCode, String> {
                 weights.as_deref(),
                 top_k.max(1),
             )?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "wbp-audit" => {
+            let mut signal: Vec<i64> = Vec::new();
+            let mut order = 2usize;
+            let mut layers = 5usize;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--signal" => {
+                        let csv = args.next().ok_or("--signal needs CSV")?;
+                        signal = csv
+                            .split(',')
+                            .map(|v| {
+                                v.trim()
+                                    .parse::<i64>()
+                                    .map_err(|_| format!("bad signal value {v:?}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                    "--file" => {
+                        let path = args.next().ok_or("--file needs a path")?;
+                        let text =
+                            std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                        signal = if let Ok(v) = serde_json::from_str::<Vec<i64>>(&text) {
+                            v
+                        } else {
+                            text.split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| {
+                                    s.parse::<i64>()
+                                        .map_err(|_| format!("bad signal value {s:?}"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?
+                        };
+                    }
+                    "--order" => {
+                        order = args
+                            .next()
+                            .ok_or("--order needs a number")?
+                            .parse()
+                            .map_err(|_| "--order needs a number".to_string())?;
+                    }
+                    "--layers" => {
+                        layers = args
+                            .next()
+                            .ok_or("--layers needs a number")?
+                            .parse()
+                            .map_err(|_| "--layers needs a number".to_string())?;
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            if signal.is_empty() {
+                return Err("wbp-audit needs --signal CSV or --file FILE".to_string());
+            }
+            let audit = jotnar_agent::wall_breaking::audit(&signal, order, layers)
+                .map_err(|e| e.to_string())?;
+            let final_rho = audit.peel.rhos.last().copied().unwrap_or(1.0);
+            println!(
+                "wbp audit: n={} order={} final-rho={:.3} layers={} residual={}",
+                signal.len(),
+                order,
+                final_rho,
+                audit.peel.layers.len(),
+                audit.peel.residual.len()
+            );
+            for (i, rho) in audit.peel.rhos.iter().enumerate() {
+                println!("  peel {i}: rho={rho:.3}");
+            }
+            for jump in &audit.jumps {
+                println!(
+                    "  jump {}: rho {:.3} -> {:.3} (delta {:+.3})",
+                    jump.label, jump.rho_before, jump.rho_after, jump.delta
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         "run" => {

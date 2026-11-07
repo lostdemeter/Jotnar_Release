@@ -43,6 +43,7 @@ pub mod task_encoder;
 pub mod teacher;
 pub mod trace;
 pub mod view;
+pub mod wall_breaking;
 
 pub use archive::{Archive, ArchiveEntry, ArchiveProposer, Insert};
 pub use backbone::{Backbone, BackboneKind};

@@ -565,6 +565,29 @@ selected:  compose: add compose[reduce_sum] + refinements + 1
 That is a capability extension discovered by the loop, with retention and
 held-out checks — not a hand-coded feature.
 
+## Wall-Breaking Protocol (side quest)
+
+The additive state model is still linear. The Wall-Breaking Protocol asks
+whether the residual is structured before adding a nonlinear model: peel the
+self-similar AR layers, use the residual-selected product feature as a basis, and
+if the residual looks ergodic, inject an irrational harmonic and look again.
+
+The first Jotnar-native slice lives in
+[`src/wall_breaking.rs`](src/wall_breaking.rs) and is documented in
+[`docs/WALL_BREAKING.md`](../../docs/WALL_BREAKING.md). It uses only existing
+integer ops (`IWINDOW`, `IMUL`, `ISUM`, `IADD`, `ISUB`, `IDIV`, `IMAX`, `IEQ`,
+`ISELECT`, `IGET`) at a fixed-point scale.
+
+```sh
+cargo run -q -p jotnar-agent -- wbp-audit --file runs/wbp-signal.json
+```
+
+The synthetic wall result is `linear=0.583 -> wbp-product=1.000`: a product
+interaction the additive scorer cannot represent is broken by the Jotnar
+self-similar product feature. The current exact transition table is linearly
+separable at 1.000, so there is no residual wall to peel yet; the deeper table
+is the next target.
+
 ## What it proves
 
 - A bounded circuit can be improved by editing its harness, not its weights.
@@ -745,4 +768,6 @@ the held-out stream.
 | `src/cost_model.rs` | Jotnar-native `(task, state) -> steps` cost head |
 | `src/joint.rs` | Qwen latent + state-effect joint proposer |
 | `src/archive.rs` | quality-diversity archive and basin-hopping proposer |
+| `src/wall_breaking.rs` | WBP resfrac/peel/ergodic-jump/self-similar listings |
+| `docs/WALL_BREAKING.md` | WBP mapping, synthetic wall result, agent application |
 | `docs/WORLD_MODEL.md` | effect model, state model, beam, joint, archive, hard audit, results |
