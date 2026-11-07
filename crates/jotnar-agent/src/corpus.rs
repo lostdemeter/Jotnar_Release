@@ -678,6 +678,18 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             "matmul2_colsum",
             Hard,
         ),
+        // Feature-distant: 18 inputs, 9 outputs, and a 9-input compose
+        // consumer. No training case has this shape or uses sum9.
+        make(
+            "hard-matmul3-sum",
+            "matmul3",
+            "matmul3_sum",
+            "matrix",
+            Solve,
+            2,
+            "matmul3_sum",
+            Hard,
+        ),
         make(
             "hard-refuse-reduce-matmul",
             "reduce128",

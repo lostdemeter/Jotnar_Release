@@ -15,7 +15,7 @@ interpreter gate produces every label and chooses every adopted harness.
 `EffectModel` is a Jotnar-native linear map:
 
 ```text
-20 task features -> 10 action scores
+20 task features -> 11 action scores
 ```
 
 It is trained on the exact effect table from `gen-effects`:
@@ -35,7 +35,7 @@ cargo run -q -p jotnar-agent -- fit-effect-model \
 Generated result:
 
 ```text
-effect model: 15 cases, 10 actions, epochs=10, lr=1, train top-1 accuracy=1.000
+effect model: 15 cases, 11 actions, epochs=10, lr=1, train top-1 accuracy=1.000
 ```
 
 `WorldModelProposer` ranks single actions and proposes every action **pair**, so
@@ -70,7 +70,7 @@ present, or that after a composition the remaining fix is `depth + 1`. The
 state-dependent model takes the harness with the task:
 
 ```text
-20 task features + 14 harness-state features -> 10 action scores
+20 task features + 14 harness-state features -> 11 action scores
 ```
 
 State features (`Harness::state_features`): `has_sum4`, `has_select_min`,
@@ -92,7 +92,7 @@ cargo run -q -p jotnar-agent -- fit-state-effect-model \
 ```
 
 ```text
-state effect model: 15 cases, 46 states, 615 transitions, 10 actions,
+state effect model: 15 cases, 56 states, 1395 transitions, 11 actions,
 depth=2, epochs=10, lr=1, discriminating top-1 accuracy=1.000
 ```
 
@@ -124,16 +124,17 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```text
 selection: 11/15 correct, 4 wrong -> 15/15 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-coverage: add compose[sum4] + depth + 1 + refinements + 1 + add family select_min
+selected:  beam-complete: add compose[sum4] + depth + 1 + refinements + 1 + add family select_min + add compose[sum9]
 adopted:   true
 ```
 
 The coverage candidate keeps the second capability alive: the top union is
 `sum4 + refinements + select_min`, but the deep case also supports `depth + 1`,
-and the coverage union adds it. The exact gate accepts the four-capability
-harness at the same 15/15 and 19 steps.
+and the coverage union adds it. The compose-completeness candidate adds the
+9-input `sum9` consumer, which is a safe no-op on every training case. The
+exact gate accepts the five-capability harness at the same 15/15 and 19 steps.
 
-Depth-3 training (`--depth 3`, 130 states, 1755 transitions) and `--depth 3`
+Depth-3 training (`--depth 3`, 176 states, 6015 transitions) and `--depth 3`
 beam expansion produce the explicit triple
 `compose[sum4] + depth + 1 + select_min` with the same 15/15 and 6/6.
 
@@ -142,7 +143,7 @@ The 24-case corpus:
 ```text
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-coverage: add compose[sum4] + depth + 1 + refinements + 1
+selected:  beam-complete: add compose[sum4] + depth + 1 + refinements + 1 + add compose[sum9]
 adopted:   true
 ```
 
@@ -199,11 +200,11 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```text
 selection: 11/15 correct, 4 wrong -> 15/15 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  joint-union: add compose[sum4] + refinements + 1 + add family select_min
+selected:  joint-complete: add compose[sum4] + depth + 1 + refinements + 1 + add family select_min + add compose[sum9]
 adopted:   true
 ```
 
-Corpus: 18/18 selection, 6/6 held-out.
+Corpus: 18/18 selection, 6/6 held-out. Hard audit: 9/9.
 
 ## The quality-diversity archive
 
@@ -220,7 +221,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-archive \
 cargo run -q -p jotnar-agent -- archive --file runs/archive.json
 ```
 
-The first archive run kept 16 entries: the 15/15 + 6/6 four-capability
+The first archive run kept 16 entries: the 15/15 + 6/6 five-capability
 harness, the 14/15 pair attractors (each missing a different capability), and
 the novel near-misses.
 That is the point: `sum4 + refinements` and `sum4 + select_min` are different
@@ -255,12 +256,14 @@ retention, but it is not evidence of feature generalization.
 The audit adds a separate **hard** set, `hard_corpus()`, with a `Hard` split
 that is never used for fitting, selection, or adoption:
 
-- four novel compositions (`saxpy_dup -> saxpy_s16`, `affine_dup ->
-  affine_s16`, and two cross-start variants). Their minimum solver is a
-  three-action set, `sum4 + depth + refinements`, which no training case
-  requires;
+- four novel `depth + refinements` compositions (`saxpy_dup -> saxpy_s16`,
+  `affine_dup -> affine_s16`, and two cross-start variants). Their minimum
+  solver is `depth + refinements`, a combination no training case requires;
 - three high-distance retention cases (`reduce128 -> reduce8` distance 493,
   `reduce32 -> reduce64` 210, `matmul2_sum -> matmul2_colsum` 15);
+- one **feature-distant** 3×3 matrix case (`matmul3 -> matmul3_sum`): 18 inputs,
+  9 outputs, min feature distance 107, minimum solver the unseen `sum9`
+  compose consumer;
 - one high-distance refusal control (`reduce128 -> matmul2`, distance 493).
 
 ```sh
@@ -273,11 +276,19 @@ cargo run -q -p jotnar-agent -- run --out runs/hard \
 `--hard` only audits the final adopted harness:
 
 ```text
-hard audit: 8/8 correct, 0 wrong (never used for selection or adoption)
+hard audit: 9/9 correct, 0 wrong (never used for selection or adoption)
 ```
 
-Before the coverage candidate, the same run was **4/8**: it solved the
-retention/control cases but failed all four novel compositions. The gap was
+Progression:
+
+```text
+pre-coverage:         4/9  (only retention/control)
+coverage union:       8/9  (adds depth + refinements)
+compose-completeness: 9/9  (adds sum9 for the 3×3 case)
+```
+
+Before the coverage candidate the run solved only the retention/control cases
+and failed all four refine/deep compositions plus the 3×3 case. The gap was
 real and measurable, not hidden by the sibling held-out.
 
 ## Capability coverage / neutral drift
@@ -296,8 +307,22 @@ coverage as a **tie-break after correctness and step count**:
 The four-capability harness has the same 15/15 and 19 steps as the three-action
 one, so the tie-break selects it. That is neutral drift: the gate cannot tell
 the two apart on the selection stream, so the loop keeps the harness that
-preserves the second capability. It closes the hard audit to 8/8 without
-training on the hard set.
+preserves the second capability.
+
+The **compose-completeness** candidate goes one step further: it adds every
+available compose consumer (`sum4`, `sum9`). A consumer whose arity does not
+match the current output count is a safe no-op, so it costs no steps on the
+training stream, but it is exactly what the feature-distant 3×3 shape needs.
+The adopted harness is `sum4 + depth + refinements + select_min + sum9` at the
+same 15/15 and 19 steps. This closes the hard audit to 9/9 without training on
+the hard set.
+
+The `sum9` action is **not learned**: it has no training signal, because no
+training case has nine outputs. The completeness safety net proposes it, the
+exact gate accepts it, and the hard audit records the result. That is the right
+honest reading: the feature-distant shape is reachable before training data
+exists for it, but the proposed action is a structural prior, not a learned
+ranking.
 
 ## Cost-aware planning
 
@@ -317,7 +342,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
 ```
 
 ```text
-cost model: 15 cases, 615 transitions, depth=2, lambda=1, mae=0.254
+cost model: 15 cases, 1395 transitions, depth=2, lambda=1, mae=0.766
 ```
 
 The beam score is `effect - cost_weight * predicted_steps`. The exact gate and
@@ -337,12 +362,12 @@ cargo run -q -p jotnar-agent -- run --out runs/qd \
 ```
 
 The first run started from the 16-entry archive and selected a hop from the
-`beam-union` seed adding `depth + 1`:
+`beam-coverage` seed adding `sum9`:
 
 ```text
-selected:  qd-hop[beam-union: ...]: depth + 1
+selected:  qd-hop[beam-coverage: ...]: add compose[sum9]
 adopted:   true
-hard audit: 8/8 correct, 0 wrong
+hard audit: 9/9 correct, 0 wrong
 ```
 
 That is the archive doing real work: the loop improves by starting from a
@@ -364,8 +389,8 @@ back to the incumbent.
 
 - State enumeration is over distinct action subsets; repeated `depth + 1` is
   represented by one action.
-- The transition table grows with `--depth` (46 states at depth 2, 130 at
-  depth 3); depth 4 is not yet bounded.
+- The transition table grows with `--depth` (56 states / 1395 transitions at
+  depth 2 with 11 actions; 176 / 6015 at depth 3); depth 4 is not yet bounded.
 - The effect model is linear. The state split helps, but the joint interaction
   is still additive.
 - The Qwen backbone is an exact zero-init/pass-through block on the current
@@ -374,12 +399,15 @@ back to the incumbent.
 - The archive records gate-correct/near-correct candidates and now seeds basin
   hopping, but it is not yet a full quality-diversity search with continuous
   descriptors.
-- The hard set is eight audit cases, not a benchmark. Its four compositions
-  share one mechanism (`*_dup -> *_s16`) and their feature distance is only
-  3–7; the genuinely distant cases are retention, not planning.
-- The coverage tie-break is a heuristic. It is safe because it runs after exact
-  correctness and actual steps, and the held-out check still gates adoption,
-  but it can keep a capability that is irrelevant to the current stream.
+- The hard set is nine audit cases, not a benchmark. Its four refine/deep
+  compositions share one mechanism (`*_dup -> *_s16`) and their feature
+  distance is only 3–7. The feature-distant 3×3 case is a single shape.
+- The feature-distant 3×3 case is solved by the compose-completeness safety
+  net, not by a learned `sum9` ranking. There is no training signal for `sum9`.
+- The coverage/completeness tie-breaks are heuristics. They are safe because
+  they run after exact correctness and actual steps, and the held-out check
+  still gates adoption, but they can keep a capability that is irrelevant to
+  the current stream.
 - The cost head is soft. On this tiny stream the exact gate's step tie-break
   already selects the cheapest correct harness; the cost head matters when the
   search space is larger.

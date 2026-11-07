@@ -65,6 +65,15 @@ pub fn library() -> BTreeMap<String, String> {
         "matmul2_dup".into(),
         family::build_matmul2_dup(&empty).unwrap(),
     );
+    out.insert("matmul3".into(), family::build_matmul3(&empty).unwrap());
+    out.insert(
+        "matmul3_sum".into(),
+        family::build_matmul3_sum(&empty).unwrap(),
+    );
+    out.insert(
+        "matmul3_dup".into(),
+        family::build_matmul3_dup(&empty).unwrap(),
+    );
     out.insert("select".into(), family::build_select(&empty).unwrap());
     out.insert(
         "select_max".into(),
@@ -120,6 +129,24 @@ pub fn example_set(label: &str, variant: u64) -> Vec<Example> {
                 .enumerate()
                 .map(|(i, name)| ((*name).to_string(), TestVec::scalar(base + i as i64)))
                 .collect::<BTreeMap<_, _>>();
+            vec![Example::new(inputs)]
+        }
+        "matmul3" | "matmul3_sum" => {
+            let base = if variant == 0 { 1 } else { 2 };
+            let mut inputs = BTreeMap::new();
+            let mut n = 0i64;
+            for i in 0..3 {
+                for j in 0..3 {
+                    inputs.insert(format!("a{i}{j}"), TestVec::scalar(base + n));
+                    n += 1;
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    inputs.insert(format!("b{i}{j}"), TestVec::scalar(base + n));
+                    n += 1;
+                }
+            }
             vec![Example::new(inputs)]
         }
         "select" => {

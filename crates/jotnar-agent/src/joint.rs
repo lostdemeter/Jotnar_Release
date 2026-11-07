@@ -133,7 +133,13 @@ impl JointProposer {
 
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| e.to_string())
+        let mut joint: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        joint.effect.normalize();
+        joint.prototypes.truncate(ACTIONS.len());
+        while joint.prototypes.len() < ACTIONS.len() {
+            joint.prototypes.push(vec![0; LATENT_NAMES.len()]);
+        }
+        Ok(joint)
     }
 }
 

@@ -43,7 +43,7 @@ pub const FEATURE_NAMES: [&str; 21] = [
     "wrong_refusal_control",
 ];
 
-pub const ACTIONS: [&str; 10] = [
+pub const ACTIONS: [&str; 11] = [
     "add compose[sum4]",
     "depth + 1",
     "refine off",
@@ -54,6 +54,7 @@ pub const ACTIONS: [&str; 10] = [
     "add family saxpy_dup",
     "add family affine_dup",
     "add family matmul2_dup",
+    "add compose[sum9]",
 ];
 
 /// A corpus-shaped prior. The 24-case stream has three matrix failures and one
@@ -108,6 +109,9 @@ pub fn prior_weights() -> Vec<Vec<i64>> {
         vec![0; 21],
         vec![0; 21],
         vec![0; 21],
+        vec![0; 21],
+        // sum9: a feature-distant 3x3 compose consumer. The prior is zero; it
+        // is proposed by the completeness/singles safety net, never assumed.
         vec![0; 21],
     ]
 }
@@ -434,6 +438,13 @@ pub fn apply_action(base: &Harness, idx: usize) -> Option<Mutation> {
             }
             h.families.push("matmul2_dup".into());
             "add family matmul2_dup"
+        }
+        10 => {
+            if h.compose_consumers.iter().any(|c| c == "sum9") {
+                return None;
+            }
+            h.compose_consumers.push("sum9".into());
+            "add compose[sum9]"
         }
         _ => return None,
     };

@@ -7,11 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::corpus::{corpus, generated_corpus};
+use crate::corpus::{corpus, generated_corpus, hard_corpus};
 use crate::driver::{evaluate, CaseOutcome};
 use crate::harness::Harness;
 use crate::intent::Case;
-use crate::proposer::{apply_action, apply_action_set, ACTIONS};
+use crate::proposer::{apply_action, ACTIONS};
 use crate::task_encoder::task_vector;
 use crate::view::case_views;
 
@@ -45,6 +45,9 @@ fn split_map() -> std::collections::BTreeMap<String, String> {
         map.insert(c.case.intent.id.clone(), c.split.as_str().to_string());
     }
     for c in generated_corpus() {
+        map.insert(c.case.intent.id.clone(), c.split.as_str().to_string());
+    }
+    for c in hard_corpus() {
         map.insert(c.case.intent.id.clone(), c.split.as_str().to_string());
     }
     map
@@ -165,11 +168,17 @@ pub fn reachable_states(base: &Harness, max_depth: usize) -> Vec<(String, Vec<us
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for subset in action_subsets(ACTIONS.len(), max_depth) {
-        let set: std::collections::BTreeSet<usize> = subset.iter().copied().collect();
-        let harness = apply_action_set(base, &set);
+        let mut harness = base.clone();
+        let mut applied = Vec::new();
+        for action in &subset {
+            if let Some(mutation) = apply_action(&harness, *action) {
+                harness = mutation.harness;
+                applied.push(*action);
+            }
+        }
         let key = harness.fingerprint();
         if seen.insert(key.clone()) {
-            out.push((key, subset, harness));
+            out.push((key, applied, harness));
         }
     }
     out

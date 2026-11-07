@@ -135,10 +135,21 @@ impl EffectModel {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut model: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        if model.listing.is_empty() {
-            model.listing = build_listing(&model);
-        }
+        model.normalize();
         Ok(model)
+    }
+
+    /// Pad or truncate to the current action space for old artifact files.
+    pub fn normalize(&mut self) {
+        self.w.truncate(ACTIONS.len());
+        while self.w.len() < ACTIONS.len() {
+            self.w.push(vec![0; TASK_FEATURE_NAMES.len()]);
+        }
+        self.b.truncate(ACTIONS.len());
+        while self.b.len() < ACTIONS.len() {
+            self.b.push(0);
+        }
+        self.listing = build_listing(self);
     }
 }
 

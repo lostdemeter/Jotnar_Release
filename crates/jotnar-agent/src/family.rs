@@ -333,6 +333,51 @@ pub fn build_matmul2_sum(_: &Params) -> Result<String, String> {
     Ok(text)
 }
 
+pub fn build_matmul3(_: &Params) -> Result<String, String> {
+    let mut lines = vec!["# 3x3 matrix multiply.".to_string()];
+    for i in 0..3 {
+        for j in 0..3 {
+            lines.push(format!("IN a{i}{j}"));
+        }
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            lines.push(format!("IN b{i}{j}"));
+        }
+    }
+    lines.push(String::new());
+    for i in 0..3 {
+        for j in 0..3 {
+            let t0 = format!("t{i}{j}0");
+            let t1 = format!("t{i}{j}1");
+            let t2 = format!("t{i}{j}2");
+            let s = format!("s{i}{j}");
+            lines.push(format!("{t0} = IMUL(a{i}0, b0{j})"));
+            lines.push(format!("{t1} = IMUL(a{i}1, b1{j})"));
+            lines.push(format!("{s} = IADD({t0}, {t1})"));
+            lines.push(format!("{t2} = IMUL(a{i}2, b2{j})"));
+            lines.push(format!("c{i}{j} = IADD({s}, {t2})"));
+        }
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
+pub fn build_matmul3_sum(_: &Params) -> Result<String, String> {
+    let mut text = build_matmul3(&Params::new())?;
+    text.push_str(
+        "\ns0 = IADD(c00, c01)\ns1 = IADD(c02, c10)\ns2 = IADD(c11, c12)\n\
+         s3 = IADD(c20, c21)\ns4 = IADD(s0, s1)\ns5 = IADD(s2, s3)\n\
+         s6 = IADD(s4, s5)\nOUT = IADD(s6, c22)\n",
+    );
+    Ok(text)
+}
+
+pub fn build_matmul3_dup(_: &Params) -> Result<String, String> {
+    let mut text = build_matmul3(&Params::new())?;
+    text.push_str("\ndup = IMUL(a00, b00)\n");
+    Ok(text)
+}
+
 pub fn build_select(_: &Params) -> Result<String, String> {
     Ok("\
 # Two-way select.

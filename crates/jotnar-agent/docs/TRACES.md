@@ -134,12 +134,14 @@ file records what the model got wrong.
 ### The hard audit split
 
 `hard_corpus()` is a separate `Hard` split that is never used for fitting,
-selection, or adoption. It has four novel three-action compositions
-(`*_dup -> *_s16`), three high-distance reduction/matrix retention cases, and
-one refusal control. `feature-audit` prints the min L1 feature distance from
-each held-out/hard case to the training task vectors; `run --hard` evaluates
-the adopted harness on the hard set and writes `hard.json`. Both are audits:
-they measure generalization, they do not tune against it.
+selection, or adoption. It has four `depth + refinements` compositions
+(`*_dup -> *_s16`), three high-distance reduction/matrix retention cases, one
+refusal control, and one feature-distant 3×3 matrix case
+(`matmul3 -> matmul3_sum`, 18 inputs, 9 outputs, distance 107, solved by the
+unseen `sum9` consumer). `feature-audit` prints the min L1 feature distance
+from each held-out/hard case to the training task vectors; `run --hard`
+evaluates the adopted harness on the hard set and writes `hard.json`. Both are
+audits: they measure generalization, they do not tune against it.
 
 ## Teacher distillation
 

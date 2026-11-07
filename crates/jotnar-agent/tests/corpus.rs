@@ -37,10 +37,10 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
 #[test]
 fn hard_cases_are_audit_only_and_require_composition() {
     let hard = hard_cases();
-    assert_eq!(hard.len(), 8);
+    assert_eq!(hard.len(), 9);
     let base = Harness::default();
     let report = evaluate(&base, &hard, false);
-    assert_eq!(report.wrong_refusal, 4, "four novel compositions");
+    assert_eq!(report.wrong_refusal, 5, "four refine/deep + one matmul3");
     assert_eq!(report.solved, 3, "three high-distance retention cases");
     assert_eq!(report.refused, 1, "one high-distance refusal control");
 
@@ -57,7 +57,7 @@ fn hard_cases_are_audit_only_and_require_composition() {
         );
     }
 
-    // The four compositions need a three-action solver, not a single fix.
+    // The four refine/deep cases need depth + refinements together.
     let states = jotnar_agent::reachable_states(&base, 3);
     for case in hard
         .iter()
@@ -71,12 +71,23 @@ fn hard_cases_are_audit_only_and_require_composition() {
             })
             .min()
             .unwrap_or(0);
-        assert_eq!(
-            min, 3,
-            "{} should need a three-action composition",
-            case.intent.id
-        );
+        assert_eq!(min, 2, "{} should need depth + refinements", case.intent.id);
     }
+
+    // The feature-distant 3x3 case needs the unseen sum9 consumer.
+    let matmul3 = hard
+        .iter()
+        .find(|c| c.intent.id == "hard-matmul3-sum")
+        .expect("hard matmul3 case");
+    let min_actions = states
+        .iter()
+        .filter_map(|(_, subset, harness)| {
+            let r = evaluate(harness, std::slice::from_ref(matmul3), false);
+            r.outcomes[0].kind.correct().then_some(subset.clone())
+        })
+        .min_by_key(|subset| subset.len())
+        .expect("matmul3 is solvable");
+    assert_eq!(min_actions, vec![10], "the matmul3 fix is sum9");
 }
 
 #[test]

@@ -194,10 +194,22 @@ impl StateEffectModel {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut model: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        if model.listing.is_empty() {
-            model.listing = build_listing(&model);
-        }
+        model.normalize();
         Ok(model)
+    }
+
+    /// Pad or truncate to the current action space. Old artifact files remain
+    /// loadable when a new action is added; the new rows start at zero.
+    pub fn normalize(&mut self) {
+        self.w.truncate(ACTIONS.len());
+        while self.w.len() < ACTIONS.len() {
+            self.w.push(vec![0; STATE_MODEL_INPUTS]);
+        }
+        self.b.truncate(ACTIONS.len());
+        while self.b.len() < ACTIONS.len() {
+            self.b.push(0);
+        }
+        self.listing = build_listing(self);
     }
 }
 
@@ -316,11 +328,11 @@ where
 /// generalization potential without changing exact correctness.
 fn capability_group(action: usize) -> usize {
     match action {
-        0 => 0,     // compose consumer
-        1 => 1,     // depth
-        2 | 3 => 2, // refine/tags policy
-        5 => 3,     // refinements
-        _ => 4,     // family adds
+        0 | 10 => 0, // compose consumers (sum4, sum9)
+        1 => 1,      // depth
+        2 | 3 => 2,  // refine/tags policy
+        5 => 3,      // refinements
+        _ => 4,      // family adds
     }
 }
 
@@ -438,6 +450,46 @@ where
             &mut out,
             &mut seen,
         );
+    }
+
+    // Compose completeness: keep every available compose consumer alive. A
+    // consumer that does not match the current output arity is a safe no-op,
+    // and it is exactly what a feature-distant shape may need.
+    let mut complete_union = coverage_union.clone();
+    for action in 0..ACTIONS.len() {
+        if capability_group(action) == 0 && apply_action(base, action).is_some() {
+            complete_union.insert(action);
+        }
+    }
+    if complete_union != coverage_union && !complete_union.is_empty() {
+        let names = complete_union
+            .iter()
+            .map(|action| ACTIONS[*action])
+            .collect::<Vec<_>>()
+            .join(" + ");
+        push(
+            Mutation {
+                label: format!("{prefix}-complete: {names}"),
+                harness: apply_action_set(base, &complete_union),
+            },
+            &mut out,
+            &mut seen,
+        );
+    }
+
+    // Exhaustive singles: the safety net for an action the learned model has
+    // never seen (e.g. sum9 before any 9-output training case exists).
+    for (action, label) in ACTIONS.iter().enumerate() {
+        if let Some(mutation) = apply_action(base, action) {
+            push(
+                Mutation {
+                    label: format!("{prefix}-single: {label}"),
+                    harness: mutation.harness,
+                },
+                &mut out,
+                &mut seen,
+            );
+        }
     }
 
     // Top predicted paths per case, then the global best.

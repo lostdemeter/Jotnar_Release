@@ -181,6 +181,6 @@ fn beam_proposer_covers_triples() {
         }),
         "the beam should reach a sum4 + depth/refinements + select_min triple"
     );
-    assert_eq!(ACTIONS.len(), 10);
+    assert_eq!(ACTIONS.len(), 11);
     let _ = generated_corpus();
 }

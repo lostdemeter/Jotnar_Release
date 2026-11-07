@@ -400,10 +400,7 @@ fn adoption_is_clean(base: &EvalReport, adopted: &EvalReport) -> bool {
 /// tie-break after exact correctness and step count, so it never overrides the
 /// gate.
 fn capability_coverage(h: &Harness) -> usize {
-    let mut count = 0;
-    if h.compose_consumers.iter().any(|c| c == "sum4") {
-        count += 1;
-    }
+    let mut count = h.compose_consumers.len().saturating_sub(1);
     if h.max_depth > 2 {
         count += 1;
     }

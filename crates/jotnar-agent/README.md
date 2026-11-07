@@ -337,7 +337,7 @@ next co-training target.
 ## The action-effect world model
 
 The teacher gives action effects; the world model learns them. `EffectModel`
-is a Jotnar-native linear map from the 20 task features to 10 action scores,
+is a Jotnar-native linear map from the 20 task features to 11 action scores,
 trained on the exact `gen-effects` table.
 
 ```sh
@@ -379,21 +379,23 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```
 
 `BeamProposer` unions the predicted best action per wrong case, adds a
-**coverage union** (the best action from each capability group), expands the
-top-`beam` states, keeps the best paths (pairs and triples), and still hands
-every candidate to the exact gate. The driver prefers the more capable harness
-only after correctness and actual steps tie.
+**coverage union** (the best action from each capability group) and a
+**compose-completeness union** (all compose consumers), expands the top-`beam`
+states, keeps the best paths, and still hands every candidate to the exact
+gate. The driver prefers the more capable harness only after correctness and
+actual steps tie.
 
 ```
 generated: 15/15 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
+selected:  sum4 + depth + refinements + select_min + sum9
 ```
 
 The generated held-out miss is closed by a deep **training** member
 (`saxpy -> saxpy_s16`), not by moving the frozen held-out case
 (`affine -> affine_s16`). The coverage union keeps `depth + 1` alive beside
-`refinements + 1`, so the adopted harness is
-`sum4 + depth + refinements + select_min` at the same 15/15 and 19 steps. See
+`refinements + 1`; the completeness union keeps the unseen `sum9` consumer
+alive for the feature-distant 3×3 shape. See
 [`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
 
 ## The generalization audit
@@ -413,10 +415,24 @@ cargo run -q -p jotnar-agent -- run --out runs/hard \
   --hard
 ```
 
-The hard set has four novel compositions (`*_dup -> *_s16`, min solver
-`sum4 + depth + refinements`), three high-distance retention cases, and one
-refusal control. The pre-coverage planner was **4/8**; the coverage candidate
-is **8/8**. The hard set measures the gap; it does not tune against it.
+The hard set has four novel `depth + refinements` compositions
+(`*_dup -> *_s16`), three high-distance retention cases, one refusal control,
+and one **feature-distant** 3×3 matrix case (`matmul3 -> matmul3_sum`, 18
+inputs, 9 outputs, min feature distance 107, min solver the unseen `sum9`
+consumer).
+
+Progression:
+
+```
+pre-coverage:       4/9  (only retention/control)
+coverage union:     8/9  (adds depth + refinements)
+compose-completeness: 9/9 (adds sum9 for the 3×3 case)
+```
+
+The hard set measures the gap; it does not tune against it. The `sum9` action
+is not learned — it is proposed by the compose-completeness safety net and
+accepted by the exact gate. That is deliberate: the safety net is what makes a
+feature-distant shape reachable before any training data exists for it.
 
 ## Cost-aware planning
 
@@ -461,16 +477,18 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 generated: 15/15 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
+selected:  sum4 + depth + refinements + select_min + sum9
+hard:      9/9
 ```
-
-## The quality-diversity archive
 
 `run --archive FILE` records gate-competitive candidates in a QD archive,
 selected by quality (exact correctness, then held-out) and novelty (L1
 distance in the harness-state descriptor). `archive --file FILE` prints it.
-The archive keeps the `15/15 + 6/6` four-capability harness beside the 14/15
+The archive keeps the `15/15 + 6/6` five-capability harness beside the 14/15
 pair attractors that each miss a different capability; adoption still requires
 the exact gate, retention, and held-out non-regression.
+
+## The quality-diversity archive
 
 `--proposer qd --archive FILE` seeds a later round with the best archived
 attractors and their bounded mutations (basin hopping + neutral drift):
@@ -480,8 +498,8 @@ cargo run -q -p jotnar-agent -- run --out runs/qd \
   --proposer qd --generated --archive runs/archive.json --qd-seeds 4 --hard
 ```
 
-The first run selected a hop from the `beam-union` seed adding `depth + 1`,
-then passed the hard audit 8/8.
+The first run selected a hop from the `beam-coverage` seed adding `sum9`,
+then passed the hard audit 9/9.
 
 ## The driver
 
@@ -583,15 +601,19 @@ held-out checks — not a hand-coded feature.
 - `feature-audit` shows the original held-out split is a sibling split: two
   cases are exact feature duplicates and four are within three units of a
   training task.
-- A separate audit-only hard set (four novel three-action compositions, three
-  high-distance retention cases, one refusal control) measures the real
-  generalization gap: the pre-coverage planner is 4/8, the coverage/neutral-drift
-  candidate is 8/8 without training on the hard set.
+- A separate audit-only hard set (four novel `depth + refinements`
+  compositions, three high-distance retention cases, one refusal control, one
+  feature-distant 3×3 matrix case) measures the real generalization gap:
+  pre-coverage 4/9, coverage 8/9, compose-completeness 9/9, without training
+  on the hard set.
+- The feature-distant `matmul3 -> matmul3_sum` case (18 inputs, 9 outputs,
+  min feature distance 107) is solved by the unseen `sum9` compose consumer.
+  The completeness safety net proposes it; the exact gate accepts it.
 - A Jotnar-native cost head (`(task, state) -> predicted steps`, ridge fit,
   `IDIV` scale) lets the beam rank by `effect - lambda * cost`.
 - `--proposer qd --archive` performs basin hopping from archived attractors;
-  a hop from the `beam-union` seed adding `depth + 1` reaches the hard audit
-  8/8.
+  a hop from the `beam-coverage` seed adding `sum9` reaches the hard audit
+  9/9.
 
 ## What it does not prove
 
@@ -623,10 +645,13 @@ held-out checks — not a hand-coded feature.
 - That the archive is a full quality-diversity search. It seeds basin hopping
   and ranks by quality + novelty, but its descriptor is the 14-feature harness
   state, not a continuous behavior space.
-- That the hard set is a benchmark. It is eight audit cases; the four
-  compositions share one mechanism (`*_dup -> *_s16`) and their feature
-  distance is only 3–7. The genuinely distant cases are retention, not
-  planning.
+- That the hard set is a benchmark. It is nine audit cases; the four
+  refine/deep compositions share one mechanism (`*_dup -> *_s16`) and their
+  feature distance is only 3–7. The feature-distant 3×3 case is a single
+  shape, and it is solved by the completeness safety net rather than by a
+  learned ranking of `sum9`.
+- That the coverage/completeness candidates are learned policy. They are
+  structural safety nets; the exact gate still does the work.
 - That the coverage tie-break is a general policy. It is safe because it runs
   after exact correctness and actual steps, and the held-out check still gates
   adoption, but it can keep a capability that is irrelevant to the current

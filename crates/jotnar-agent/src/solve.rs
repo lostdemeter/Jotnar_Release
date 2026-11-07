@@ -343,6 +343,7 @@ fn candidate_steps(
         let applies = match consumer.as_str() {
             "add2" => n_out == 1,
             "sum4" => n_out == 4,
+            "sum9" => n_out == 9,
             _ => false,
         };
         if applies {
