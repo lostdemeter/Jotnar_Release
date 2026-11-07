@@ -43,7 +43,7 @@ pub const FEATURE_NAMES: [&str; 21] = [
     "wrong_refusal_control",
 ];
 
-pub const ACTIONS: [&str; 11] = [
+pub const ACTIONS: [&str; 12] = [
     "add compose[sum4]",
     "depth + 1",
     "refine off",
@@ -55,6 +55,7 @@ pub const ACTIONS: [&str; 11] = [
     "add family affine_dup",
     "add family matmul2_dup",
     "add compose[sum9]",
+    "add compose[sum16]",
 ];
 
 /// A corpus-shaped prior. The 24-case stream has three matrix failures and one
@@ -112,6 +113,9 @@ pub fn prior_weights() -> Vec<Vec<i64>> {
         vec![0; 21],
         // sum9: a feature-distant 3x3 compose consumer. The prior is zero; it
         // is proposed by the completeness/singles safety net, never assumed.
+        vec![0; 21],
+        // sum16: the wider feature-distant consumer taught by the 16-lane
+        // training fan and held out on the 4x4 matrix / wide-select shapes.
         vec![0; 21],
     ]
 }
@@ -366,6 +370,39 @@ pub(crate) fn select_from_scores(base: &Harness, scores: &[i64]) -> Vec<Mutation
     }
 }
 
+/// The output arity a compose consumer needs, if `action` adds one.
+pub fn consumer_arity(action: usize) -> Option<usize> {
+    match action {
+        0 => Some(4),
+        10 => Some(9),
+        11 => Some(16),
+        _ => None,
+    }
+}
+
+/// Mask compose consumers whose arity does not match the case's start output
+/// count. This mirrors the applicability rule the `compose` step enforces: an
+/// add-consumer action is a no-op when the arity differs, so it is not a
+/// ranking choice. The mask is structural, not a learned preference.
+pub fn mask_inapplicable_consumers(task: &[i64], scores: &mut [i64]) {
+    let start_outputs = task.get(1).copied().unwrap_or(0);
+    for (action, score) in scores.iter_mut().enumerate() {
+        if let Some(arity) = consumer_arity(action) {
+            if start_outputs != arity as i64 {
+                *score = i64::MIN / 4;
+            }
+        }
+    }
+}
+
+/// Whether `action` can change the outcome for a task with `start_outputs`
+/// output streams. Non-consumer actions always apply.
+pub fn action_applies(action: usize, start_outputs: i64) -> bool {
+    consumer_arity(action)
+        .map(|arity| arity as i64 == start_outputs)
+        .unwrap_or(true)
+}
+
 pub fn apply_action(base: &Harness, idx: usize) -> Option<Mutation> {
     let mut h = base.clone();
     let label = match idx {
@@ -445,6 +482,13 @@ pub fn apply_action(base: &Harness, idx: usize) -> Option<Mutation> {
             }
             h.compose_consumers.push("sum9".into());
             "add compose[sum9]"
+        }
+        11 => {
+            if h.compose_consumers.iter().any(|c| c == "sum16") {
+                return None;
+            }
+            h.compose_consumers.push("sum16".into());
+            "add compose[sum16]"
         }
         _ => return None,
     };

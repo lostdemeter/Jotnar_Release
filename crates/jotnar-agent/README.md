@@ -308,11 +308,12 @@ cargo run -q -p jotnar-agent -- run --out runs/generated \
   --proposer task --generated
 ```
 
-The generated corpus recombines library start/target pairs into 8 train /
-7 calibration / 6 held-out cases. The task prior is 11/15 with 3/6 held-out;
-the causal planner reaches 15/15 and 6/6. The held-out gain comes from the
+The generated corpus recombines library start/target pairs into 10 train /
+7 calibration / 6 held-out cases. The task prior is 11/17 with 3/6 held-out;
+the causal planner reaches 17/17 and 6/6. The held-out gain comes from the
 deep **training** member (`saxpy -> saxpy_s16`); the held-out member
-(`affine -> affine_s16`) is unchanged. See
+(`affine -> affine_s16`) is unchanged. The wide consumers are taught by the
+`vec9`/`vec16` training fans, not by the audit shapes. See
 [`docs/TRACES.md`](docs/TRACES.md).
 
 Teacher distillation uses the same task/latent JSONL interface:
@@ -339,7 +340,7 @@ next co-training target.
 ## The action-effect world model
 
 The teacher gives action effects; the world model learns them. `EffectModel`
-is a Jotnar-native linear map from the 20 task features to 11 action scores,
+is a Jotnar-native linear map from the 20 task features to 12 action scores,
 trained on the exact `gen-effects` table.
 
 ```sh
@@ -355,7 +356,7 @@ cargo run -q -p jotnar-agent -- run --out runs/world \
 the exact gate can choose a composition:
 
 ```
-generated: 15/15 selection, 6/6 held-out, adopted=true
+generated: 17/17 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
 ```
 
@@ -381,23 +382,26 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```
 
 `BeamProposer` unions the predicted best action per wrong case, adds a
-**coverage union** (the best action from each capability group) and a
+**coverage union** (the best action from each capability group) and an optional
 **compose-completeness union** (all compose consumers), expands the top-`beam`
 states, keeps the best paths, and still hands every candidate to the exact
 gate. The driver prefers the more capable harness only after correctness and
-actual steps tie.
+actual steps tie. `--no-complete --no-singles --no-pairs` disables the
+structural safety nets for the learned-only ablation.
 
 ```
-generated: 15/15 selection, 6/6 held-out, adopted=true
+generated: 17/17 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
-selected:  sum4 + depth + refinements + select_min + sum9
+selected:  sum4 + depth + refinements + select_min + sum9 + sum16
+learned-only (no safety nets): 17/17, 6/6, hard 11/11
 ```
 
 The generated held-out miss is closed by a deep **training** member
 (`saxpy -> saxpy_s16`), not by moving the frozen held-out case
 (`affine -> affine_s16`). The coverage union keeps `depth + 1` alive beside
-`refinements + 1`; the completeness union keeps the unseen `sum9` consumer
-alive for the feature-distant 3×3 shape. See
+`refinements + 1`. The wide consumers `sum9` and `sum16` are **learned** from
+`vec9`/`vec16` training fans and carried by the per-case union; the
+completeness net is still available but is no longer the explanation. See
 [`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
 
 ## The generalization audit
@@ -419,22 +423,30 @@ cargo run -q -p jotnar-agent -- run --out runs/hard \
 
 The hard set has four novel `depth + refinements` compositions
 (`*_dup -> *_s16`), three high-distance retention cases, one refusal control,
-and one **feature-distant** 3×3 matrix case (`matmul3 -> matmul3_sum`, 18
-inputs, 9 outputs, min feature distance 107, min solver the unseen `sum9`
-consumer).
+and **three feature-distant compose cases across two mechanisms**:
+
+| case | shape | min-dist | min solver |
+| --- | --- | ---: | --- |
+| `matmul3 -> matmul3_sum` | 18 in / 9 out | 76 | `add compose[sum9]` |
+| `matmul4 -> matmul4_sum` | 32 in / 16 out | 224 | `add compose[sum16]` |
+| `select16 -> select16_sum` | 32 in / 16 out | 64 | `add compose[sum16]` |
+
+The wide consumers are taught on `vec9`/`vec16` training fans, never on these
+shapes. `feature-audit --state-effect-weights FILE` prints the learned top-k;
+the learned top-1 on each distant case is the taught consumer.
 
 Progression:
 
 ```
-pre-coverage:       4/9  (only retention/control)
-coverage union:     8/9  (adds depth + refinements)
-compose-completeness: 9/9 (adds sum9 for the 3×3 case)
+base harness:       4/11  (only retention/control)
+learned union:     11/11  (sum9 + sum16 from the training fans)
+learned-only:      11/11  (no completeness/singles/pairs safety net)
 ```
 
-The hard set measures the gap; it does not tune against it. The `sum9` action
-is not learned — it is proposed by the compose-completeness safety net and
-accepted by the exact gate. That is deliberate: the safety net is what makes a
-feature-distant shape reachable before any training data exists for it.
+The hard set measures the gap; it does not tune against it. The distant
+consumers are reached by the learned per-case ranking. The four refine/deep
+cases still use the coverage union's structural deep prior for `depth + 1`,
+which is a separate pre-existing heuristic.
 
 ## Cost-aware planning
 
@@ -477,16 +489,17 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 
 ```
-generated: 15/15 selection, 6/6 held-out, adopted=true
+generated: 17/17 selection, 6/6 held-out, adopted=true
 corpus:    18/18 selection, 6/6 held-out, adopted=true
-selected:  sum4 + depth + refinements + select_min + sum9
-hard:      9/9
+selected:  sum4 + depth + refinements + select_min + sum9 + sum16
+hard:      11/11
+learned-only (no safety nets): 17/17, 6/6, hard 11/11
 ```
 
 `run --archive FILE` records gate-competitive candidates in a QD archive,
 selected by quality (exact correctness, then held-out) and novelty (L1
 distance in the harness-state descriptor). `archive --file FILE` prints it.
-The archive keeps the `15/15 + 6/6` five-capability harness beside the 14/15
+The archive keeps the `17/17 + 6/6` seven-capability harness beside the 14/17
 pair attractors that each miss a different capability; adoption still requires
 the exact gate, retention, and held-out non-regression.
 
@@ -500,8 +513,8 @@ cargo run -q -p jotnar-agent -- run --out runs/qd \
   --proposer qd --generated --archive runs/archive.json --qd-seeds 4 --hard
 ```
 
-The first run selected a hop from the `beam-coverage` seed adding `sum9`,
-then passed the hard audit 9/9.
+The first run selected a hop from the `beam-union` seed adding `depth + 1`,
+then passed the hard audit 11/11.
 
 ## The driver
 
@@ -589,7 +602,7 @@ held-out checks — not a hand-coded feature.
   recurrent block that generalizes to the held-out deep case at two loops and
   retains the fix at four.
 - A state-dependent `(task, harness_state, action)` world model learns the
-  exact transition table and a beam/triple proposer reaches 15/15 + 6/6 on the
+  exact transition table and a beam/triple proposer reaches 17/17 + 6/6 on the
   generated stream and 18/18 + 6/6 on the corpus.
 - The first causal planner composes three capabilities
   (`sum4 + depth/refinements + select_min`), not just a pair.
@@ -597,25 +610,29 @@ held-out checks — not a hand-coded feature.
   (`saxpy -> saxpy_s16`); the frozen held-out `affine -> affine_s16` is not
   trained on.
 - A joint latent + effect proposer (Qwen φ-ladder backbone + causal state
-  model) reaches the same 15/15 + 6/6 and 18/18 + 6/6.
-- A quality-diversity archive keeps the best four-capability harness beside the
-  novel 14/15 pair attractors, so the loop does not collapse to one incumbent.
+  model) reaches the same 17/17 + 6/6 and 18/18 + 6/6.
+- A quality-diversity archive keeps the best seven-capability harness beside the
+  novel 14/17 pair attractors, so the loop does not collapse to one incumbent.
 - `feature-audit` shows the original held-out split is a sibling split: two
   cases are exact feature duplicates and four are within three units of a
   training task.
 - A separate audit-only hard set (four novel `depth + refinements`
-  compositions, three high-distance retention cases, one refusal control, one
-  feature-distant 3×3 matrix case) measures the real generalization gap:
-  pre-coverage 4/9, coverage 8/9, compose-completeness 9/9, without training
-  on the hard set.
-- The feature-distant `matmul3 -> matmul3_sum` case (18 inputs, 9 outputs,
-  min feature distance 107) is solved by the unseen `sum9` compose consumer.
-  The completeness safety net proposes it; the exact gate accepts it.
+  compositions, three high-distance retention cases, one refusal control, and
+  three feature-distant compose cases across matrix and select) measures the
+  real generalization gap. The base harness scores 4/11; the learned union
+  reaches 11/11 without training on the hard set.
+- The three distant compose cases (18-in/9-out matmul3, 32-in/16-out matmul4,
+  32-in/16-out select16; min distances 76/224/64) are solved by `sum9`/`sum16`
+  consumers. Both consumers have **training** fans (`vec9`, `vec16`), and the
+  learned model ranks the matching consumer first on each held-out shape.
+- With `--no-complete --no-singles --no-pairs`, the learned-only run still
+  reaches 17/17 selection, 6/6 held-out, and hard 11/11: the distant cases are
+  not relying on the completeness/singles safety net.
 - A Jotnar-native cost head (`(task, state) -> predicted steps`, ridge fit,
   `IDIV` scale) lets the beam rank by `effect - lambda * cost`.
 - `--proposer qd --archive` performs basin hopping from archived attractors;
-  a hop from the `beam-coverage` seed adding `sum9` reaches the hard audit
-  9/9.
+  a hop from the `beam-union` seed adding `depth + 1` reaches the hard audit
+  11/11.
 
 ## What it does not prove
 
@@ -647,13 +664,21 @@ held-out checks — not a hand-coded feature.
 - That the archive is a full quality-diversity search. It seeds basin hopping
   and ranks by quality + novelty, but its descriptor is the 14-feature harness
   state, not a continuous behavior space.
-- That the hard set is a benchmark. It is nine audit cases; the four
+- That the hard set is a benchmark. It is eleven audit cases; the four
   refine/deep compositions share one mechanism (`*_dup -> *_s16`) and their
-  feature distance is only 3–7. The feature-distant 3×3 case is a single
-  shape, and it is solved by the completeness safety net rather than by a
-  learned ranking of `sum9`.
-- That the coverage/completeness candidates are learned policy. They are
-  structural safety nets; the exact gate still does the work.
+  feature distance is only 3–7. The three distant compose cases span two
+  mechanisms but are one consumer each; that is a real but small generalization
+  measurement.
+- That the wide-consumer transfer is broad. `sum9`/`sum16` are taught on
+  elementwise fans and held out on matrix/select shapes; the consumer choice is
+  one action per arity, and the arity mask is structural.
+- That the four refine/deep hard cases are solved by the learned ranking alone.
+  The coverage union keeps its structural deep prior beside the learned
+  `refinements + 1`.
+- That the coverage/completeness candidates are learned policy. The
+  completeness union is a structural safety net; the learned-only ablation
+  shows it is no longer needed for the distant cases, but the coverage tie-break
+  is still a heuristic.
 - That the coverage tie-break is a general policy. It is safe because it runs
   after exact correctness and actual steps, and the held-out check still gates
   adoption, but it can keep a capability that is irrelevant to the current

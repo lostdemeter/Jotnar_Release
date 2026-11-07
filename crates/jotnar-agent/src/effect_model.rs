@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::driver::{EvalReport, Experience, OutcomeKind, Proposer};
 use crate::effects::CaseEffects;
 use crate::harness::{Harness, Mutation};
-use crate::proposer::{apply_action, ACTIONS};
+use crate::proposer::{action_applies, apply_action, mask_inapplicable_consumers, ACTIONS};
 use crate::task_encoder::{task_vector, TaskEncoder, LATENT_NAMES, TASK_FEATURE_NAMES};
 use crate::view::CaseView;
 
@@ -73,17 +73,27 @@ impl EffectModel {
         let lr = lr.max(1);
         for _ in 0..epochs.max(1) {
             for case in effects {
-                let scores = self.scores(&case.task);
+                let start_outputs = case.task.get(1).copied().unwrap_or(0);
+                let mut scores = self.scores(&case.task);
+                mask_inapplicable_consumers(&case.task, &mut scores);
                 let positives: Vec<usize> = case
                     .actions
                     .iter()
-                    .filter(|action| action.applicable && action.correct)
+                    .filter(|action| {
+                        action.applicable
+                            && action.correct
+                            && action_applies(action.index, start_outputs)
+                    })
                     .map(|action| action.index)
                     .collect();
                 let negatives: Vec<usize> = case
                     .actions
                     .iter()
-                    .filter(|action| action.applicable && !action.correct)
+                    .filter(|action| {
+                        action.applicable
+                            && !action.correct
+                            && action_applies(action.index, start_outputs)
+                    })
                     .map(|action| action.index)
                     .collect();
                 if positives.is_empty() || negatives.is_empty() {
@@ -113,9 +123,14 @@ impl EffectModel {
         let correct = effects
             .iter()
             .filter(|case| {
-                let scores = self.scores(&case.task);
-                let top = (0..scores.len())
-                    .max_by_key(|action| scores[*action])
+                let mut scores = self.scores(&case.task);
+                mask_inapplicable_consumers(&case.task, &mut scores);
+                let top = case
+                    .actions
+                    .iter()
+                    .filter(|action| action.applicable)
+                    .max_by_key(|action| scores[action.index])
+                    .map(|action| action.index)
                     .unwrap_or(0);
                 case.actions
                     .iter()
@@ -237,7 +252,8 @@ impl Proposer for WorldModelProposer {
                 continue;
             }
             let task = task_vector(view, base);
-            let scores = self.model.scores(&task);
+            let mut scores = self.model.scores(&task);
+            mask_inapplicable_consumers(&task, &mut scores);
             let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
             order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
             let applicable: Vec<usize> = order

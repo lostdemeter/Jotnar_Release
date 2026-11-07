@@ -70,12 +70,12 @@ pub use library::{calibration_cases, cases, deep_calibration_cases, example_set,
 pub use looped::{LoopWeights, LoopedProposer};
 pub use looped_encoder::{LoopEncoderWeights, LoopedTaskEncoder};
 pub use proposer::{
-    apply_action, apply_action_set, corpus_prior_weights, JotnarProposer, ProposerWeights, ACTIONS,
-    FEATURE_NAMES,
+    action_applies, apply_action, apply_action_set, consumer_arity, corpus_prior_weights,
+    mask_inapplicable_consumers, JotnarProposer, ProposerWeights, ACTIONS, FEATURE_NAMES,
 };
 pub use solve::{solve, SolveError, SolveResult};
 pub use state::{State, StateKind};
-pub use state_effect_model::{BeamProposer, StateEffectModel, STATE_MODEL_INPUTS};
+pub use state_effect_model::{BeamProposer, ProposalOptions, StateEffectModel, STATE_MODEL_INPUTS};
 pub use step::{Step, StepRecord};
 pub use task_encoder::{
     calibration_dataset, EncoderSample, EncoderWeights, FitReport, TaskEncoder, LATENT_NAMES,

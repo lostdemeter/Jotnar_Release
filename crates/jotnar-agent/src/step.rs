@@ -178,6 +178,37 @@ fn compose(state: &State, consumer: &str) -> Result<State, String> {
                 .with_family("compose:sum9".to_string(), BTreeMap::new());
             Ok(s)
         }
+        "sum16" => {
+            if outs.len() != 16 {
+                return Err(format!(
+                    "compose[sum16] needs exactly sixteen outputs, got {}",
+                    outs.len()
+                ));
+            }
+            let mut names = outs;
+            let mut text = state.text.clone();
+            for name in names.iter_mut() {
+                if name == "OUT" {
+                    let fresh = fresh_name(&text, "c");
+                    text = rename_token(&text, name, &fresh);
+                    *name = fresh;
+                }
+            }
+            let mut acc = names[0].clone();
+            for (i, term) in names.iter().enumerate().skip(1) {
+                let name = if i + 1 == names.len() {
+                    "OUT".to_string()
+                } else {
+                    fresh_name(&text, "s16")
+                };
+                text.push_str(&format!("\n{name} = IADD({acc}, {term})\n"));
+                acc = name;
+            }
+            let s = State::new(format!("compose[sum16]({})", state.name), text)?
+                .with_kind(StateKind::Composed)
+                .with_family("compose:sum16".to_string(), BTreeMap::new());
+            Ok(s)
+        }
         other => Err(format!("unknown compose consumer {other:?}")),
     }
 }

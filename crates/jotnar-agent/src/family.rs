@@ -378,6 +378,152 @@ pub fn build_matmul3_dup(_: &Params) -> Result<String, String> {
     Ok(text)
 }
 
+/// Append a left-to-right sum of `terms` to `text`, naming the final stream
+/// `OUT`. This is the shared shape behind the multi-output consumers.
+fn append_sum(text: &mut String, terms: &[String], prefix: &str) {
+    if terms.is_empty() {
+        return;
+    }
+    let mut acc = terms[0].clone();
+    for (i, term) in terms.iter().enumerate().skip(1) {
+        let name = if i + 1 == terms.len() {
+            "OUT".to_string()
+        } else {
+            format!("{prefix}{i}")
+        };
+        text.push_str(&format!("\n{name} = IADD({acc}, {term})"));
+        acc = name;
+    }
+    text.push('\n');
+}
+
+/// An `n`-lane elementwise fan: `n` inputs, `n` doubled outputs.
+pub fn build_vec(n: usize) -> String {
+    let mut lines = vec![format!("# {n}-lane elementwise fan; each lane is doubled.")];
+    for i in 0..n {
+        lines.push(format!("IN a{i}"));
+    }
+    lines.push(String::new());
+    for i in 0..n {
+        lines.push(format!("o{i} = IADD(a{i}, a{i})"));
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The fan plus a single-output sum of its lanes. This is the training shape
+/// that teaches a wider compose consumer (`sum9`, `sum16`) without reusing the
+/// distant held-out shape.
+pub fn build_vec_sum(n: usize) -> String {
+    let mut text = build_vec(n);
+    let terms: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
+    append_sum(&mut text, &terms, "s");
+    text
+}
+
+/// An `n` x `n` matrix multiply with `n*n` named outputs `c{i}{j}`.
+pub fn build_matmul_n(n: usize) -> String {
+    let mut lines = vec![format!("# {n}x{n} matrix multiply.")];
+    for i in 0..n {
+        for j in 0..n {
+            lines.push(format!("IN a{i}{j}"));
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            lines.push(format!("IN b{i}{j}"));
+        }
+    }
+    lines.push(String::new());
+    for i in 0..n {
+        for j in 0..n {
+            let t0 = format!("t{i}{j}0");
+            lines.push(format!("{t0} = IMUL(a{i}0, b0{j})"));
+            let mut acc = t0;
+            for k in 1..n {
+                let p = format!("t{i}{j}{k}");
+                lines.push(format!("{p} = IMUL(a{i}{k}, b{k}{j})"));
+                let name = if k + 1 == n {
+                    format!("c{i}{j}")
+                } else {
+                    format!("s{i}{j}{k}")
+                };
+                lines.push(format!("{name} = IADD({acc}, {p})"));
+                acc = name;
+            }
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The matrix product plus a sum of all `n*n` outputs.
+pub fn build_matmul_n_sum(n: usize) -> String {
+    let mut text = build_matmul_n(n);
+    let terms: Vec<String> = (0..n)
+        .flat_map(|i| (0..n).map(move |j| format!("c{i}{j}")))
+        .collect();
+    append_sum(&mut text, &terms, "s");
+    text
+}
+
+/// A wide elementwise select: `2n` inputs, `n` outputs `max(a_i, b_i)`.
+pub fn build_select_wide(n: usize) -> String {
+    let mut lines = vec![format!(
+        "# {n}-lane elementwise maximum via explicit predicates."
+    )];
+    for i in 0..n {
+        lines.push(format!("IN a{i}"));
+    }
+    for i in 0..n {
+        lines.push(format!("IN b{i}"));
+    }
+    lines.push(String::new());
+    for i in 0..n {
+        lines.push(format!("c{i} = ILT(a{i}, b{i})"));
+        lines.push(format!("m{i} = ISELECT(c{i}, b{i}, a{i})"));
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The wide select plus a sum of its `n` outputs.
+pub fn build_select_wide_sum(n: usize) -> String {
+    let mut text = build_select_wide(n);
+    let terms: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
+    append_sum(&mut text, &terms, "s");
+    text
+}
+
+pub fn build_vec9(_: &Params) -> Result<String, String> {
+    Ok(build_vec(9))
+}
+
+pub fn build_vec9_sum(_: &Params) -> Result<String, String> {
+    Ok(build_vec_sum(9))
+}
+
+pub fn build_vec16(_: &Params) -> Result<String, String> {
+    Ok(build_vec(16))
+}
+
+pub fn build_vec16_sum(_: &Params) -> Result<String, String> {
+    Ok(build_vec_sum(16))
+}
+
+pub fn build_matmul4(_: &Params) -> Result<String, String> {
+    Ok(build_matmul_n(4))
+}
+
+pub fn build_matmul4_sum(_: &Params) -> Result<String, String> {
+    Ok(build_matmul_n_sum(4))
+}
+
+pub fn build_select16(_: &Params) -> Result<String, String> {
+    Ok(build_select_wide(16))
+}
+
+pub fn build_select16_sum(_: &Params) -> Result<String, String> {
+    Ok(build_select_wide_sum(16))
+}
+
 pub fn build_select(_: &Params) -> Result<String, String> {
     Ok("\
 # Two-way select.

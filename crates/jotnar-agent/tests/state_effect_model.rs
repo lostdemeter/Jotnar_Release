@@ -148,6 +148,88 @@ fn beam_coverage_generalizes_to_hard_compositions() {
 }
 
 #[test]
+fn learned_ranking_solves_distant_shapes_without_safety_nets() {
+    let base = Harness::default();
+    let train = generated_train();
+    let heldout = generated_split_cases(Split::Heldout);
+    let hard = hard_cases();
+    let rows = state_effects(&train, &base, 2);
+    let mut model = StateEffectModel::prior();
+    let accuracy = model.fit(&rows, 10, 1);
+    assert!(accuracy >= 0.99, "discriminating accuracy {accuracy}");
+
+    // The learned model ranks the taught consumer first on every held-out
+    // distant shape, from the task vector and the base harness state alone.
+    let base_report = evaluate(&base, &hard, false);
+    let views = jotnar_agent::case_views(&hard, &base_report);
+    for (id, action) in [
+        ("hard-matmul3-sum", 10usize),
+        ("hard-matmul4-sum", 11),
+        ("hard-select16-sum", 11),
+    ] {
+        let index = hard
+            .iter()
+            .position(|case| case.intent.id == id)
+            .unwrap_or_else(|| panic!("missing hard case {id}"));
+        let task = jotnar_agent::task_encoder::task_vector(&views[index], &base);
+        let mut scores = model.scores(&task, &base.state_features());
+        jotnar_agent::mask_inapplicable_consumers(&task, &mut scores);
+        let top = (0..scores.len())
+            .max_by_key(|action| scores[*action])
+            .unwrap_or(0);
+        assert_eq!(
+            top, action,
+            "{id} should rank {} first: {scores:?}",
+            ACTIONS[action]
+        );
+        assert!(scores[action] > 0, "{id} score {}", scores[action]);
+    }
+
+    // Learned-only: disable the compose-completeness, exhaustive-singles, and
+    // exhaustive-pair safety nets. The learned per-case union must still carry
+    // the wide consumers into the adopted harness.
+    let proposer = BeamProposer::new(model, 4, 2).learned_only();
+    let report = run_round_with(&base, &train, &temp_dir("learned-only"), &proposer);
+    assert!(report.adopted_flag, "learned-only adoption");
+    assert_eq!(report.adopted.correct(), train.len());
+    assert_eq!(report.adopted.wrong(), 0);
+    assert!(
+        report
+            .adopted_harness
+            .compose_consumers
+            .iter()
+            .any(|c| c == "sum9"),
+        "learned-only harness should keep sum9"
+    );
+    assert!(
+        report
+            .adopted_harness
+            .compose_consumers
+            .iter()
+            .any(|c| c == "sum16"),
+        "learned-only harness should keep sum16"
+    );
+
+    let held = evaluate(&report.adopted_harness, &heldout, false);
+    assert_eq!(
+        held.correct(),
+        heldout.len(),
+        "held-out {}/{}",
+        held.correct(),
+        heldout.len()
+    );
+    let hard_report = evaluate(&report.adopted_harness, &hard, false);
+    assert_eq!(
+        hard_report.correct(),
+        hard.len(),
+        "hard audit {}/{} (wrong {})",
+        hard_report.correct(),
+        hard.len(),
+        hard_report.wrong()
+    );
+}
+
+#[test]
 fn beam_proposer_covers_triples() {
     let base = Harness::default();
     let train = generated_train();
@@ -181,6 +263,6 @@ fn beam_proposer_covers_triples() {
         }),
         "the beam should reach a sum4 + depth/refinements + select_min triple"
     );
-    assert_eq!(ACTIONS.len(), 11);
+    assert_eq!(ACTIONS.len(), 12);
     let _ = generated_corpus();
 }

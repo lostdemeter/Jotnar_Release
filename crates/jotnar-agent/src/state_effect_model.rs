@@ -23,7 +23,9 @@ use crate::driver::{EvalReport, Experience, OutcomeKind, Proposer};
 use crate::effect_model::EffectModel;
 use crate::effects::StateEffectRow;
 use crate::harness::{Harness, Mutation, STATE_FEATURE_NAMES};
-use crate::proposer::{apply_action, apply_action_set, ACTIONS};
+use crate::proposer::{
+    action_applies, apply_action, apply_action_set, mask_inapplicable_consumers, ACTIONS,
+};
 use crate::task_encoder::{task_vector, TASK_FEATURE_NAMES};
 use crate::view::CaseView;
 
@@ -116,15 +118,21 @@ impl StateEffectModel {
 
         for _ in 0..epochs.max(1) {
             for group in groups.values() {
-                let positives: Vec<&&StateEffectRow> =
-                    group.iter().filter(|row| row.correct).collect();
-                let negatives: Vec<&&StateEffectRow> =
-                    group.iter().filter(|row| row.wrong).collect();
+                let sample = &group[0];
+                let start_outputs = sample.task.get(1).copied().unwrap_or(0);
+                let positives: Vec<&&StateEffectRow> = group
+                    .iter()
+                    .filter(|row| row.correct && action_applies(row.action, start_outputs))
+                    .collect();
+                let negatives: Vec<&&StateEffectRow> = group
+                    .iter()
+                    .filter(|row| row.wrong && action_applies(row.action, start_outputs))
+                    .collect();
                 if positives.is_empty() || negatives.is_empty() {
                     continue;
                 }
-                let sample = &group[0];
-                let scores = self.scores(&sample.task, &sample.state);
+                let mut scores = self.scores(&sample.task, &sample.state);
+                mask_inapplicable_consumers(&sample.task, &mut scores);
                 let best_positive = positives
                     .iter()
                     .max_by_key(|row| scores[row.action])
@@ -159,14 +167,20 @@ impl StateEffectModel {
         let mut discriminating = 0usize;
         let mut hits = 0usize;
         for group in groups.values() {
-            let has_positive = group.iter().any(|row| row.correct);
-            let has_negative = group.iter().any(|row| row.wrong);
+            let sample = &group[0];
+            let start_outputs = sample.task.get(1).copied().unwrap_or(0);
+            let has_positive = group
+                .iter()
+                .any(|row| row.correct && action_applies(row.action, start_outputs));
+            let has_negative = group
+                .iter()
+                .any(|row| row.wrong && action_applies(row.action, start_outputs));
             if !has_positive || !has_negative {
                 continue;
             }
             discriminating += 1;
-            let sample = &group[0];
-            let scores = self.scores(&sample.task, &sample.state);
+            let mut scores = self.scores(&sample.task, &sample.state);
+            mask_inapplicable_consumers(&sample.task, &mut scores);
             let top = (0..scores.len())
                 .max_by_key(|action| scores[*action])
                 .unwrap_or(0);
@@ -328,11 +342,11 @@ where
 /// generalization potential without changing exact correctness.
 fn capability_group(action: usize) -> usize {
     match action {
-        0 | 10 => 0, // compose consumers (sum4, sum9)
-        1 => 1,      // depth
-        2 | 3 => 2,  // refine/tags policy
-        5 => 3,      // refinements
-        _ => 4,      // family adds
+        0 | 10 | 11 => 0, // compose consumers (sum4, sum9, sum16)
+        1 => 1,           // depth
+        2 | 3 => 2,       // refine/tags policy
+        5 => 3,           // refinements
+        _ => 4,           // family adds
     }
 }
 
@@ -340,12 +354,41 @@ fn capability_group(action: usize) -> usize {
 ///
 /// `score(task, state)` returns one predicted correctness score per action.
 /// The exact gate remains the judge: this function only orders the candidates.
+/// Structural safety-net options for [`propose_from_scores`]. The learned-only
+/// ablation disables all three.
+#[derive(Clone, Copy, Debug)]
+pub struct ProposalOptions {
+    pub include_pairs: bool,
+    pub include_complete: bool,
+    pub include_singles: bool,
+}
+
+impl Default for ProposalOptions {
+    fn default() -> Self {
+        Self {
+            include_pairs: true,
+            include_complete: true,
+            include_singles: true,
+        }
+    }
+}
+
+impl ProposalOptions {
+    pub fn learned_only() -> Self {
+        Self {
+            include_pairs: false,
+            include_complete: false,
+            include_singles: false,
+        }
+    }
+}
+
 pub fn propose_from_scores<S>(
     base: &Harness,
     views: &[CaseView],
     beam: usize,
     max_depth: usize,
-    include_pairs: bool,
+    options: ProposalOptions,
     prefix: &str,
     score: S,
 ) -> Vec<Mutation>
@@ -354,6 +397,13 @@ where
 {
     let beam = beam.max(1);
     let max_depth = max_depth.max(1);
+    // Compose-consumer scores are only meaningful when the arity matches; mask
+    // the others so the learned ranking is among applicable actions.
+    let scored = |task: &[i64], state: &[i64]| {
+        let mut scores = score(task, state);
+        mask_inapplicable_consumers(task, &mut scores);
+        scores
+    };
     let mut out: Vec<Mutation> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let push = |mutation: Mutation, out: &mut Vec<Mutation>, seen: &mut BTreeSet<String>| {
@@ -378,7 +428,7 @@ where
         }
         let task = task_vector(view, base);
         let state = base.state_features();
-        let scores = score(&task, &state);
+        let scores = scored(&task, &state);
         let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
         order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
         let applicable: Vec<usize> = order
@@ -412,7 +462,7 @@ where
         }
         per_case.push((
             view.case_id.clone(),
-            search_case(&task, base, beam, max_depth, &score),
+            search_case(&task, base, beam, max_depth, &scored),
         ));
     }
     coverage_union.extend(union.iter().copied());
@@ -454,41 +504,47 @@ where
 
     // Compose completeness: keep every available compose consumer alive. A
     // consumer that does not match the current output arity is a safe no-op,
-    // and it is exactly what a feature-distant shape may need.
-    let mut complete_union = coverage_union.clone();
-    for action in 0..ACTIONS.len() {
-        if capability_group(action) == 0 && apply_action(base, action).is_some() {
-            complete_union.insert(action);
+    // and it is exactly what a feature-distant shape may need. This is a
+    // structural prior, not a learned ranking; the ablation disables it.
+    if options.include_complete {
+        let mut complete_union = coverage_union.clone();
+        for action in 0..ACTIONS.len() {
+            if capability_group(action) == 0 && apply_action(base, action).is_some() {
+                complete_union.insert(action);
+            }
         }
-    }
-    if complete_union != coverage_union && !complete_union.is_empty() {
-        let names = complete_union
-            .iter()
-            .map(|action| ACTIONS[*action])
-            .collect::<Vec<_>>()
-            .join(" + ");
-        push(
-            Mutation {
-                label: format!("{prefix}-complete: {names}"),
-                harness: apply_action_set(base, &complete_union),
-            },
-            &mut out,
-            &mut seen,
-        );
-    }
-
-    // Exhaustive singles: the safety net for an action the learned model has
-    // never seen (e.g. sum9 before any 9-output training case exists).
-    for (action, label) in ACTIONS.iter().enumerate() {
-        if let Some(mutation) = apply_action(base, action) {
+        if complete_union != coverage_union && !complete_union.is_empty() {
+            let names = complete_union
+                .iter()
+                .map(|action| ACTIONS[*action])
+                .collect::<Vec<_>>()
+                .join(" + ");
             push(
                 Mutation {
-                    label: format!("{prefix}-single: {label}"),
-                    harness: mutation.harness,
+                    label: format!("{prefix}-complete: {names}"),
+                    harness: apply_action_set(base, &complete_union),
                 },
                 &mut out,
                 &mut seen,
             );
+        }
+    }
+
+    // Exhaustive singles: the safety net for an action the learned model has
+    // never seen (e.g. sum9 before any 9-output training case exists). The
+    // ablation disables it to measure the learned ranking alone.
+    if options.include_singles {
+        for (action, label) in ACTIONS.iter().enumerate() {
+            if let Some(mutation) = apply_action(base, action) {
+                push(
+                    Mutation {
+                        label: format!("{prefix}-single: {label}"),
+                        harness: mutation.harness,
+                    },
+                    &mut out,
+                    &mut seen,
+                );
+            }
         }
     }
 
@@ -543,7 +599,7 @@ where
 
     // Keep the exhaustive pair set as a gate safety net. The beam covers
     // triples; the pairs are cheap and were the first accepted attractor.
-    if include_pairs {
+    if options.include_pairs {
         for (a, a_name) in ACTIONS.iter().enumerate() {
             for (b, b_name) in ACTIONS.iter().enumerate().skip(a + 1) {
                 let pair: BTreeSet<usize> = [a, b].into_iter().collect();
@@ -570,6 +626,12 @@ pub struct BeamProposer {
     pub max_depth: usize,
     /// Include the exhaustive pair set as a gate safety net.
     pub include_pairs: bool,
+    /// Include the compose-completeness union (all consumers) as a structural
+    /// safety net. Disable it for the learned-only ablation.
+    pub include_complete: bool,
+    /// Include the exhaustive single-action set as a structural safety net.
+    /// Disable it for the learned-only ablation.
+    pub include_singles: bool,
     /// Optional learned cost head. The beam score becomes
     /// `effect - cost_weight * predicted_steps`.
     pub cost: Option<CostModel>,
@@ -583,9 +645,20 @@ impl BeamProposer {
             beam: beam.max(1),
             max_depth: max_depth.max(1),
             include_pairs: true,
+            include_complete: true,
+            include_singles: true,
             cost: None,
             cost_weight: 0,
         }
+    }
+
+    /// Disable the structural safety nets, leaving only the learned union,
+    /// coverage, beam paths, and global proposal.
+    pub fn learned_only(mut self) -> Self {
+        self.include_complete = false;
+        self.include_singles = false;
+        self.include_pairs = false;
+        self
     }
 
     pub fn with_cost(mut self, cost: CostModel, weight: i64) -> Self {
@@ -616,7 +689,11 @@ impl Proposer for BeamProposer {
             views,
             self.beam,
             self.max_depth,
-            self.include_pairs,
+            ProposalOptions {
+                include_pairs: self.include_pairs,
+                include_complete: self.include_complete,
+                include_singles: self.include_singles,
+            },
             "beam",
             |task, state| {
                 let mut scores = self.model.scores(task, state);

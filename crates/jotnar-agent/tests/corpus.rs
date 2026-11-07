@@ -19,7 +19,15 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
     let train = all.iter().filter(|c| c.split == Split::Train).count();
     let calibration = all.iter().filter(|c| c.split == Split::Calibration).count();
     let heldout = all.iter().filter(|c| c.split == Split::Heldout).count();
-    assert_eq!((train, calibration, heldout), (8, 7, 6));
+    assert_eq!((train, calibration, heldout), (10, 7, 6));
+
+    // The wide compose consumers are taught on their own shapes; the distant
+    // matrix/select shapes stay audit-only.
+    for id in ["gen-vec9-sum-train", "gen-vec16-sum-train"] {
+        assert!(all
+            .iter()
+            .any(|c| c.split == Split::Train && c.case.intent.id == id));
+    }
 
     // The deep training member is a saxpy target; the held-out deep member is
     // still the affine target. The held-out row is never moved.
@@ -37,10 +45,13 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
 #[test]
 fn hard_cases_are_audit_only_and_require_composition() {
     let hard = hard_cases();
-    assert_eq!(hard.len(), 9);
+    assert_eq!(hard.len(), 11);
     let base = Harness::default();
     let report = evaluate(&base, &hard, false);
-    assert_eq!(report.wrong_refusal, 5, "four refine/deep + one matmul3");
+    assert_eq!(
+        report.wrong_refusal, 7,
+        "four refine/deep + matmul3 + matmul4 + select16"
+    );
     assert_eq!(report.solved, 3, "three high-distance retention cases");
     assert_eq!(report.refused, 1, "one high-distance refusal control");
 
@@ -74,20 +85,32 @@ fn hard_cases_are_audit_only_and_require_composition() {
         assert_eq!(min, 2, "{} should need depth + refinements", case.intent.id);
     }
 
-    // The feature-distant 3x3 case needs the unseen sum9 consumer.
-    let matmul3 = hard
-        .iter()
-        .find(|c| c.intent.id == "hard-matmul3-sum")
-        .expect("hard matmul3 case");
-    let min_actions = states
-        .iter()
-        .filter_map(|(_, subset, harness)| {
-            let r = evaluate(harness, std::slice::from_ref(matmul3), false);
-            r.outcomes[0].kind.correct().then_some(subset.clone())
-        })
-        .min_by_key(|subset| subset.len())
-        .expect("matmul3 is solvable");
-    assert_eq!(min_actions, vec![10], "the matmul3 fix is sum9");
+    // The feature-distant compose cases need the wide consumers. They are
+    // audit-only and were never trained on directly.
+    for (id, consumer) in [
+        ("hard-matmul3-sum", 10usize),
+        ("hard-matmul4-sum", 11),
+        ("hard-select16-sum", 11),
+    ] {
+        let case = hard
+            .iter()
+            .find(|c| c.intent.id == id)
+            .unwrap_or_else(|| panic!("missing hard case {id}"));
+        let min_actions = states
+            .iter()
+            .filter_map(|(_, subset, harness)| {
+                let r = evaluate(harness, std::slice::from_ref(case), false);
+                r.outcomes[0].kind.correct().then_some(subset.clone())
+            })
+            .min_by_key(|subset| subset.len())
+            .unwrap_or_else(|| panic!("{id} is solvable"));
+        assert_eq!(
+            min_actions,
+            vec![consumer],
+            "{id} should be fixed by {}",
+            jotnar_agent::ACTIONS[consumer]
+        );
+    }
 }
 
 #[test]
@@ -136,6 +159,18 @@ fn feature_distance_audit_exposes_the_sibling_heldout() {
         min_dist(&task_vector(&hard_views[reduce], &base)) > 100,
         "the hard reduction case should be feature-distant"
     );
+
+    for id in ["hard-matmul3-sum", "hard-matmul4-sum", "hard-select16-sum"] {
+        let idx = hard
+            .iter()
+            .position(|case| case.intent.id == id)
+            .unwrap_or_else(|| panic!("missing distant case {id}"));
+        let distance = min_dist(&task_vector(&hard_views[idx], &base));
+        assert!(
+            distance > 50,
+            "{id} has min feature distance {distance}; it must be > 50"
+        );
+    }
 }
 
 #[test]

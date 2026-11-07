@@ -1,8 +1,8 @@
 use std::fs;
 
 use jotnar_agent::{
-    action_effects, evaluate, generated_split_cases, run_round_with, EffectModel, Harness, Split,
-    WorldModelProposer,
+    action_effects, evaluate, generated_split_cases, mask_inapplicable_consumers, run_round_with,
+    EffectModel, Harness, Split, WorldModelProposer,
 };
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -28,7 +28,8 @@ fn effect_model_ranks_the_solving_actions() {
         .iter()
         .find(|case| case.case == "gen-matmul-sum-cal")
         .expect("matrix case");
-    let scores = model.scores(&matrix.task);
+    let mut scores = model.scores(&matrix.task);
+    mask_inapplicable_consumers(&matrix.task, &mut scores);
     let top = (0..scores.len())
         .max_by_key(|action| scores[*action])
         .unwrap();
@@ -42,7 +43,8 @@ fn effect_model_ranks_the_solving_actions() {
         .iter()
         .find(|case| case.case == "gen-select-min")
         .expect("select case");
-    let scores = model.scores(&select.task);
+    let mut scores = model.scores(&select.task);
+    mask_inapplicable_consumers(&select.task, &mut scores);
     let top = (0..scores.len())
         .max_by_key(|action| scores[*action])
         .unwrap();

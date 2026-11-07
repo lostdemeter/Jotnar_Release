@@ -20,7 +20,7 @@ use crate::driver::{EvalReport, Experience, Proposer};
 use crate::effects::StateEffectRow;
 use crate::harness::{Harness, Mutation};
 use crate::proposer::ACTIONS;
-use crate::state_effect_model::{propose_from_scores, StateEffectModel};
+use crate::state_effect_model::{propose_from_scores, ProposalOptions, StateEffectModel};
 use crate::task_encoder::LATENT_NAMES;
 use crate::view::CaseView;
 
@@ -36,6 +36,10 @@ pub struct JointProposer {
     pub max_depth: usize,
     #[serde(default = "default_true")]
     pub include_pairs: bool,
+    #[serde(default = "default_true")]
+    pub include_complete: bool,
+    #[serde(default = "default_true")]
+    pub include_singles: bool,
 }
 
 fn default_true() -> bool {
@@ -67,6 +71,8 @@ impl JointProposer {
             beam: beam.max(1),
             max_depth: max_depth.max(1),
             include_pairs: true,
+            include_complete: true,
+            include_singles: true,
         }
     }
 
@@ -164,7 +170,11 @@ impl Proposer for JointProposer {
             views,
             self.beam,
             self.max_depth,
-            self.include_pairs,
+            ProposalOptions {
+                include_pairs: self.include_pairs,
+                include_complete: self.include_complete,
+                include_singles: self.include_singles,
+            },
             "joint",
             |task, state| self.scores(task, state),
         ))

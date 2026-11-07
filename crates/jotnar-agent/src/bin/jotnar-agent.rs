@@ -14,9 +14,9 @@ fn usage() -> &'static str {
     "jotnar-agent — listing-level autonomous circuit\n\
      \n\
      usage:\n\
-       jotnar-agent run [--out DIR] [--rounds N] [--proposer jotnar|looped|task|teacher|world|beam|joint|qd|deterministic] [--loops N] [--encoder-loops N] [--fit] [--deep-train] [--weights FILE] [--encoder-weights FILE] [--looped-encoder-weights FILE] [--budget-predictor FILE] [--backbone FILE] [--teacher-actions FILE] [--effect-weights FILE] [--state-effect-weights FILE] [--joint-weights FILE] [--cost-weights FILE] [--cost-weight N] [--beam N] [--depth N] [--archive FILE] [--archive-novelty N] [--archive-capacity N] [--qd-seeds N] [--hard] [--corpus] [--generated]\n\
+       jotnar-agent run [--out DIR] [--rounds N] [--proposer jotnar|looped|task|teacher|world|beam|joint|qd|deterministic] [--loops N] [--encoder-loops N] [--fit] [--deep-train] [--weights FILE] [--encoder-weights FILE] [--looped-encoder-weights FILE] [--budget-predictor FILE] [--backbone FILE] [--teacher-actions FILE] [--effect-weights FILE] [--state-effect-weights FILE] [--joint-weights FILE] [--cost-weights FILE] [--cost-weight N] [--beam N] [--depth N] [--archive FILE] [--archive-novelty N] [--archive-capacity N] [--qd-seeds N] [--no-complete] [--no-singles] [--no-pairs] [--hard] [--corpus] [--generated]\n\
        jotnar-agent archive --file FILE\n\
-       jotnar-agent feature-audit [--corpus] [--generated]\n\
+       jotnar-agent feature-audit [--corpus] [--generated] [--state-effect-weights FILE] [--top-k N]\n\
        jotnar-agent fit-recurrent [--out DIR] [--deep-train] [--efficient]\n\
        jotnar-agent fit-encoder [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-looped-encoder [--out DIR] [--corpus] [--generated] [--max-loops N] [--encoder-weights FILE]\n\
@@ -844,7 +844,9 @@ fn run() -> Result<ExitCode, String> {
         "feature-audit" => {
             let mut corpus_mode = false;
             let mut generated = true;
-            for arg in args.by_ref() {
+            let mut weights: Option<PathBuf> = None;
+            let mut top_k = 3usize;
+            while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--corpus" => {
                         corpus_mode = true;
@@ -854,6 +856,18 @@ fn run() -> Result<ExitCode, String> {
                         generated = true;
                         corpus_mode = false;
                     }
+                    "--state-effect-weights" => {
+                        weights = Some(PathBuf::from(
+                            args.next().ok_or("--state-effect-weights needs a path")?,
+                        ));
+                    }
+                    "--top-k" => {
+                        top_k = args
+                            .next()
+                            .ok_or("--top-k needs a number")?
+                            .parse()
+                            .map_err(|_| "--top-k needs a number".to_string())?;
+                    }
                     other => return Err(format!("unknown option {other}")),
                 }
             }
@@ -862,7 +876,13 @@ fn run() -> Result<ExitCode, String> {
             } else {
                 fit_splits(false, corpus_mode)
             };
-            feature_audit(&train, &heldout, &jotnar_agent::hard_cases());
+            feature_audit(
+                &train,
+                &heldout,
+                &jotnar_agent::hard_cases(),
+                weights.as_deref(),
+                top_k.max(1),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
@@ -893,6 +913,9 @@ fn run() -> Result<ExitCode, String> {
             let mut hard = false;
             let mut qd_seeds = 8usize;
             let mut encoder_loops = 0usize;
+            let mut include_complete = true;
+            let mut include_singles = true;
+            let mut include_pairs = true;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--out" => {
@@ -1013,6 +1036,9 @@ fn run() -> Result<ExitCode, String> {
                             .map_err(|_| "--archive-capacity needs a number".to_string())?;
                     }
                     "--hard" => hard = true,
+                    "--no-complete" => include_complete = false,
+                    "--no-singles" => include_singles = false,
+                    "--no-pairs" => include_pairs = false,
                     "--qd-seeds" => {
                         qd_seeds = args
                             .next()
@@ -1072,6 +1098,9 @@ fn run() -> Result<ExitCode, String> {
                 Some(path) => {
                     let model = StateEffectModel::load(path).map_err(|e| e.to_string())?;
                     let mut proposer = BeamProposer::new(model, beam, depth);
+                    proposer.include_complete = include_complete;
+                    proposer.include_singles = include_singles;
+                    proposer.include_pairs = include_pairs;
                     if let Some(path) = &cost_weights {
                         let cost = CostModel::load(path).map_err(|e| e.to_string())?;
                         proposer = proposer.with_cost(cost, cost_weight);
@@ -1081,7 +1110,13 @@ fn run() -> Result<ExitCode, String> {
                 None => None,
             };
             let joint_prop = match &joint_weights {
-                Some(path) => Some(JointProposer::load(path).map_err(|e| e.to_string())?),
+                Some(path) => {
+                    let mut proposer = JointProposer::load(path).map_err(|e| e.to_string())?;
+                    proposer.include_complete = include_complete;
+                    proposer.include_singles = include_singles;
+                    proposer.include_pairs = include_pairs;
+                    Some(proposer)
+                }
                 None => None,
             };
             let qd_prop = archive_path.as_ref().map(|path| {
@@ -1738,8 +1773,14 @@ fn feature_audit(
     train: &[jotnar_agent::Case],
     heldout: &[jotnar_agent::Case],
     hard: &[jotnar_agent::Case],
-) {
+    weights: Option<&std::path::Path>,
+    top_k: usize,
+) -> Result<(), String> {
     let base = Harness::default();
+    let model = match weights {
+        Some(path) => Some(StateEffectModel::load(path).map_err(|e| e.to_string())?),
+        None => None,
+    };
     let train_report = evaluate(&base, train, false);
     let train_tasks: Vec<Vec<i64>> = jotnar_agent::case_views(train, &train_report)
         .iter()
@@ -1790,8 +1831,30 @@ fn feature_audit(
                 best.map(|s| s.len()).unwrap_or(0),
                 names
             );
+            if let Some(model) = &model {
+                let mut scores = model.scores(&task, &base.state_features());
+                jotnar_agent::mask_inapplicable_consumers(&task, &mut scores);
+                let mut order: Vec<usize> = (0..scores.len()).collect();
+                order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
+                let top = order
+                    .iter()
+                    .take(top_k)
+                    .map(|action| {
+                        format!("{} ({})", jotnar_agent::ACTIONS[*action], scores[*action])
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("    learned top-{top_k}: {top}");
+                if let Some(best) = best {
+                    let reachable = best
+                        .iter()
+                        .all(|action| order.iter().take(top_k).any(|top| top == action));
+                    println!("    min-solver in learned top-{top_k}: {reachable}");
+                }
+            }
         }
     }
+    Ok(())
 }
 
 fn fit_state_effect_model(

@@ -108,9 +108,9 @@ A row:
 ```
 
 The generated corpus recombines library start/target pairs and assigns
-splits by parameter/family, not by duplicate. It is a 21-case stream:
+splits by parameter/family, not by duplicate. It is a 23-case stream:
 
-- 8 train
+- 10 train
 - 7 calibration
 - 6 held-out
 
@@ -118,6 +118,12 @@ The deep elementwise failure is present in training (`saxpy -> saxpy_s16`)
 and held out on a different start family (`affine -> affine_s16`). That is the
 training signal the first generated stream was missing: the held-out split was
 never moved, but the model now sees what a deep target requires.
+
+The two wide compose consumers are taught the same way: `vec9 -> vec9_sum`
+(9 outputs) and `vec16 -> vec16_sum` (16 outputs) are **training** cases on
+shapes that are not the audit shapes. `matmul3 -> matmul3_sum`,
+`matmul4 -> matmul4_sum`, and `select16 -> select16_sum` are held out in the
+`Hard` split.
 
 Run it with:
 
@@ -136,10 +142,18 @@ file records what the model got wrong.
 `hard_corpus()` is a separate `Hard` split that is never used for fitting,
 selection, or adoption. It has four `depth + refinements` compositions
 (`*_dup -> *_s16`), three high-distance reduction/matrix retention cases, one
-refusal control, and one feature-distant 3×3 matrix case
-(`matmul3 -> matmul3_sum`, 18 inputs, 9 outputs, distance 107, solved by the
-unseen `sum9` consumer). `feature-audit` prints the min L1 feature distance
-from each held-out/hard case to the training task vectors; `run --hard`
+refusal control, and three feature-distant compose cases:
+
+| case | shape | min-dist | min solver |
+| --- | --- | ---: | --- |
+| `hard-matmul3-sum` | 18 in / 9 out | 76 | `add compose[sum9]` |
+| `hard-matmul4-sum` | 32 in / 16 out | 224 | `add compose[sum16]` |
+| `hard-select16-sum` | 32 in / 16 out | 64 | `add compose[sum16]` |
+
+The two wide consumers are taught on `vec9`/`vec16` training fans; none of the
+hard shapes is trained on. `feature-audit` prints the min L1 feature distance
+from each held-out/hard case to the training task vectors, and (with
+`--state-effect-weights`) the model's learned top-k action scores. `run --hard`
 evaluates the adopted harness on the hard set and writes `hard.json`. Both are
 audits: they measure generalization, they do not tune against it.
 

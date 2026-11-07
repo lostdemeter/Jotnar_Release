@@ -74,6 +74,20 @@ pub fn library() -> BTreeMap<String, String> {
         "matmul3_dup".into(),
         family::build_matmul3_dup(&empty).unwrap(),
     );
+    out.insert("matmul4".into(), family::build_matmul4(&empty).unwrap());
+    out.insert(
+        "matmul4_sum".into(),
+        family::build_matmul4_sum(&empty).unwrap(),
+    );
+    out.insert("vec9".into(), family::build_vec9(&empty).unwrap());
+    out.insert("vec9_sum".into(), family::build_vec9_sum(&empty).unwrap());
+    out.insert("vec16".into(), family::build_vec16(&empty).unwrap());
+    out.insert("vec16_sum".into(), family::build_vec16_sum(&empty).unwrap());
+    out.insert("select16".into(), family::build_select16(&empty).unwrap());
+    out.insert(
+        "select16_sum".into(),
+        family::build_select16_sum(&empty).unwrap(),
+    );
     out.insert("select".into(), family::build_select(&empty).unwrap());
     out.insert(
         "select_max".into(),
@@ -146,6 +160,47 @@ pub fn example_set(label: &str, variant: u64) -> Vec<Example> {
                     inputs.insert(format!("b{i}{j}"), TestVec::scalar(base + n));
                     n += 1;
                 }
+            }
+            vec![Example::new(inputs)]
+        }
+        "matmul4" | "matmul4_sum" => {
+            let base = if variant == 0 { 1 } else { 2 };
+            let mut inputs = BTreeMap::new();
+            let mut n = 0i64;
+            for i in 0..4 {
+                for j in 0..4 {
+                    inputs.insert(format!("a{i}{j}"), TestVec::scalar(base + n));
+                    n += 1;
+                }
+            }
+            for i in 0..4 {
+                for j in 0..4 {
+                    inputs.insert(format!("b{i}{j}"), TestVec::scalar(base + n));
+                    n += 1;
+                }
+            }
+            vec![Example::new(inputs)]
+        }
+        "vec9" | "vec9_sum" => {
+            let base = if variant == 0 { 1 } else { 101 };
+            let inputs = (0..9)
+                .map(|i| (format!("a{i}"), TestVec::scalar(base + i as i64)))
+                .collect::<BTreeMap<_, _>>();
+            vec![Example::new(inputs)]
+        }
+        "vec16" | "vec16_sum" => {
+            let base = if variant == 0 { 1 } else { 101 };
+            let inputs = (0..16)
+                .map(|i| (format!("a{i}"), TestVec::scalar(base + i as i64)))
+                .collect::<BTreeMap<_, _>>();
+            vec![Example::new(inputs)]
+        }
+        "select16" | "select16_sum" => {
+            let base = if variant == 0 { 1 } else { 41 };
+            let mut inputs = BTreeMap::new();
+            for i in 0..16 {
+                inputs.insert(format!("a{i}"), TestVec::scalar(base + i as i64));
+                inputs.insert(format!("b{i}"), TestVec::scalar(base + 20 - i as i64));
             }
             vec![Example::new(inputs)]
         }

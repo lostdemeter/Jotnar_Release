@@ -124,6 +124,15 @@ impl Harness {
             });
         }
 
+        if !self.compose_consumers.iter().any(|c| c == "sum16") {
+            let mut h = self.clone();
+            h.compose_consumers.push("sum16".into());
+            out.push(Mutation {
+                label: "add compose[sum16]".into(),
+                harness: h,
+            });
+        }
+
         {
             let mut h = self.clone();
             h.max_depth = (h.max_depth + 1).min(6);

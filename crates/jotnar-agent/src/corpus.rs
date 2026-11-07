@@ -362,7 +362,7 @@ pub struct TaskSpec {
     pub target_ops: usize,
 }
 
-/// Recombine library start/target pairs into a new 20-case stream. The held-out
+/// Recombine library start/target pairs into a new 23-case stream. The held-out
 /// members use different parameters or a different composition than the
 /// training/calibration members.
 pub fn generated_corpus() -> Vec<CorpusCase> {
@@ -404,6 +404,30 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
             Solve,
             1,
             "saxpy_s16",
+            Train,
+        ),
+        // The wide compose consumers are taught on their own shapes, not on the
+        // distant shape that is held out. `vec9` teaches sum9 on a 9-lane fan;
+        // `vec16` teaches sum16 on a 16-lane fan. The audit-only cases
+        // (`matmul3`, `matmul4`, `select16`) are a different shape each.
+        make(
+            "gen-vec9-sum-train",
+            "vec9",
+            "vec9_sum",
+            "elementwise",
+            Solve,
+            1,
+            "vec9_sum",
+            Train,
+        ),
+        make(
+            "gen-vec16-sum-train",
+            "vec16",
+            "vec16_sum",
+            "elementwise",
+            Solve,
+            1,
+            "vec16_sum",
             Train,
         ),
         make(
@@ -688,6 +712,30 @@ pub fn hard_corpus() -> Vec<CorpusCase> {
             Solve,
             2,
             "matmul3_sum",
+            Hard,
+        ),
+        // Second distant shape and consumer: 32 inputs, 16 outputs. The sum16
+        // consumer is taught on `gen-vec16-sum-train`, never on this shape.
+        make(
+            "hard-matmul4-sum",
+            "matmul4",
+            "matmul4_sum",
+            "matrix",
+            Solve,
+            2,
+            "matmul4_sum",
+            Hard,
+        ),
+        // A different mechanism at the same width: 32 inputs, 16 outputs, and
+        // an elementwise select rather than a matrix product.
+        make(
+            "hard-select16-sum",
+            "select16",
+            "select16_sum",
+            "select",
+            Solve,
+            2,
+            "select16_sum",
             Hard,
         ),
         make(

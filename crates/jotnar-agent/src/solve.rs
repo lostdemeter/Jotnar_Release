@@ -344,6 +344,7 @@ fn candidate_steps(
             "add2" => n_out == 1,
             "sum4" => n_out == 4,
             "sum9" => n_out == 9,
+            "sum16" => n_out == 16,
             _ => false,
         };
         if applies {
