@@ -204,6 +204,14 @@ fn build_registry() -> Registry {
     );
     add("F2I", 1, 1, sig(&["F:*"], &["I:*"]), Some(op_f2i));
     add("I2F", 1, 1, sig(&["I:*"], &["F:*"]), Some(op_i2f));
+    add("T2I", 1, 1, sig(&["$A"], &["I:*"]), Some(op_t2i));
+    add(
+        "IGET",
+        2,
+        1,
+        sig(&["I:*", "F:SCALAR"], &["I:*"]),
+        Some(op_iget),
+    );
 
     // --- triples arithmetic / transformer ---
     add("MATMUL", 2, 1, sig(&["*", "*"], &["*"]), Some(op_matmul));

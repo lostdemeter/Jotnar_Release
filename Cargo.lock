@@ -186,6 +186,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jotnar-agent"
+version = "0.1.0"
+dependencies = [
+ "jotnar",
+ "jotnar-lab",
+ "ndarray",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jotnar-lab"
 version = "0.1.0"
 dependencies = [

@@ -55,6 +55,8 @@ const INTEGER_MN: &[&str] = &[
     "IVARINT",
     "F2I",
     "I2F",
+    "T2I",
+    "IGET",
     "MUL",
     "ADD",
     "SUB",
@@ -88,6 +90,7 @@ const FX_MN: &[&str] = &[
     "ARGMAX",
     "SILU",
     "GT",
+    "T2I",
 ];
 
 const SM_MN: &[&str] = &["TSHIFT", "SOFTMAX_WIDE", "SOFTMAX"];
@@ -437,6 +440,29 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Opt
     if mn == "F2I" || mn == "I2F" {
         return Some(ieee_pattern(mn, outs, args, ctx));
     }
+    if mn == "IGET" {
+        let x = args[0].as_str();
+        let o = outs[0].as_str();
+        let idx: i64 = match args[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                return Some(Err(Error::asm(
+                    "IGET idx must be an integer literal",
+                )))
+            }
+        };
+        return Some(Ok((
+            fill(
+                "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",
+                &[
+                    ("o", o.into()),
+                    ("x", x.into()),
+                    ("idx", idx.to_string()),
+                ],
+            ),
+            None,
+        )));
+    }
     // No float streams on this target.
     for a in args {
         if let Some(s) = ctx.streams.get(a) {
@@ -713,6 +739,23 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i) {
                         ("az", tplane(ctx, a, "z", "f_i")),
                         ("co", co.to_string()),
                     ],
+                ),
+                None,
+            ))
+        }
+        "T2I" => {
+            let x = args[0].as_str();
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = T2I({x}) phi-ladder -> int64, round to nearest */
+for (int64_t t_i = 0; t_i < {co}; ++t_i) {
+  int64_t _q = nf_to_fixed({x}_s[t_i], {x}_e[t_i], {x}_z[t_i], NF_M);
+  int64_t _v = (_q >= 0) ? ((_q + (NF_BASE / 2)) / NF_BASE)
+                        : -((-_q + (NF_BASE / 2)) / NF_BASE);
+  {o}[t_i] = _v;
+}"#,
+                    &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
                 ),
                 None,
             ))

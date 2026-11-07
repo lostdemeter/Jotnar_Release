@@ -381,6 +381,20 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, StreamInfo::f(x.shape.clone()));
             }
+            "T2I" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::T {
+                    return Err(Error::asm(format!("{where_}: T2I needs T input")));
+                }
+                streams.insert(o, StreamInfo::i(x.shape.clone()));
+            }
+            "IGET" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::I {
+                    return Err(Error::asm(format!("{where_}: IGET needs I input")));
+                }
+                streams.insert(o, StreamInfo::i(Vec::new()));
+            }
             "ARGMAX" => {
                 let x = get(&streams, a(0))?;
                 let axis = if ins.args.len() > 1 && !streams.contains_key(a(1)) {

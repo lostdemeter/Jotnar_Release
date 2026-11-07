@@ -1,0 +1,21 @@
+[package]
+name = "jotnar-agent"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Autonomous listing-level circuit: exact gates, bounded steps, and a Harness²-style experience loop"
+
+[lib]
+name = "jotnar_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jotnar-agent"
+path = "src/bin/jotnar-agent.rs"
+
+[dependencies]
+jotnar = { path = "../.." }
+jotnar-lab = { path = "../jotnar-lab" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ndarray = "0.16"

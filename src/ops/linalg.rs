@@ -148,6 +148,14 @@ fn matmul_int(a: &Triple, b: &Triple, m_acc: i64) -> Result<Triple> {
     Triple::from_vecs(&osh, out_s, out_e, out_z)
 }
 
+/// Decode a triple stream back to integer counts. This is the bridge from the
+/// triple transformer path to the integer harness/agent path.
+pub fn op_t2i(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let t = arg_triple(args, 0, "T2I")?;
+    let f = lattice::decode_triple(t);
+    Ok(vec![Value::I64(f.mapv(|v| v.round() as i64))])
+}
+
 pub fn op_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     let a = arg_triple(args, 0, "MATMUL")?;
     let b = arg_triple(args, 1, "MATMUL")?;

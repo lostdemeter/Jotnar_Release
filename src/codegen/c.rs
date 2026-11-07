@@ -748,6 +748,39 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
                 None,
             ))
         }
+        "T2I" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = T2I({x}) phi-ladder -> int64 */
+for (int64_t t_i = 0; t_i < {co}; ++t_i) {
+  double _v = 0.0;
+  if (!{x}_z[t_i])
+    _v = ({x}_s[t_i] < 0 ? -1.0 : 1.0)
+       * pow(1.618033988749895, ((double){x}_e[t_i] - 32768.0) / 512.0);
+  {o}[t_i] = (int64_t)(_v >= 0.0 ? _v + 0.5 : _v - 0.5);
+}"#,
+                    &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
+                ),
+                None,
+            ))
+        }
+        "IGET" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let idx = int_lit(&args[1], "IGET idx")?;
+            Ok((
+                fill(
+                    "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("idx", idx.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "F2I" | "I2F" => {
             let (x, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;

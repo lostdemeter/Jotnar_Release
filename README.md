@@ -171,6 +171,7 @@ The front door is deliberately short. The actual parts are here:
 - RV32IM and DOOM: [`src/rv32.rs`](src/rv32.rs)
 - in-process node protocol: [`src/protocol.rs`](src/protocol.rs)
 - certificates and verification: [`crates/jotnar-lab`](crates/jotnar-lab)
+- autonomous listing circuit and experience loop: [`crates/jotnar-agent`](crates/jotnar-agent)
 - language reference and field notes: [`manual/`](manual/)
 
 ## Receipts, not promises

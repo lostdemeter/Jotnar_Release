@@ -51,6 +51,23 @@ fn wrap(v: i128) -> i64 {
     v as i64
 }
 
+/// Extract one element of an integer stream as a scalar.
+pub fn op_iget(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = int_stream(args, 0, "IGET", "X")?;
+    let idx = arg_i64(args, 1, "IGET", "idx")?;
+    if idx < 0 || idx as usize >= x.len() {
+        return Err(Error::runtime(format!(
+            "IGET: index {idx} out of range {}",
+            x.len()
+        )));
+    }
+    let v = *x.iter().nth(idx as usize).unwrap_or(&0);
+    Ok(vec![Value::I64(ArrayD::from_elem(
+        ndarray::IxDyn(&[]),
+        v,
+    ))])
+}
+
 pub fn op_iadd(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let a = int_stream(args, 0, "IADD", "a")?;
     let b = int_operand(args, 1, "IADD", "b", a.shape())?;

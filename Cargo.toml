@@ -10,7 +10,7 @@ name = "jotnar"
 path = "src/bin/jotnar.rs"
 
 [workspace]
-members = ["crates/phi-core", "crates/jotnar-lab"]
+members = ["crates/phi-core", "crates/jotnar-lab", "crates/jotnar-agent"]
 exclude = ["manual/press"]
 
 [dependencies]
