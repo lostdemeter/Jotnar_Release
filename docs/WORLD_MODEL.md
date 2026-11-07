@@ -220,8 +220,9 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-archive \
 cargo run -q -p jotnar-agent -- archive --file runs/archive.json
 ```
 
-The first archive run kept 16 entries: the 15/15 + 6/6 triple, the 14/15 pair
-attractors (each missing a different capability), and the novel near-misses.
+The first archive run kept 16 entries: the 15/15 + 6/6 four-capability
+harness, the 14/15 pair attractors (each missing a different capability), and
+the novel near-misses.
 That is the point: `sum4 + refinements` and `sum4 + select_min` are different
 basins, even when both are one case short. The archive is analysis/proposal
 state; adoption still requires the gate, retention, and held-out
