@@ -131,6 +131,16 @@ That is the point: the generated stream is training data, not another
 hand-tuned acceptance corpus. The exact gate labels every case; the trace
 file records what the model got wrong.
 
+### The hard audit split
+
+`hard_corpus()` is a separate `Hard` split that is never used for fitting,
+selection, or adoption. It has four novel three-action compositions
+(`*_dup -> *_s16`), three high-distance reduction/matrix retention cases, and
+one refusal control. `feature-audit` prints the min L1 feature distance from
+each held-out/hard case to the training task vectors; `run --hard` evaluates
+the adopted harness on the hard set and writes `hard.json`. Both are audits:
+they measure generalization, they do not tune against it.
+
 ## Teacher distillation
 
 A teacher row is task vector in, latent out:

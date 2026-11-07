@@ -2,8 +2,8 @@ use std::fs;
 
 use jotnar::asm::{self, AsmOptions};
 use jotnar_agent::{
-    apply_action, evaluate, generated_corpus, generated_split_cases, run_round_with, state_effects,
-    BeamProposer, Harness, Split, StateEffectModel, ACTIONS, STATE_FEATURE_NAMES,
+    apply_action, evaluate, generated_corpus, generated_split_cases, hard_cases, run_round_with,
+    state_effects, BeamProposer, Harness, Split, StateEffectModel, ACTIONS, STATE_FEATURE_NAMES,
     STATE_MODEL_INPUTS, TASK_FEATURE_NAMES,
 };
 
@@ -113,6 +113,38 @@ fn state_model_closes_the_generated_heldout() {
         heldout.len()
     );
     assert_eq!(held.wrong(), 0);
+}
+
+#[test]
+fn beam_coverage_generalizes_to_hard_compositions() {
+    let base = Harness::default();
+    let train = generated_train();
+    let heldout = generated_split_cases(Split::Heldout);
+    let hard = hard_cases();
+    let rows = state_effects(&train, &base, 2);
+    let mut model = StateEffectModel::prior();
+    model.fit(&rows, 10, 1);
+
+    let proposer = BeamProposer::new(model, 4, 3);
+    let report = run_round_with(&base, &train, &temp_dir("hard-coverage"), &proposer);
+    assert!(report.adopted_flag);
+    assert_eq!(report.adopted.correct(), train.len());
+    assert_eq!(report.adopted.wrong(), 0);
+
+    let held = evaluate(&report.adopted_harness, &heldout, false);
+    assert_eq!(held.correct(), heldout.len());
+
+    // The hard set is audit-only; it is never used for selection. The coverage
+    // candidate happens to cover the three-action composition it needs.
+    let hard_report = evaluate(&report.adopted_harness, &hard, false);
+    assert_eq!(
+        hard_report.correct(),
+        hard.len(),
+        "hard audit {}/{} (wrong {})",
+        hard_report.correct(),
+        hard.len(),
+        hard_report.wrong()
+    );
 }
 
 #[test]

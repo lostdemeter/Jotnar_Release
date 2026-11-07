@@ -9,7 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::harness::Harness;
+use crate::driver::{EvalReport, Experience, Proposer};
+use crate::harness::{Harness, Mutation};
+use crate::view::CaseView;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchiveEntry {
@@ -145,6 +147,77 @@ fn distance(a: &[i64], b: &[i64]) -> usize {
         .zip(b)
         .map(|(x, y)| (*x - *y).unsigned_abs() as usize)
         .sum()
+}
+
+/// Basin hopping from archived attractors.
+///
+/// The proposer seeds the loop with the best archive entries and then proposes
+/// their bounded mutations (including the neutral-drift toggles). The driver
+/// still evaluates every candidate with the exact gate; an archived harness is
+/// adopted only if it beats the incumbent under the normal retention and
+/// held-out checks.
+#[derive(Clone, Debug)]
+pub struct ArchiveProposer {
+    pub archive: Archive,
+    pub max_seeds: usize,
+}
+
+impl ArchiveProposer {
+    pub fn new(archive: Archive, max_seeds: usize) -> Self {
+        Self {
+            archive,
+            max_seeds: max_seeds.max(1),
+        }
+    }
+}
+
+impl Proposer for ArchiveProposer {
+    fn propose(
+        &self,
+        base: &Harness,
+        _train: &EvalReport,
+        _experience: &[Experience],
+    ) -> Vec<Mutation> {
+        base.mutations()
+    }
+
+    fn propose_cases(
+        &self,
+        _views: &[CaseView],
+        base: &Harness,
+        _experience: &[Experience],
+    ) -> Option<Vec<Mutation>> {
+        let mut out: Vec<Mutation> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut push = |mutation: Mutation, out: &mut Vec<Mutation>| {
+            let key = mutation.harness.fingerprint();
+            if mutation.harness != *base && seen.insert(key) {
+                out.push(mutation);
+            }
+        };
+        for entry in self.archive.entries.iter().take(self.max_seeds) {
+            push(
+                Mutation {
+                    label: format!("qd-seed: {}", entry.label),
+                    harness: entry.harness.clone(),
+                },
+                &mut out,
+            );
+            for mutation in entry.harness.mutations() {
+                push(
+                    Mutation {
+                        label: format!("qd-hop[{}]: {}", entry.label, mutation.label),
+                        harness: mutation.harness,
+                    },
+                    &mut out,
+                );
+            }
+        }
+        if out.is_empty() {
+            return Some(base.mutations());
+        }
+        Some(out)
+    }
 }
 
 #[cfg(test)]

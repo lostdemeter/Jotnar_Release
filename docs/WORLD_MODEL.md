@@ -124,9 +124,14 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```text
 selection: 11/15 correct, 4 wrong -> 15/15 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-union: add compose[sum4] + refinements + 1 + add family select_min
+selected:  beam-coverage: add compose[sum4] + depth + 1 + refinements + 1 + add family select_min
 adopted:   true
 ```
+
+The coverage candidate keeps the second capability alive: the top union is
+`sum4 + refinements + select_min`, but the deep case also supports `depth + 1`,
+and the coverage union adds it. The exact gate accepts the four-capability
+harness at the same 15/15 and 19 steps.
 
 Depth-3 training (`--depth 3`, 130 states, 1755 transitions) and `--depth 3`
 beam expansion produce the explicit triple
@@ -137,7 +142,7 @@ The 24-case corpus:
 ```text
 selection: 14/18 correct, 4 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
-selected:  beam-union: add compose[sum4] + refinements + 1
+selected:  beam-coverage: add compose[sum4] + depth + 1 + refinements + 1
 adopted:   true
 ```
 
@@ -222,6 +227,127 @@ basins, even when both are one case short. The archive is analysis/proposal
 state; adoption still requires the gate, retention, and held-out
 non-regression.
 
+## The generalization audit
+
+The first held-out split was a **sibling** split, not a feature-held-out split.
+`feature-audit` makes that measurable:
+
+```sh
+cargo run -q -p jotnar-agent -- feature-audit --generated
+```
+
+Min L1 distance from each held-out case to the training task vectors:
+
+```text
+gen-matmul-sum-holdout          0
+gen-select-min-holdout          0
+gen-elem-affine-s16-holdout     2
+gen-refine-affine-oct-holdout   2
+gen-refuse-saxpy-select-holdout 3
+gen-reduce-16-32-holdout       82
+```
+
+Four of six held-out cases are within three feature units of training, and two
+are exact duplicates. The held-out split is still useful for example-level
+retention, but it is not evidence of feature generalization.
+
+The audit adds a separate **hard** set, `hard_corpus()`, with a `Hard` split
+that is never used for fitting, selection, or adoption:
+
+- four novel compositions (`saxpy_dup -> saxpy_s16`, `affine_dup ->
+  affine_s16`, and two cross-start variants). Their minimum solver is a
+  three-action set, `sum4 + depth + refinements`, which no training case
+  requires;
+- three high-distance retention cases (`reduce128 -> reduce8` distance 493,
+  `reduce32 -> reduce64` 210, `matmul2_sum -> matmul2_colsum` 15);
+- one high-distance refusal control (`reduce128 -> matmul2`, distance 493).
+
+```sh
+cargo run -q -p jotnar-agent -- run --out runs/hard \
+  --proposer beam --generated \
+  --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
+  --hard
+```
+
+`--hard` only audits the final adopted harness:
+
+```text
+hard audit: 8/8 correct, 0 wrong (never used for selection or adoption)
+```
+
+Before the coverage candidate, the same run was **4/8**: it solved the
+retention/control cases but failed all four novel compositions. The gap was
+real and measurable, not hidden by the sibling held-out.
+
+## Capability coverage / neutral drift
+
+The top union is `sum4 + refinements + select_min`; it is 15/15 on the selection
+stream, but it does not carry `depth + 1`. The deep case supports both
+`refinements` and `depth`, so the proposer adds a **coverage union**: the top
+action from each capability group (compose, depth, refinements, select) whose
+predicted score is positive. The driver's selection then uses capability
+coverage as a **tie-break after correctness and step count**:
+
+```text
+(correct, wrong, steps, capability_coverage, candidate index)
+```
+
+The four-capability harness has the same 15/15 and 19 steps as the three-action
+one, so the tie-break selects it. That is neutral drift: the gate cannot tell
+the two apart on the selection stream, so the loop keeps the harness that
+preserves the second capability. It closes the hard audit to 8/8 without
+training on the hard set.
+
+## Cost-aware planning
+
+`CostModel` is a Jotnar-native cost head over the same `(task, state)`
+features. It predicts bounded steps, is fitted by ridge regression on the
+**correct** transition rows, and lowers to a listing with `IDIV` by
+`COST_SCALE`:
+
+```sh
+cargo run -q -p jotnar-agent -- fit-cost-model \
+  --out runs/cost-model --generated --depth 2 --lambda 1
+
+cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
+  --proposer beam --generated \
+  --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
+  --cost-weights runs/cost-model/cost-model.weights.json --cost-weight 4
+```
+
+```text
+cost model: 15 cases, 615 transitions, depth=2, lambda=1, mae=0.254
+```
+
+The beam score is `effect - cost_weight * predicted_steps`. The exact gate and
+the driver's actual-step tie-break still decide; the cost head only shapes
+which candidates the beam proposes. On this small stream the gate already finds
+the cheapest correct harness, so the cost head's value is in larger search
+spaces, not in changing the current winner.
+
+## Basin hopping from the archive
+
+`ArchiveProposer` seeds the loop with the best archive entries and proposes
+their bounded mutations (including the neutral-drift toggles):
+
+```sh
+cargo run -q -p jotnar-agent -- run --out runs/qd \
+  --proposer qd --generated --archive runs/archive.json --qd-seeds 4 --hard
+```
+
+The first run started from the 16-entry archive and selected a hop from the
+`beam-union` seed adding `depth + 1`:
+
+```text
+selected:  qd-hop[beam-union: ...]: depth + 1
+adopted:   true
+hard audit: 8/8 correct, 0 wrong
+```
+
+That is the archive doing real work: the loop improves by starting from a
+previously found basin and adding the missing capability, not by collapsing
+back to the incumbent.
+
 ## Why it works
 
 - The transition table gives **state-dependent causal labels**, not action
@@ -244,5 +370,15 @@ non-regression.
 - The Qwen backbone is an exact zero-init/pass-through block on the current
   slice; the joint model's latent channel is the named latent, not a
   backprop-trained attention representation.
-- The archive records gate-correct/near-correct candidates; it is not yet a
-  basin-hopping proposer.
+- The archive records gate-correct/near-correct candidates and now seeds basin
+  hopping, but it is not yet a full quality-diversity search with continuous
+  descriptors.
+- The hard set is eight audit cases, not a benchmark. Its four compositions
+  share one mechanism (`*_dup -> *_s16`) and their feature distance is only
+  3–7; the genuinely distant cases are retention, not planning.
+- The coverage tie-break is a heuristic. It is safe because it runs after exact
+  correctness and actual steps, and the held-out check still gates adoption,
+  but it can keep a capability that is irrelevant to the current stream.
+- The cost head is soft. On this tiny stream the exact gate's step tie-break
+  already selects the cheapest correct harness; the cost head matters when the
+  search space is larger.

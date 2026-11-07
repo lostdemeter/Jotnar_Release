@@ -89,7 +89,7 @@ fn default_out_scale() -> i64 {
     1
 }
 
-fn solve_linear(mut a: Vec<Vec<f64>>, mut b: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
+pub(crate) fn solve_linear(mut a: Vec<Vec<f64>>, mut b: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     let n = a.len();
     let d = b.first().map(|row| row.len()).unwrap_or(0);
     for i in 0..n {

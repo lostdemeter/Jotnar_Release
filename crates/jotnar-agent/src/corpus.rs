@@ -15,6 +15,10 @@ pub enum Split {
     Train,
     Calibration,
     Heldout,
+    /// Audit-only cases. They are never used for fitting, selection, or
+    /// adoption; they measure whether the planner generalizes to a different
+    /// composition.
+    Hard,
 }
 
 impl Split {
@@ -23,6 +27,7 @@ impl Split {
             Split::Train => "train",
             Split::Calibration => "calibration",
             Split::Heldout => "heldout",
+            Split::Hard => "hard",
         }
     }
 }
@@ -587,6 +592,107 @@ pub fn generated_corpus() -> Vec<CorpusCase> {
             Heldout,
         ),
     ]
+}
+
+/// Audit-only cases for generalization. These are intentionally **not** part
+/// of any training or adoption split.
+///
+/// The first four are novel compositions: a duplicate-line start (`*_dup`)
+/// and a deep `s16` target need a three-action solver
+/// (`sum4 + depth + refinements`) that no training case requires. The next
+/// three are high-feature-distance retention cases (large reduction resizes
+/// and a matrix transpose) that the base already solves. The last is a
+/// high-distance control that must stay refused.
+pub fn hard_corpus() -> Vec<CorpusCase> {
+    use CaseExpect::{Refuse, Solve};
+    use Split::Hard;
+
+    vec![
+        make(
+            "hard-refine-s16-saxpy",
+            "saxpy_dup",
+            "saxpy_s16",
+            "elementwise",
+            Solve,
+            2,
+            "saxpy_s16",
+            Hard,
+        ),
+        make(
+            "hard-refine-s16-affine",
+            "affine_dup",
+            "affine_s16",
+            "elementwise",
+            Solve,
+            2,
+            "affine_s16",
+            Hard,
+        ),
+        make(
+            "hard-cross-saxpy-affine-s16",
+            "saxpy_dup",
+            "affine_s16",
+            "elementwise",
+            Solve,
+            2,
+            "affine_s16",
+            Hard,
+        ),
+        make(
+            "hard-cross-affine-saxpy-s16",
+            "affine_dup",
+            "saxpy_s16",
+            "elementwise",
+            Solve,
+            2,
+            "saxpy_s16",
+            Hard,
+        ),
+        make(
+            "hard-reduce-128-8",
+            "reduce128",
+            "reduce8",
+            "reduction",
+            Solve,
+            2,
+            "reduce8",
+            Hard,
+        ),
+        make(
+            "hard-reduce-32-64",
+            "reduce32",
+            "reduce64",
+            "reduction",
+            Solve,
+            2,
+            "reduce64",
+            Hard,
+        ),
+        make(
+            "hard-matmul-sum-colsum",
+            "matmul2_sum",
+            "matmul2_colsum",
+            "matrix",
+            Solve,
+            2,
+            "matmul2_colsum",
+            Hard,
+        ),
+        make(
+            "hard-refuse-reduce-matmul",
+            "reduce128",
+            "matmul2",
+            "control",
+            Refuse,
+            2,
+            "matmul2",
+            Hard,
+        ),
+    ]
+}
+
+pub fn hard_cases() -> Vec<Case> {
+    hard_corpus().into_iter().map(|c| c.case).collect()
 }
 
 pub fn generated_split_cases(split: Split) -> Vec<Case> {

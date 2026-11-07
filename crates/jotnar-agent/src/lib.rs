@@ -22,6 +22,7 @@ pub mod backbone;
 pub mod budget_predictor;
 pub mod certificate;
 pub mod corpus;
+pub mod cost_model;
 pub mod driver;
 pub mod effect_model;
 pub mod effects;
@@ -43,20 +44,23 @@ pub mod teacher;
 pub mod trace;
 pub mod view;
 
-pub use archive::{Archive, ArchiveEntry, Insert};
+pub use archive::{Archive, ArchiveEntry, ArchiveProposer, Insert};
 pub use backbone::{Backbone, BackboneKind};
 pub use budget_predictor::{BudgetPredictor, BudgetWeights};
 pub use certificate::{build_refused, build_solved};
 pub use corpus::{
-    all_cases, corpus, generated_corpus, generated_split_cases, split_cases, task_specs,
-    CorpusCase, Split, TaskSpec,
+    all_cases, corpus, generated_corpus, generated_split_cases, hard_cases, hard_corpus,
+    split_cases, task_specs, CorpusCase, Split, TaskSpec,
 };
+pub use cost_model::CostModel;
 pub use driver::{
     evaluate, load_experience, run_round, run_round_with, run_round_with_memory, CaseOutcome,
     DeterministicProposer, EvalReport, Experience, OutcomeKind, Proposer, RoundReport,
 };
 pub use effect_model::{EffectModel, WorldModelProposer};
-pub use effects::{action_effects, state_effects, ActionEffect, CaseEffects, StateEffectRow};
+pub use effects::{
+    action_effects, reachable_states, state_effects, ActionEffect, CaseEffects, StateEffectRow,
+};
 pub use family::{families, family, Family};
 pub use gate::{bit_exact, structural, Example, GateReport, TestVec};
 pub use harness::{Harness, Mutation, STATE_FEATURE_NAMES};
@@ -66,7 +70,8 @@ pub use library::{calibration_cases, cases, deep_calibration_cases, example_set,
 pub use looped::{LoopWeights, LoopedProposer};
 pub use looped_encoder::{LoopEncoderWeights, LoopedTaskEncoder};
 pub use proposer::{
-    apply_action, corpus_prior_weights, JotnarProposer, ProposerWeights, ACTIONS, FEATURE_NAMES,
+    apply_action, apply_action_set, corpus_prior_weights, JotnarProposer, ProposerWeights, ACTIONS,
+    FEATURE_NAMES,
 };
 pub use solve::{solve, SolveError, SolveResult};
 pub use state::{State, StateKind};

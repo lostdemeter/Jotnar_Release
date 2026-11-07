@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cost_model::CostModel;
 use crate::driver::{EvalReport, Experience, OutcomeKind, Proposer};
 use crate::effect_model::EffectModel;
 use crate::effects::StateEffectRow;
@@ -310,6 +311,19 @@ where
     visited
 }
 
+/// Coarse capability group for the coverage proposal. Among gate-equivalent
+/// harnesses, covering a new group is the neutral-drift move that preserves
+/// generalization potential without changing exact correctness.
+fn capability_group(action: usize) -> usize {
+    match action {
+        0 => 0,     // compose consumer
+        1 => 1,     // depth
+        2 | 3 => 2, // refine/tags policy
+        5 => 3,     // refinements
+        _ => 4,     // family adds
+    }
+}
+
 /// Shared beam-search proposal path for the state model and the joint model.
 ///
 /// `score(task, state)` returns one predicted correctness score per action.
@@ -338,8 +352,13 @@ where
     };
 
     // The model's top action from the *base* state for each wrong case. Their
-    // union is the first candidate, so it wins exact ties.
+    // union is the first candidate, so it wins exact ties. The coverage union
+    // adds the best positive action from each capability group; it is the
+    // neutral-drift candidate that keeps a second capability alive even when
+    // the selection stream does not require it.
     let mut union: BTreeSet<usize> = BTreeSet::new();
+    let mut coverage_union: BTreeSet<usize> = BTreeSet::new();
+    let mut best_group: BTreeMap<usize, (i64, usize)> = BTreeMap::new();
     let mut per_case: Vec<(String, Vec<BeamNode>)> = Vec::new();
     for view in views {
         if view.outcome != OutcomeKind::WrongRefusal {
@@ -350,16 +369,45 @@ where
         let scores = score(&task, &state);
         let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
         order.sort_by_key(|action| std::cmp::Reverse(scores[*action]));
-        if let Some(top) = order
+        let applicable: Vec<usize> = order
             .into_iter()
-            .find(|action| apply_action(base, *action).is_some())
-        {
+            .filter(|action| apply_action(base, *action).is_some())
+            .collect();
+        if let Some(&top) = applicable.first() {
             union.insert(top);
+        }
+        for action in applicable {
+            let group = capability_group(action);
+            // Policy disables (`refine off`, `tags off`) are not capabilities.
+            if group == 2 {
+                continue;
+            }
+            let entry = best_group.entry(group).or_insert((i64::MIN, action));
+            if scores[action] > entry.0 {
+                *entry = (scores[action], action);
+            }
+        }
+        // Structural deep prior: a one-output target with more ops than the
+        // start may need the depth capability even when the learned model has
+        // down-weighted it in favour of refinements. The exact gate still
+        // decides whether the coverage candidate is safe.
+        if view.start_outputs == 1 && view.target_ops > view.start_ops {
+            if let Some(action) = (0..ACTIONS.len())
+                .find(|a| capability_group(*a) == 1 && apply_action(base, *a).is_some())
+            {
+                coverage_union.insert(action);
+            }
         }
         per_case.push((
             view.case_id.clone(),
             search_case(&task, base, beam, max_depth, &score),
         ));
+    }
+    coverage_union.extend(union.iter().copied());
+    for (score, action) in best_group.values() {
+        if *score > 0 {
+            coverage_union.insert(*action);
+        }
     }
     if !union.is_empty() {
         let names = union
@@ -371,6 +419,21 @@ where
             Mutation {
                 label: format!("{prefix}-union: {names}"),
                 harness: apply_action_set(base, &union),
+            },
+            &mut out,
+            &mut seen,
+        );
+    }
+    if coverage_union != union && !coverage_union.is_empty() {
+        let names = coverage_union
+            .iter()
+            .map(|action| ACTIONS[*action])
+            .collect::<Vec<_>>()
+            .join(" + ");
+        push(
+            Mutation {
+                label: format!("{prefix}-coverage: {names}"),
+                harness: apply_action_set(base, &coverage_union),
             },
             &mut out,
             &mut seen,
@@ -455,6 +518,10 @@ pub struct BeamProposer {
     pub max_depth: usize,
     /// Include the exhaustive pair set as a gate safety net.
     pub include_pairs: bool,
+    /// Optional learned cost head. The beam score becomes
+    /// `effect - cost_weight * predicted_steps`.
+    pub cost: Option<CostModel>,
+    pub cost_weight: i64,
 }
 
 impl BeamProposer {
@@ -464,7 +531,15 @@ impl BeamProposer {
             beam: beam.max(1),
             max_depth: max_depth.max(1),
             include_pairs: true,
+            cost: None,
+            cost_weight: 0,
         }
+    }
+
+    pub fn with_cost(mut self, cost: CostModel, weight: i64) -> Self {
+        self.cost = Some(cost);
+        self.cost_weight = weight.max(0);
+        self
     }
 }
 
@@ -491,7 +566,16 @@ impl Proposer for BeamProposer {
             self.max_depth,
             self.include_pairs,
             "beam",
-            |task, state| self.model.scores(task, state),
+            |task, state| {
+                let mut scores = self.model.scores(task, state);
+                if let Some(cost) = &self.cost {
+                    let predicted = cost.scores(task, state);
+                    for (score, cost) in scores.iter_mut().zip(predicted) {
+                        *score -= self.cost_weight * cost;
+                    }
+                }
+                scores
+            },
         ))
     }
 }

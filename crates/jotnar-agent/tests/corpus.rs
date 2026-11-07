@@ -1,7 +1,8 @@
 use std::fs;
 
 use jotnar_agent::{
-    all_cases, corpus, run_round, run_round_with, split_cases, Harness, JotnarProposer,
+    all_cases, case_views, corpus, evaluate, generated_corpus, generated_split_cases, hard_cases,
+    run_round, run_round_with, split_cases, task_encoder::task_vector, Harness, JotnarProposer,
     LoopedProposer, Proposer, Split,
 };
 
@@ -31,6 +32,99 @@ fn generated_corpus_has_a_deep_training_failure_and_frozen_heldout() {
     assert!(all.iter().any(|c| {
         c.split == Split::Heldout && c.case.intent.id == "gen-elem-affine-s16-holdout"
     }));
+}
+
+#[test]
+fn hard_cases_are_audit_only_and_require_composition() {
+    let hard = hard_cases();
+    assert_eq!(hard.len(), 8);
+    let base = Harness::default();
+    let report = evaluate(&base, &hard, false);
+    assert_eq!(report.wrong_refusal, 4, "four novel compositions");
+    assert_eq!(report.solved, 3, "three high-distance retention cases");
+    assert_eq!(report.refused, 1, "one high-distance refusal control");
+
+    let known: std::collections::BTreeSet<String> = generated_corpus()
+        .into_iter()
+        .map(|c| c.case.intent.id)
+        .chain(corpus().into_iter().map(|c| c.case.intent.id))
+        .collect();
+    for case in &hard {
+        assert!(
+            !known.contains(&case.intent.id),
+            "{} must not appear in a training/acceptance split",
+            case.intent.id
+        );
+    }
+
+    // The four compositions need a three-action solver, not a single fix.
+    let states = jotnar_agent::reachable_states(&base, 3);
+    for case in hard
+        .iter()
+        .filter(|c| c.intent.id.starts_with("hard-refine") || c.intent.id.starts_with("hard-cross"))
+    {
+        let min = states
+            .iter()
+            .filter_map(|(_, subset, harness)| {
+                let r = evaluate(harness, std::slice::from_ref(case), false);
+                r.outcomes[0].kind.correct().then_some(subset.len())
+            })
+            .min()
+            .unwrap_or(0);
+        assert_eq!(
+            min, 3,
+            "{} should need a three-action composition",
+            case.intent.id
+        );
+    }
+}
+
+#[test]
+fn feature_distance_audit_exposes_the_sibling_heldout() {
+    let base = Harness::default();
+    let mut train = generated_split_cases(Split::Train);
+    train.extend(generated_split_cases(Split::Calibration));
+    let train_report = evaluate(&base, &train, false);
+    let train_tasks: Vec<Vec<i64>> = case_views(&train, &train_report)
+        .iter()
+        .map(|view| task_vector(view, &base))
+        .collect();
+    let min_dist = |task: &[i64]| {
+        train_tasks
+            .iter()
+            .map(|train_task| {
+                task.iter()
+                    .zip(train_task)
+                    .map(|(x, y)| (*x - *y).unsigned_abs() as usize)
+                    .sum()
+            })
+            .min()
+            .unwrap_or(0)
+    };
+
+    let heldout = generated_split_cases(Split::Heldout);
+    let held_report = evaluate(&base, &heldout, false);
+    let held_views = case_views(&heldout, &held_report);
+    let exact = held_views
+        .iter()
+        .filter(|view| min_dist(&task_vector(view, &base)) == 0)
+        .count();
+    assert!(
+        exact >= 1,
+        "the audit should expose at least one feature-duplicate held-out case"
+    );
+
+    let hard = hard_cases();
+    let hard_report = evaluate(&base, &hard, false);
+    let hard_views = case_views(&hard, &hard_report);
+    let reduce = hard
+        .iter()
+        .position(|case| case.intent.id == "hard-reduce-128-8")
+        .expect("hard reduction case");
+    assert!(
+        min_dist(&task_vector(&hard_views[reduce], &base)) > 100,
+        "the hard reduction case should be feature-distant"
+    );
 }
 
 #[test]

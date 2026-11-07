@@ -378,9 +378,11 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
   --beam 4 --depth 2
 ```
 
-`BeamProposer` unions the predicted best action per wrong case, expands the
+`BeamProposer` unions the predicted best action per wrong case, adds a
+**coverage union** (the best action from each capability group), expands the
 top-`beam` states, keeps the best paths (pairs and triples), and still hands
-every candidate to the exact gate:
+every candidate to the exact gate. The driver prefers the more capable harness
+only after correctness and actual steps tie.
 
 ```
 generated: 15/15 selection, 6/6 held-out, adopted=true
@@ -389,7 +391,51 @@ corpus:    18/18 selection, 6/6 held-out, adopted=true
 
 The generated held-out miss is closed by a deep **training** member
 (`saxpy -> saxpy_s16`), not by moving the frozen held-out case
-(`affine -> affine_s16`). See [`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
+(`affine -> affine_s16`). The coverage union keeps `depth + 1` alive beside
+`refinements + 1`, so the adopted harness is
+`sum4 + depth + refinements + select_min` at the same 15/15 and 19 steps. See
+[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
+
+## The generalization audit
+
+The original held-out split is a **sibling** split: four of six cases are
+within three feature units of a training case, and two are exact duplicates.
+`feature-audit` prints the min L1 distance per case. A separate `Hard` split
+(`hard_corpus()`) is audit-only: it is never used for fitting, selection, or
+adoption.
+
+```sh
+cargo run -q -p jotnar-agent -- feature-audit --generated
+
+cargo run -q -p jotnar-agent -- run --out runs/hard \
+  --proposer beam --generated \
+  --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
+  --hard
+```
+
+The hard set has four novel compositions (`*_dup -> *_s16`, min solver
+`sum4 + depth + refinements`), three high-distance retention cases, and one
+refusal control. The pre-coverage planner was **4/8**; the coverage candidate
+is **8/8**. The hard set measures the gap; it does not tune against it.
+
+## Cost-aware planning
+
+`CostModel` is a Jotnar-native cost head over the same `(task, state)`
+features, fitted by ridge regression on the correct transition rows and lowered
+to a listing with `IDIV`.
+
+```sh
+cargo run -q -p jotnar-agent -- fit-cost-model \
+  --out runs/cost-model --generated --depth 2 --lambda 1
+
+cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
+  --proposer beam --generated \
+  --state-effect-weights runs/state-effect-model/state-effect-model.weights.json \
+  --cost-weights runs/cost-model/cost-model.weights.json --cost-weight 4
+```
+
+The beam score is `effect - cost_weight * predicted_steps`; the exact gate and
+the driver's actual-step tie-break still decide.
 
 ## The joint latent + causal model
 
@@ -422,9 +468,20 @@ corpus:    18/18 selection, 6/6 held-out, adopted=true
 `run --archive FILE` records gate-competitive candidates in a QD archive,
 selected by quality (exact correctness, then held-out) and novelty (L1
 distance in the harness-state descriptor). `archive --file FILE` prints it.
-The archive keeps the `15/15 + 6/6` triple beside the 14/15 pair attractors
-that each miss a different capability; adoption still requires the exact gate,
-retention, and held-out non-regression.
+The archive keeps the `15/15 + 6/6` four-capability harness beside the 14/15
+pair attractors that each miss a different capability; adoption still requires
+the exact gate, retention, and held-out non-regression.
+
+`--proposer qd --archive FILE` seeds a later round with the best archived
+attractors and their bounded mutations (basin hopping + neutral drift):
+
+```sh
+cargo run -q -p jotnar-agent -- run --out runs/qd \
+  --proposer qd --generated --archive runs/archive.json --qd-seeds 4 --hard
+```
+
+The first run selected a hop from the `beam-union` seed adding `depth + 1`,
+then passed the hard audit 8/8.
 
 ## The driver
 
@@ -521,8 +578,20 @@ held-out checks — not a hand-coded feature.
   trained on.
 - A joint latent + effect proposer (Qwen φ-ladder backbone + causal state
   model) reaches the same 15/15 + 6/6 and 18/18 + 6/6.
-- A quality-diversity archive keeps the best triple beside the novel 14/15 pair
-  attractors, so the loop does not collapse to one incumbent.
+- A quality-diversity archive keeps the best four-capability harness beside the
+  novel 14/15 pair attractors, so the loop does not collapse to one incumbent.
+- `feature-audit` shows the original held-out split is a sibling split: two
+  cases are exact feature duplicates and four are within three units of a
+  training task.
+- A separate audit-only hard set (four novel three-action compositions, three
+  high-distance retention cases, one refusal control) measures the real
+  generalization gap: the pre-coverage planner is 4/8, the coverage/neutral-drift
+  candidate is 8/8 without training on the hard set.
+- A Jotnar-native cost head (`(task, state) -> predicted steps`, ridge fit,
+  `IDIV` scale) lets the beam rank by `effect - lambda * cost`.
+- `--proposer qd --archive` performs basin hopping from archived attractors;
+  a hop from the `beam-union` seed adding `depth + 1` reaches the hard audit
+  8/8.
 
 ## What it does not prove
 
@@ -551,8 +620,20 @@ held-out checks — not a hand-coded feature.
   subsets up to `--depth`; repeated `depth + 1` is one action, and depth 4 is
   not yet bounded. The joint latent channel is the named/Qwen pass-through
   latent on this slice, not a backprop-trained attention representation.
-- That the archive is basin hopping. It records and ranks diverse attractors;
-  it does not yet generate new ones from the archive.
+- That the archive is a full quality-diversity search. It seeds basin hopping
+  and ranks by quality + novelty, but its descriptor is the 14-feature harness
+  state, not a continuous behavior space.
+- That the hard set is a benchmark. It is eight audit cases; the four
+  compositions share one mechanism (`*_dup -> *_s16`) and their feature
+  distance is only 3–7. The genuinely distant cases are retention, not
+  planning.
+- That the coverage tie-break is a general policy. It is safe because it runs
+  after exact correctness and actual steps, and the held-out check still gates
+  adoption, but it can keep a capability that is irrelevant to the current
+  stream.
+- That the cost head changes the current winner. On this small stream the
+  exact gate's step tie-break already selects the cheapest correct harness;
+  the cost head matters when the search space is larger.
 
 ## Where the LLM goes
 
@@ -608,6 +689,7 @@ the held-out stream.
 | `src/effects.rs` | per-case action-effect table and state transition table |
 | `src/effect_model.rs` | linear action-effect world model and pair-composition proposer |
 | `src/state_effect_model.rs` | `(task, state, action)` world model and beam/triple proposer |
+| `src/cost_model.rs` | Jotnar-native `(task, state) -> steps` cost head |
 | `src/joint.rs` | Qwen latent + state-effect joint proposer |
-| `src/archive.rs` | quality-diversity archive of gate-correct attractors |
-| `docs/WORLD_MODEL.md` | effect model, state model, beam, joint, archive, results |
+| `src/archive.rs` | quality-diversity archive and basin-hopping proposer |
+| `docs/WORLD_MODEL.md` | effect model, state model, beam, joint, archive, hard audit, results |

@@ -265,6 +265,10 @@ pub fn run_round_with_memory(
     }
 
     // Blind selection: only the metrics are read here, never the labels.
+    // Among candidates the exact gate cannot distinguish (same correctness and
+    // step count), prefer the harness with more capability coverage. That is
+    // neutral drift: it keeps a second capability alive for a different
+    // composition without changing exact correctness on the selection stream.
     let mut ranked: Vec<usize> = (0..candidates.len()).collect();
     ranked.sort_by_key(|i| {
         let c = &candidates[*i];
@@ -272,6 +276,7 @@ pub fn run_round_with_memory(
             usize::MAX - c.train.correct(),
             c.train.wrong(),
             c.train.total_steps,
+            usize::MAX - capability_coverage(&c.harness),
             c.index,
         )
     });
@@ -389,6 +394,28 @@ pub fn run_round_with_memory(
 
 fn adoption_is_clean(base: &EvalReport, adopted: &EvalReport) -> bool {
     adopted.correct() >= base.correct() && adopted.wrong() <= base.wrong()
+}
+
+/// Number of additional capabilities beyond the base harness. Used only as a
+/// tie-break after exact correctness and step count, so it never overrides the
+/// gate.
+fn capability_coverage(h: &Harness) -> usize {
+    let mut count = 0;
+    if h.compose_consumers.iter().any(|c| c == "sum4") {
+        count += 1;
+    }
+    if h.max_depth > 2 {
+        count += 1;
+    }
+    if h.max_refinements > 1 {
+        count += 1;
+    }
+    for family in ["select_min", "select_max"] {
+        if h.families.iter().any(|f| f == family) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Union two edited harnesses against the incumbent. Disables are applied only

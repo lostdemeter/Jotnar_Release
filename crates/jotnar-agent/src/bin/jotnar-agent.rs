@@ -4,18 +4,19 @@ use std::process::ExitCode;
 
 use jotnar_agent::{
     action_effects, cases, evaluate, fit_joint, run_round, run_round_with, run_round_with_memory,
-    split_cases, state_effects, Archive, ArchiveEntry, Backbone, BeamProposer, BudgetPredictor,
-    DeterministicProposer, EffectModel, EvalReport, Harness, JointProposer, JotnarProposer,
-    LoopedProposer, LoopedTaskEncoder, Proposer, RoundReport, Split, StateEffectModel, TaskEncoder,
-    TeacherActionProposer, WorldModelProposer,
+    split_cases, state_effects, Archive, ArchiveEntry, ArchiveProposer, Backbone, BeamProposer,
+    BudgetPredictor, CostModel, DeterministicProposer, EffectModel, EvalReport, Harness,
+    JointProposer, JotnarProposer, LoopedProposer, LoopedTaskEncoder, Proposer, RoundReport, Split,
+    StateEffectModel, TaskEncoder, TeacherActionProposer, WorldModelProposer,
 };
 
 fn usage() -> &'static str {
     "jotnar-agent — listing-level autonomous circuit\n\
      \n\
      usage:\n\
-       jotnar-agent run [--out DIR] [--rounds N] [--proposer jotnar|looped|task|teacher|world|beam|joint|deterministic] [--loops N] [--encoder-loops N] [--fit] [--deep-train] [--weights FILE] [--encoder-weights FILE] [--looped-encoder-weights FILE] [--budget-predictor FILE] [--backbone FILE] [--teacher-actions FILE] [--effect-weights FILE] [--state-effect-weights FILE] [--joint-weights FILE] [--beam N] [--depth N] [--archive FILE] [--archive-novelty N] [--archive-capacity N] [--corpus] [--generated]\n\
+       jotnar-agent run [--out DIR] [--rounds N] [--proposer jotnar|looped|task|teacher|world|beam|joint|qd|deterministic] [--loops N] [--encoder-loops N] [--fit] [--deep-train] [--weights FILE] [--encoder-weights FILE] [--looped-encoder-weights FILE] [--budget-predictor FILE] [--backbone FILE] [--teacher-actions FILE] [--effect-weights FILE] [--state-effect-weights FILE] [--joint-weights FILE] [--cost-weights FILE] [--cost-weight N] [--beam N] [--depth N] [--archive FILE] [--archive-novelty N] [--archive-capacity N] [--qd-seeds N] [--hard] [--corpus] [--generated]\n\
        jotnar-agent archive --file FILE\n\
+       jotnar-agent feature-audit [--corpus] [--generated]\n\
        jotnar-agent fit-recurrent [--out DIR] [--deep-train] [--efficient]\n\
        jotnar-agent fit-encoder [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-looped-encoder [--out DIR] [--corpus] [--generated] [--max-loops N] [--encoder-weights FILE]\n\
@@ -24,6 +25,7 @@ fn usage() -> &'static str {
        jotnar-agent fit-qwen [--out DIR] [--generated] [--masks N] [--mask-rate F] [--ridge F] [--rounds N] [--seed N] [--scale F] [--dim N] [--inter N] [--max-loops N]\n\
        jotnar-agent fit-effect-model [--out DIR] [--corpus] [--generated] [--epochs N] [--lr N]\n\
        jotnar-agent fit-state-effect-model [--out DIR] [--corpus] [--generated] [--depth N] [--epochs N] [--lr N]\n\
+       jotnar-agent fit-cost-model [--out DIR] [--corpus] [--generated] [--depth N] [--lambda F]\n\
        jotnar-agent fit-joint-model --out DIR --state-effect-weights FILE --backbone FILE [--corpus] [--generated] [--depth N] [--beam N]\n\
        jotnar-agent gen-tasks [--out FILE]\n\
        jotnar-agent gen-effects [--out FILE] [--corpus]\n\
@@ -629,6 +631,44 @@ fn run() -> Result<ExitCode, String> {
             }
             fit_state_effect_model(&out, corpus_mode, generated, depth, epochs, lr)
         }
+        "fit-cost-model" => {
+            let mut out = PathBuf::from("runs/cost-model");
+            let mut corpus_mode = false;
+            let mut generated = true;
+            let mut depth = 2usize;
+            let mut lambda = 1.0f64;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--out" => {
+                        out = PathBuf::from(args.next().ok_or("--out needs a path")?);
+                    }
+                    "--corpus" => {
+                        corpus_mode = true;
+                        generated = false;
+                    }
+                    "--generated" => {
+                        generated = true;
+                        corpus_mode = false;
+                    }
+                    "--depth" => {
+                        depth = args
+                            .next()
+                            .ok_or("--depth needs a number")?
+                            .parse()
+                            .map_err(|_| "--depth needs a number".to_string())?;
+                    }
+                    "--lambda" => {
+                        lambda = args
+                            .next()
+                            .ok_or("--lambda needs a number")?
+                            .parse()
+                            .map_err(|_| "--lambda needs a number".to_string())?;
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            fit_cost_model(&out, corpus_mode, generated, depth, lambda)
+        }
         "fit-joint-model" => {
             let mut out = PathBuf::from("runs/joint-model");
             let mut state_effect_weights: Option<PathBuf> = None;
@@ -801,6 +841,30 @@ fn run() -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        "feature-audit" => {
+            let mut corpus_mode = false;
+            let mut generated = true;
+            for arg in args.by_ref() {
+                match arg.as_str() {
+                    "--corpus" => {
+                        corpus_mode = true;
+                        generated = false;
+                    }
+                    "--generated" => {
+                        generated = true;
+                        corpus_mode = false;
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            let (train, heldout) = if generated {
+                fit_splits(true, true)
+            } else {
+                fit_splits(false, corpus_mode)
+            };
+            feature_audit(&train, &heldout, &jotnar_agent::hard_cases());
+            Ok(ExitCode::SUCCESS)
+        }
         "run" => {
             let mut out = PathBuf::from("runs/agent");
             let mut rounds = 1usize;
@@ -819,11 +883,15 @@ fn run() -> Result<ExitCode, String> {
             let mut effect_weights: Option<PathBuf> = None;
             let mut state_effect_weights: Option<PathBuf> = None;
             let mut joint_weights: Option<PathBuf> = None;
+            let mut cost_weights: Option<PathBuf> = None;
+            let mut cost_weight = 4i64;
             let mut beam = 4usize;
             let mut depth = 2usize;
             let mut archive_path: Option<PathBuf> = None;
             let mut archive_novelty = 2usize;
             let mut archive_capacity = 16usize;
+            let mut hard = false;
+            let mut qd_seeds = 8usize;
             let mut encoder_loops = 0usize;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -900,6 +968,18 @@ fn run() -> Result<ExitCode, String> {
                             args.next().ok_or("--joint-weights needs a path")?,
                         ));
                     }
+                    "--cost-weights" => {
+                        cost_weights = Some(PathBuf::from(
+                            args.next().ok_or("--cost-weights needs a path")?,
+                        ));
+                    }
+                    "--cost-weight" => {
+                        cost_weight = args
+                            .next()
+                            .ok_or("--cost-weight needs a number")?
+                            .parse()
+                            .map_err(|_| "--cost-weight needs a number".to_string())?;
+                    }
                     "--beam" => {
                         beam = args
                             .next()
@@ -931,6 +1011,14 @@ fn run() -> Result<ExitCode, String> {
                             .ok_or("--archive-capacity needs a number")?
                             .parse()
                             .map_err(|_| "--archive-capacity needs a number".to_string())?;
+                    }
+                    "--hard" => hard = true,
+                    "--qd-seeds" => {
+                        qd_seeds = args
+                            .next()
+                            .ok_or("--qd-seeds needs a number")?
+                            .parse()
+                            .map_err(|_| "--qd-seeds needs a number".to_string())?;
                     }
                     other => return Err(format!("unknown option {other}")),
                 }
@@ -981,17 +1069,25 @@ fn run() -> Result<ExitCode, String> {
                 None => None,
             };
             let beam_prop = match &state_effect_weights {
-                Some(path) => Some(BeamProposer::new(
-                    StateEffectModel::load(path).map_err(|e| e.to_string())?,
-                    beam,
-                    depth,
-                )),
+                Some(path) => {
+                    let model = StateEffectModel::load(path).map_err(|e| e.to_string())?;
+                    let mut proposer = BeamProposer::new(model, beam, depth);
+                    if let Some(path) = &cost_weights {
+                        let cost = CostModel::load(path).map_err(|e| e.to_string())?;
+                        proposer = proposer.with_cost(cost, cost_weight);
+                    }
+                    Some(proposer)
+                }
                 None => None,
             };
             let joint_prop = match &joint_weights {
                 Some(path) => Some(JointProposer::load(path).map_err(|e| e.to_string())?),
                 None => None,
             };
+            let qd_prop = archive_path.as_ref().map(|path| {
+                let archive = Archive::load(path).unwrap_or_else(|_| Archive::new(16, 2));
+                ArchiveProposer::new(archive, qd_seeds)
+            });
             let task_prop = match &encoder_weights {
                 Some(path) => TaskEncoder::load(path).map_err(|e| e.to_string())?,
                 None => TaskEncoder::prior(),
@@ -1088,6 +1184,10 @@ fn run() -> Result<ExitCode, String> {
                 joint_prop
                     .as_ref()
                     .ok_or("--proposer joint requires --joint-weights FILE")?
+            } else if proposer == "qd" {
+                qd_prop
+                    .as_ref()
+                    .ok_or("--proposer qd requires --archive FILE")?
             } else {
                 return Err(format!("unknown proposer {proposer:?}"));
             };
@@ -1233,6 +1333,40 @@ fn run() -> Result<ExitCode, String> {
                     print_report(&report, round + 1, rounds);
                 }
                 harness = report.adopted_harness.clone();
+            }
+            if hard {
+                let hard_cases = jotnar_agent::hard_cases();
+                let hard_report = evaluate(&harness, &hard_cases, false);
+                println!(
+                    "hard audit: {}/{} correct, {} wrong (never used for selection or adoption)",
+                    hard_report.correct(),
+                    hard_cases.len(),
+                    hard_report.wrong()
+                );
+                for outcome in &hard_report.outcomes {
+                    println!(
+                        "  {:32} {:14} steps {}",
+                        outcome.case,
+                        outcome.kind.as_str(),
+                        outcome.steps
+                    );
+                }
+                let payload = serde_json::json!({
+                    "correct": hard_report.correct(),
+                    "wrong": hard_report.wrong(),
+                    "total_steps": hard_report.total_steps,
+                    "outcomes": hard_report.outcomes.iter().map(|o| serde_json::json!({
+                        "case": o.case,
+                        "family": o.family,
+                        "kind": o.kind.as_str(),
+                        "steps": o.steps,
+                        "note": o.note,
+                    })).collect::<Vec<_>>(),
+                });
+                let _ = std::fs::write(
+                    out.join("hard.json"),
+                    serde_json::to_string_pretty(&payload).unwrap() + "\n",
+                );
             }
             if let (Some(path), Some(archive)) = (&archive_path, &archive_state) {
                 archive.save(path).map_err(|e| e.to_string())?;
@@ -1581,6 +1715,85 @@ fn fit_effect_model(
     Ok(ExitCode::SUCCESS)
 }
 
+fn l1_distance(a: &[i64], b: &[i64]) -> usize {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (*x - *y).unsigned_abs() as usize)
+        .sum()
+}
+
+fn minimal_solvers(case: &jotnar_agent::Case, base: &Harness, depth: usize) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    for (_, subset, harness) in jotnar_agent::reachable_states(base, depth) {
+        let report = evaluate(&harness, std::slice::from_ref(case), false);
+        if report.outcomes[0].kind.correct() {
+            out.push(subset);
+        }
+    }
+    out.sort_by_key(|subset| subset.len());
+    out
+}
+
+fn feature_audit(
+    train: &[jotnar_agent::Case],
+    heldout: &[jotnar_agent::Case],
+    hard: &[jotnar_agent::Case],
+) {
+    let base = Harness::default();
+    let train_report = evaluate(&base, train, false);
+    let train_tasks: Vec<Vec<i64>> = jotnar_agent::case_views(train, &train_report)
+        .iter()
+        .map(|view| jotnar_agent::task_encoder::task_vector(view, &base))
+        .collect();
+    println!(
+        "feature audit: {} training cases, {} held-out, {} hard",
+        train.len(),
+        heldout.len(),
+        hard.len()
+    );
+    for (name, cases) in [("heldout", heldout), ("hard", hard)] {
+        if cases.is_empty() {
+            continue;
+        }
+        let report = evaluate(&base, cases, false);
+        let views = jotnar_agent::case_views(cases, &report);
+        println!("--- {name} ---");
+        for (case, view) in cases.iter().zip(views.iter()) {
+            let task = jotnar_agent::task_encoder::task_vector(view, &base);
+            let distance = train_tasks
+                .iter()
+                .map(|train_task| l1_distance(&task, train_task))
+                .min()
+                .unwrap_or(0);
+            let outcome = report
+                .outcomes
+                .iter()
+                .find(|o| o.case == case.intent.id)
+                .map(|o| o.kind.as_str())
+                .unwrap_or("missing");
+            let solvers = minimal_solvers(case, &base, 3);
+            let best = solvers.first();
+            let names = best
+                .map(|subset| {
+                    subset
+                        .iter()
+                        .map(|action| jotnar_agent::ACTIONS[*action])
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                })
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "  {:32} min-dist {:3}  base {:14}  min-solver-size {}  [{}]",
+                case.intent.id,
+                distance,
+                outcome,
+                best.map(|s| s.len()).unwrap_or(0),
+                names
+            );
+        }
+    }
+}
+
 fn fit_state_effect_model(
     out: &std::path::Path,
     corpus_mode: bool,
@@ -1620,6 +1833,39 @@ fn fit_state_effect_model(
         out.join("state-effect-model.weights.json").display()
     );
     println!("wrote {}", out.join("state-effect-model.jotnar").display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn fit_cost_model(
+    out: &std::path::Path,
+    corpus_mode: bool,
+    generated: bool,
+    depth: usize,
+    lambda: f64,
+) -> Result<ExitCode, String> {
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let (train, _) = if generated {
+        fit_splits(true, true)
+    } else {
+        fit_splits(false, corpus_mode)
+    };
+    let base = Harness::default();
+    let rows = state_effects(&train, &base, depth);
+    let mut model = CostModel::prior();
+    let mae = model.fit(&rows, lambda);
+    model
+        .save(&out.join("cost-model.weights.json"))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(out.join("cost-model.jotnar"), &model.listing).map_err(|e| e.to_string())?;
+    println!(
+        "cost model: {} cases, {} transitions, depth={}, lambda={}, mae={mae:.3}",
+        train.len(),
+        rows.len(),
+        depth,
+        lambda
+    );
+    println!("wrote {}", out.join("cost-model.weights.json").display());
+    println!("wrote {}", out.join("cost-model.jotnar").display());
     Ok(ExitCode::SUCCESS)
 }
 
