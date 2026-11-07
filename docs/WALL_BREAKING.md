@@ -96,3 +96,6 @@ The exact gate still decides adoption. The hard split stays audit-only.
 - No new opcodes were needed. If the clock projection later needs a primitive,
   it must meet the four-part opcode rule (interpreter, signature, C/non-FPU
   lowering, parity test).
+
+For the honest assessment and the future-work checklist, see
+[`WBP_CRITIQUE.md`](WBP_CRITIQUE.md).
