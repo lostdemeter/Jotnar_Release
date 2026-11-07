@@ -54,25 +54,35 @@ That is the protocol's core claim in miniature: the wall is a basis problem, not
 necessarily a model-capacity problem. The test lives in
 `crates/jotnar-agent/tests/wall_breaking.rs`.
 
-## The agent application
+## The deeper-table result
 
-The current 46-state / 1275-transition table is linearly separable at
-`discriminating top-1 = 1.000`, so there is **no residual wall to peel yet**.
-That is the honest reading: the current model does not need WBP on the table it
-has.
+We then built the deeper, repeated-action table:
 
-The next wall is the deeper table (depth 3 / repeated `depth + 1` and
-`refinements + 1`), where the additive model can no longer represent the
-interaction between a capability and a state. The planned loop is:
+- `reachable_states` is a bounded BFS over action sequences, not distinct
+  subsets; `depth + 1` and `refinements + 1` repeat up to their caps.
+- depth 3: **205 states / 7380 transitions / 10 actions**, still
+  `discriminating top-1 = 1.000` for the plain linear model.
+- `affine_s64` is the wall: a 64x deep chain that needs three `depth + 1`
+  steps. The default depth-2 harness misses it; the exact gate solves it at 6
+  steps.
 
-1. Fit the linear `StateEffectModel` on a held-out transition split (hold out
-   cases or state groups, not random rows).
-2. Compute the score residual on the held-out groups.
-3. Run `wbp-audit` on the residual sequence.
-4. If `rho` is low (structured), add the self-similar product feature at the
-   peeled lag and refit. The product is computed by the Jotnar listing.
-5. If `rho -> 1`, apply the `1/sqrt(5)` / `1/phi` / `1/pi` jumps. If they do not
-   drop `rho`, the wall is ergodic; do not claim a linear feature.
+The wall turned out to be in **proposal composition**, not per-transition
+linearity. The per-transition model was already 1.000; the set-union candidate
+collapsed the repeated `depth + 1` actions to one. The fix is a learned
+**path-union** candidate: union the top beam path per wrong case and preserve
+repeated depth/refinement counts. Result:
+
+```text
+generated 18/18 selection, 6/6 held-out
+hard      12/12 (affine_s64 solved at 6 steps)
+learned-only the same
+```
+
+WBP's self-similar interaction lag 35 (`refinements * depth_delta`) is
+available on `StateEffectModel` (`with_interactions(vec![35])`), assembles as a
+Jotnar listing, and is neutral on this wall. That is the honest result: the
+wall was in the search aggregation, not in the residual of the per-transition
+model. WBP remains the tool for a wall that actually lives in the residual.
 
 The exact gate still decides adoption. The hard split stays audit-only.
 

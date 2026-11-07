@@ -48,7 +48,7 @@ cargo run -q -p jotnar-agent -- run --out runs/world \
 ```
 
 ```text
-selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
+selection: 11/18 correct, 7 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
 selected:  world: add compose[reduce_sum] + refinements + 1 + add family select_min
 adopted:   true
@@ -101,7 +101,7 @@ cargo run -q -p jotnar-agent -- fit-state-effect-model \
 ```
 
 ```text
-state effect model: 17 cases, 46 states, 1275 transitions, 10 actions,
+state effect model: 18 cases, 205 states, 7380 transitions, 10 actions,
 depth=2, epochs=10, lr=1, discriminating top-1 accuracy=1.000
 ```
 
@@ -131,7 +131,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam \
 ```
 
 ```text
-selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
+selection: 11/18 correct, 7 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
 selected:  beam-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
            + add family select_min
@@ -172,10 +172,10 @@ make("gen-elem-saxpy-s16-train", "saxpy", "saxpy_s16", ..., Train)
 The held-out row is still `gen-elem-affine-s16-holdout` (`affine -> affine_s16`)
 and is never trained on. The new row is a different start family and example
 set, so the model sees the deep mechanism and generalizes to the affine target.
-The generated stream is now 10 train / 7 calibration / 6 held-out = 23 cases.
+The generated stream is now 11 train / 7 calibration / 6 held-out = 24 cases.
 
-Result: generated `world`, `beam`, and `joint` all reach **17/17 selection,
-6/6 held-out**.
+Result: generated `beam` and `joint` reach **18/18 selection, 6/6 held-out**;
+the legacy single-action `world` model excludes the repeated-depth `s64` case.
 
 ## The joint latent + causal model
 
@@ -208,14 +208,14 @@ cargo run -q -p jotnar-agent -- run --out runs/joint \
 ```
 
 ```text
-selection: 11/17 correct, 6 wrong -> 17/17 correct, 0 wrong
+selection: 11/18 correct, 7 wrong -> 18/18 correct, 0 wrong
 heldout:   6/6 correct, 0 wrong
 selected:  joint-coverage: add compose[reduce_sum] + depth + 1 + refinements + 1
            + add family select_min
 adopted:   true
 ```
 
-Corpus: 18/18 selection, 6/6 held-out. Hard audit: 11/11.
+Corpus: 18/18 selection, 6/6 held-out. Hard audit: 12/12.
 
 ## The quality-diversity archive
 
@@ -232,8 +232,8 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-archive \
 cargo run -q -p jotnar-agent -- archive --file runs/archive.json
 ```
 
-The first archive run kept 16 entries: the 17/17 + 6/6 four-capability
-harness, the 14/17 pair attractors (each missing a different capability), and
+The first archive run kept 16 entries: the 18/18 + 6/6 path-union harness,
+the 14/18 pair attractors (each missing a different capability), and
 the novel near-misses.
 That is the point: `reduce_sum + refinements` and `reduce_sum + select_min` are different
 basins, even when both are one case short. The archive is analysis/proposal
@@ -309,15 +309,15 @@ hard-select16-sum   learned top-1 add compose[reduce_sum] (296)
 `--hard` only audits the final adopted harness:
 
 ```text
-hard audit: 11/11 correct, 0 wrong (never used for selection or adoption)
+hard audit: 12/12 correct, 0 wrong (never used for selection or adoption)
 ```
 
 Progression:
 
 ```text
 base harness:       4/11  (retention + refusal control only)
-learned union:     11/11  (reduce_sum from the shape features)
-learned-only:      11/11  (no completeness/singles/pairs safety net)
+learned union:     12/12  (reduce_sum from the shape features)
+learned-only:      12/12  (no completeness/singles/pairs safety net)
 ```
 
 Before the coverage candidate the run solved only the retention/control cases
@@ -326,7 +326,7 @@ cases. The gap was real and measurable, not hidden by the sibling held-out.
 
 ## Capability coverage / neutral drift
 
-The top union is `reduce_sum + refinements + select_min`; it is 17/17
+The top union is `reduce_sum + refinements + select_min`; it is 18/18
 on the selection stream, but it does not carry `depth + 1`. The deep case
 supports both `refinements` and `depth`, so the proposer adds a **coverage
 union**: the top action from each capability group (compose, depth, refinements,
@@ -337,7 +337,7 @@ capability coverage as a **tie-break after correctness and step count**:
 (correct, wrong, steps, capability_coverage, candidate index)
 ```
 
-The coverage harness has the same 17/17 and step count as the union, so the
+The coverage harness has the same 18/18 and step count as the union, so the
 tie-break selects it. That is neutral drift: the gate cannot tell the two apart
 on the selection stream, so the loop keeps the harness that preserves the second
 capability.
@@ -368,8 +368,8 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-learned \
 Both runs select the same four-capability harness:
 
 ```text
-with safety nets:   17/17 selection, 6/6 held-out, hard 11/11
-learned-only:       17/17 selection, 6/6 held-out, hard 11/11
+with safety nets:   18/18 selection, 6/6 held-out, hard 12/12
+learned-only:       18/18 selection, 6/6 held-out, hard 12/12
 ```
 
 The ablation is the scientific result: the distant compose cases are reached by
@@ -396,7 +396,7 @@ cargo run -q -p jotnar-agent -- run --out runs/beam-cost \
 ```
 
 ```text
-cost model: 17 cases, 1275 transitions, depth=2, lambda=1, mae=0.686
+cost model: 18 cases, 7380 transitions, depth=3, lambda=1, mae=0.482
 ```
 
 The beam score is `effect - cost_weight * predicted_steps`. The exact gate and
@@ -421,7 +421,7 @@ selected a hop from the `beam-union` seed adding `depth + 1`:
 ```text
 selected:  qd-hop[beam-union: ...]: depth + 1
 adopted:   true
-hard audit: 11/11 correct, 0 wrong
+hard audit: 12/12 correct, 0 wrong
 ```
 
 That is the archive doing real work: the loop improves by starting from a
@@ -443,8 +443,8 @@ back to the incumbent.
 
 - State enumeration is over distinct action subsets; repeated `depth + 1` is
   represented by one action.
-- The transition table grows with `--depth` (46 states / 1275 transitions at
-  depth 2 with 10 actions); depth 3 is not yet bounded.
+- The transition table grows with `--depth` (205 states / 7380 transitions at
+  depth 3 with 10 actions, including repeated depth/refinements).
 - The effect model is linear. The state split helps, but the joint interaction
   is still additive.
 - The Qwen backbone is an exact zero-init/pass-through block on the current
@@ -453,7 +453,7 @@ back to the incumbent.
 - The archive records gate-correct/near-correct candidates and now seeds basin
   hopping, but it is not yet a full quality-diversity search with continuous
   descriptors.
-- The hard set is eleven audit cases, not a benchmark. Its four refine/deep
+- The hard set is twelve audit cases, not a benchmark. Its four refine/deep
   compositions share one mechanism (`*_dup -> *_s16`) and their count distance
   is small. The three distant compose cases are distinct in rank, numel, and op
   family (`[3,3]` matmul, `[4,4]` matmul, `[16]` select).

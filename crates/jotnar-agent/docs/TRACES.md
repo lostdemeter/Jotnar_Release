@@ -108,16 +108,17 @@ A row:
 ```
 
 The generated corpus recombines library start/target pairs and assigns
-splits by parameter/family, not by duplicate. It is a 23-case stream:
+splits by parameter/family, not by duplicate. It is a 24-case stream:
 
-- 10 train
+- 11 train
 - 7 calibration
 - 6 held-out
 
-The deep elementwise failure is present in training (`saxpy -> saxpy_s16`)
-and held out on a different start family (`affine -> affine_s16`). That is the
-training signal the first generated stream was missing: the held-out split was
-never moved, but the model now sees what a deep target requires.
+The deep elementwise failures are present in training (`saxpy -> saxpy_s16`
+and the deeper `saxpy -> saxpy_s64`) and held out on a different start family
+(`affine -> affine_s16`, `affine -> affine_s64`). The `s64` case needs repeated
+`depth + 1` steps, so the transition table is a bounded BFS over action
+sequences rather than distinct subsets.
 
 The geometric reduction is taught the same way: `vec9 -> vec9_sum` and
 `vec16 -> vec16_sum` are shaped vector-to-scalar **training** cases. The shaped
@@ -144,14 +145,17 @@ selection, or adoption. It has four `depth + refinements` compositions
 (`*_dup -> *_s16`), three high-distance reduction/matrix retention cases, one
 refusal control, and three feature-distant compose cases:
 
-| case | shape | min-dist | min solver |
-| --- | --- | ---: | --- |
+| case | shape | min solver |
+| --- | --- | --- |
 | `hard-matmul3-sum` | `[3,3]` matmul field -> scalar | `add compose[reduce_sum]` |
 | `hard-matmul4-sum` | `[4,4]` matmul field -> scalar | `add compose[reduce_sum]` |
 | `hard-select16-sum` | `[16]` select field -> scalar | `add compose[reduce_sum]` |
+| `hard-affine-s64` | `affine` -> 64x deep chain | `depth + 1` x3 (repeated) |
 
-The geometric reduction is taught on `vec9`/`vec16` shaped training cases; none
-of the hard shapes is trained on. `feature-audit` prints the count distance and
+The geometric reduction is taught on `vec9`/`vec16` shaped training cases, and
+repeated depth is taught on `saxpy_s64`; none of the hard shapes is trained on.
+The depth-3 table has 205 states / 7380 transitions; the learned path-union
+candidate preserves repeated depth/refinement actions. `feature-audit` prints the count distance and
 the geometry signature (rank, numel, op family, reduction applicability) from
 each held-out/hard case, and (with `--state-effect-weights`) the model's learned
 top-k action scores. `run --hard` evaluates the adopted harness on the hard set
