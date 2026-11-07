@@ -84,3 +84,7 @@ IGATHER1	2	1	I:*, I:* -> I:*	bytes	Gather from a 1D table by indices.
 IASSEMBLE	3	1	I:*, F:SCALAR, F:SCALAR -> I:*	bytes	Assemble 1..8 little-endian bytes into an integer.
 ISUM	3	1	I:*, F:SCALAR, F:SCALAR -> I:*	bytes	Sum a slice of a 1D integer stream.
 ISCATTER1	3	1	I:*, I:*, I:* -> I:*	bytes	Scatter values into a 1D copy at indices.
+T2I	1	1	$A -> I:*	int	Decode a phi-ladder triple stream to int64, round to nearest.
+IGET	2	1	I:*, F:SCALAR -> I:*	int	Extract one integer element as a scalar stream.
+IMATMUL	2	1	I:*, I:* -> I:*	int	Exact 2D integer matrix multiply [M,K]*[K,N] -> [M,N], 64-bit wrap.
+IREDUCE_SUM	1	1	I:* -> I:*	int	Exact sum of every element of an integer stream; output is a scalar.

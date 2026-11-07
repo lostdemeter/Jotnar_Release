@@ -171,6 +171,20 @@ fn build_registry() -> Registry {
         sig(&["I:*", "*", "*"], &["I:*"]),
         Some(op_imad),
     );
+    add(
+        "IMATMUL",
+        2,
+        1,
+        sig(&["I:*", "I:*"], &["I:*"]),
+        Some(op_imatmul),
+    );
+    add(
+        "IREDUCE_SUM",
+        1,
+        1,
+        sig(&["I:*"], &["I:*"]),
+        Some(op_ireduce_sum),
+    );
     add("IDIV", 2, 1, sig(&["I:*", "*"], &["I:*"]), Some(op_idiv));
     add("IMOD", 2, 1, sig(&["I:*", "*"], &["I:*"]), Some(op_imod));
     add("IDIVU", 2, 1, sig(&["I:*", "*"], &["I:*"]), Some(op_idivu));

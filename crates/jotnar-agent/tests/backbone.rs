@@ -157,24 +157,66 @@ fn qwen_backbone_reproduces_the_named_latent() {
 }
 
 #[test]
-fn t2i_iget_lower_to_c() {
-    use jotnar::codegen::{compile_program, CompileOptions, Target};
+fn t2i_iget_lower_to_c_and_nonfpu_and_match_the_interpreter() {
+    use jotnar::codegen::{build, compile_program, CompileOptions, Target};
     use jotnar::Value;
     use ndarray::{ArrayD, IxDyn};
+    use std::fs;
+    use std::process::Command;
 
     let listing = "IN x AS T:*\ni = T2I(x)\no = IGET(i, 0)\n";
     let x = ArrayD::from_shape_vec(IxDyn(&[1, 2]), vec![1.0, 2.0]).unwrap();
+    let triple = jotnar::lattice::encode(&x);
     let mut feeds = jotnar::payload::Feeds::new();
-    feeds.insert("x".into(), Value::Triple(jotnar::lattice::encode(&x)));
-    let opts = CompileOptions {
-        target: Target::C,
-        outputs: vec!["o".to_string()],
-        asm: AsmOptions::new("."),
-        use_fp16: false,
+    feeds.insert("x".into(), Value::Triple(triple.clone()));
+
+    // Reference interpreter: T2I rounds to nearest, IGET takes element 0.
+    let got = jotnar::run_text(listing, &AsmOptions::new("."), &feeds).expect("interpreter");
+    let want = match got.get("o").expect("o") {
+        Value::I64(a) => *a.iter().next().unwrap(),
+        other => panic!("unexpected {other:?}"),
     };
-    let artifact = compile_program(listing, &opts, feeds).expect("C lowering for T2I/IGET");
-    assert!(artifact.source.contains("T2I"));
-    assert!(artifact.source.contains("IGET"));
+    assert_eq!(want, 1);
+
+    let dir = std::env::temp_dir().join(format!("jotnar-t2i-iget-parity-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    for (target, name) in [(Target::C, "c"), (Target::NonFpu, "nonfpu")] {
+        let opts = CompileOptions {
+            target,
+            outputs: vec!["o".to_string()],
+            asm: AsmOptions::new("."),
+            use_fp16: false,
+        };
+        let artifact = compile_program(listing, &opts, feeds.clone()).expect("compile");
+        let exe = build(&artifact.source, &dir, name, target).expect("emitted build");
+
+        let s_path = dir.join(format!("{name}-s.bin"));
+        let e_path = dir.join(format!("{name}-e.bin"));
+        let z_path = dir.join(format!("{name}-z.bin"));
+        let out_path = dir.join(format!("{name}-out.bin"));
+        let s_bytes: Vec<u8> = triple.s.iter().map(|v| *v as u8).collect();
+        fs::write(&s_path, s_bytes).unwrap();
+        let mut e_bytes = Vec::new();
+        for v in triple.e.iter() {
+            e_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        fs::write(&e_path, e_bytes).unwrap();
+        fs::write(&z_path, triple.z.iter().copied().collect::<Vec<u8>>()).unwrap();
+
+        let status = Command::new(&exe)
+            .arg(&s_path)
+            .arg(&e_path)
+            .arg(&z_path)
+            .arg(&out_path)
+            .status()
+            .expect("run emitted binary");
+        assert!(status.success(), "{name}: emitted binary failed");
+        let bytes = fs::read(&out_path).unwrap();
+        let got = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        assert_eq!(got, want, "{name}: emitted result must match interpreter");
+    }
 }
 
 #[test]

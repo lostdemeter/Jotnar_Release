@@ -1,7 +1,7 @@
 //! Integer stream ops: 64-bit two's-complement wrap, scalar literals
 //! broadcast, no implicit shape broadcasting between streams.
 
-use ndarray::{ArrayD, Zip};
+use ndarray::{ArrayD, IxDyn, Zip};
 
 use crate::error::{Error, Result};
 use crate::ir::Config;
@@ -62,10 +62,7 @@ pub fn op_iget(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
         )));
     }
     let v = *x.iter().nth(idx as usize).unwrap_or(&0);
-    Ok(vec![Value::I64(ArrayD::from_elem(
-        ndarray::IxDyn(&[]),
-        v,
-    ))])
+    Ok(vec![Value::I64(ArrayD::from_elem(ndarray::IxDyn(&[]), v))])
 }
 
 pub fn op_iadd(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
@@ -107,6 +104,56 @@ pub fn op_imad(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
         .and(&c)
         .map_collect(|&x, &y, &z| x.wrapping_mul(y).wrapping_add(z));
     Ok(vec![Value::I64(out)])
+}
+
+/// Exact 2D integer matrix multiply: `[M,K] * [K,N] -> [M,N]`.
+///
+/// This is the geometric contraction primitive for the integer path. It is
+/// deliberately not a triple/ladder op: the integer corpus is exact, and the
+/// φ-ladder is a separate contract. Arithmetic wraps at 64 bits at every
+/// multiply/add, matching the scalar `IMUL`/`IADD` graph it replaces.
+pub fn op_imatmul(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let a = int_stream(args, 0, "IMATMUL", "a")?;
+    let b = int_stream(args, 1, "IMATMUL", "b")?;
+    if a.ndim() != 2 || b.ndim() != 2 {
+        return Err(Error::runtime(format!(
+            "IMATMUL: need 2D I operands, got {:?} x {:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    let (m, k) = (a.shape()[0], a.shape()[1]);
+    let (k2, n) = (b.shape()[0], b.shape()[1]);
+    if k != k2 {
+        return Err(Error::runtime(format!(
+            "IMATMUL: inner dims {k} vs {k2} (left [M,K], right [K,N])"
+        )));
+    }
+    let mut out = ArrayD::from_elem(IxDyn(&[m, n]), 0i64);
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc: i64 = 0;
+            for t in 0..k {
+                acc = acc.wrapping_add(a[[i, t]].wrapping_mul(b[[t, j]]));
+            }
+            out[[i, j]] = acc;
+        }
+    }
+    Ok(vec![Value::I64(out)])
+}
+
+/// Exact sum of every element of an integer stream: `I:* -> I:SCALAR`.
+///
+/// One geometric reduction, not one opcode per arity. The shape contract is
+/// the input shape; the output is the scalar stream (empty shape). Arithmetic
+/// wraps at 64 bits, matching an `IADD` chain.
+pub fn op_ireduce_sum(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = int_stream(args, 0, "IREDUCE_SUM", "x")?;
+    let mut acc: i64 = 0;
+    for &v in x.iter() {
+        acc = acc.wrapping_add(v);
+    }
+    Ok(vec![Value::I64(ArrayD::from_elem(IxDyn(&[]), acc))])
 }
 
 pub fn op_ixor(args: &[Arg], _: &Config) -> Result<Vec<Value>> {

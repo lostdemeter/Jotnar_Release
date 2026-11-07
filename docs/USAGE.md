@@ -35,7 +35,7 @@ What works today:
 
 - `IMPORT` / `DEF` / `CALL` textual macro expansion with per-call-site
   namespacing, `REPEAT` / `BREAK`, `CONFIG`, layouts, `STATE`, `RANGE`.
-- Registry binding for **all 86 mnemonics**, including `SADD`, `IMAX`,
+- Registry binding for **all 90 mnemonics**, including `SADD`, `IMAX`,
   `ISAR`, `IDIVU`, `IMODU`, `IEQ`, `ILT`, `ISELECT`.
 - The static layout verifier with honest coverage reporting.
 - The reference interpreter over `F32`/`F64`, `I64`, `U8`, bool masks,

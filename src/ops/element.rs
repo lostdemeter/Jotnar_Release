@@ -7,9 +7,7 @@ use crate::ir::Config;
 use crate::lattice::{self, BIAS, NLVL};
 use crate::value::{Arg, Triple, Value};
 
-use super::{
-    arg_f64, arg_i64, arg_triple, beta, scales, triple_binop, triple_map, triple_where,
-};
+use super::{arg_f64, arg_i64, arg_triple, beta, scales, triple_binop, triple_map, triple_where};
 
 pub fn tmul(a: &Triple, b: &Triple) -> Result<Triple> {
     triple_binop(a, b, "MUL", |as_, ae, az, bs, be, bz| {

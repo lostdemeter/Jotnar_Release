@@ -32,6 +32,8 @@ const INTEGER_MN: &[&str] = &[
     "ISUB",
     "IMUL",
     "IMAD",
+    "IMATMUL",
+    "IREDUCE_SUM",
     "IDIV",
     "IMOD",
     "IDIVU",
@@ -445,20 +447,12 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Opt
         let o = outs[0].as_str();
         let idx: i64 = match args[1].parse() {
             Ok(v) => v,
-            Err(_) => {
-                return Some(Err(Error::asm(
-                    "IGET idx must be an integer literal",
-                )))
-            }
+            Err(_) => return Some(Err(Error::asm("IGET idx must be an integer literal"))),
         };
         return Some(Ok((
             fill(
                 "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",
-                &[
-                    ("o", o.into()),
-                    ("x", x.into()),
-                    ("idx", idx.to_string()),
-                ],
+                &[("o", o.into()), ("x", x.into()), ("idx", idx.to_string())],
             ),
             None,
         )));

@@ -145,6 +145,25 @@ the scale. This is a model/contract parameter, not a hidden constant.
 agent/harness path. `IGET` turns the `[1, D]` latent into scalar `h0_i`
 streams.
 
+### Integer geometry (agent path)
+
+These are exact integer, shape-defined ops. They are not ladder ops; they
+exist so the harness can reason about integer fields without pretending that
+`n` scalar streams are a matrix.
+
+| op | signature | behavior | lowering |
+| --- | --- | --- | --- |
+| `IMATMUL` | `I:*, I:* -> I:*` | exact 2D integer matrix multiply `[M,K] * [K,N] -> [M,N]`, 64-bit wrap | both |
+| `IREDUCE_SUM` | `I:* -> I:*` | exact sum of every element; output is the scalar stream | both |
+
+`IREDUCE_SUM` is deliberately one op. It replaces the per-arity
+`sum4`/`sum9`/`sum16` compose labels with a shape-defined reduction. A new
+matrix size is a new shape, not a new opcode.
+
+The `KIND:*` pattern means "this kind, any geometry" (for example `I:*` is an
+integer stream of any shape). A bare `*` remains the fully unconstrained
+wildcard. Both are checked by the assembler; neither silently broadcasts.
+
 ## 4. Worked example: the Qwen block
 
 This is the graph used by `Backbone::qwen_named`:

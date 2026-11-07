@@ -292,6 +292,39 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, StreamInfo::i(x.shape.clone()));
             }
+            "IMATMUL" => {
+                let x = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                if x.kind != CKind::I || y.kind != CKind::I {
+                    return Err(Error::asm(format!(
+                        "{where_}: IMATMUL needs I-kind operands"
+                    )));
+                }
+                if x.shape.len() != 2 || y.shape.len() != 2 {
+                    return Err(Error::asm(format!(
+                        "{where_}: IMATMUL needs 2D I operands, got {:?} x {:?}",
+                        x.shape, y.shape
+                    )));
+                }
+                if let (Some(k1), Some(k2)) = (x.shape[1], y.shape[0]) {
+                    if k1 != k2 {
+                        return Err(Error::asm(format!(
+                            "{where_}: IMATMUL inner dims {k1} vs {k2} (left [M,K], right [K,N])"
+                        )));
+                    }
+                }
+                let out = vec![x.shape[0], y.shape[1]];
+                streams.insert(o, StreamInfo::i(out));
+            }
+            "IREDUCE_SUM" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::I {
+                    return Err(Error::asm(format!(
+                        "{where_}: IREDUCE_SUM needs an I-kind stream"
+                    )));
+                }
+                streams.insert(o, StreamInfo::i(vec![]));
+            }
             "IEQ" | "ILT" | "IMAX" | "SADD" => {
                 let x = get(&streams, a(0))?;
                 if x.kind != CKind::I {

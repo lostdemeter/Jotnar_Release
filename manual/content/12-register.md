@@ -1,12 +1,12 @@
 ---
 title: The Complete Register
 number: "11"
-kicker: REFERENCE / ALL 86 MNEMONICS
+kicker: REFERENCE / ALL 90 MNEMONICS
 lede: The registry is the authority. Every mnemonic has an arity, a signature, a family, and a reference implementation. If it is not here, it is not in the language.
 columns: 1
 ---
 
-This is the full register. It is generated from the same data the manual uses for the per-family chapters, and it is checked against the Rust registry’s 86 entries.
+This is the full register. It is generated from the same data the manual uses for the per-family chapters, and it is checked against the Rust registry’s 90 entries.
 
 Read the columns as follows:
 

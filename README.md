@@ -33,7 +33,7 @@ behind the claims.</p>
 &nbsp;·&nbsp;
 <a href="manual/">source</a>
 </p>
-<p><em>99 pages. 86 mnemonics. One fail-loud rule: if the assembler has to
+<p><em>99 pages. 90 mnemonics. One fail-loud rule: if the assembler has to
 guess, the program is already wrong.</em></p>
 </td>
 </tr>
@@ -165,7 +165,7 @@ Each one is a different angle on the same stack. The full visual index is
 The front door is deliberately short. The actual parts are here:
 
 - assembler, macro expansion, layouts: [`src/asm.rs`](src/asm.rs), [`src/layout.rs`](src/layout.rs)
-- the 86-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
+- the 90-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
 - code generators: [`src/codegen/`](src/codegen/)
 - structural Verilog: [`src/verilog.rs`](src/verilog.rs)
 - RV32IM and DOOM: [`src/rv32.rs`](src/rv32.rs)
@@ -177,7 +177,7 @@ The front door is deliberately short. The actual parts are here:
 ## Receipts, not promises
 
 ```text
-86 mnemonics
+90 mnemonics
 88/88 op parity cases
 32/32 emitter cases
 Futhark 118/118 words

@@ -11,6 +11,26 @@ fn opts() -> AsmOptions {
 }
 
 #[test]
+fn kind_star_layout_means_any_geometry_of_that_kind() {
+    // `I:*` is the documented "integer stream of any shape" pattern. A declared
+    // I:HW operand must unify with it; a float stream must not.
+    let report = asm::verify("IN A AS I:HW\nOUT = IADD(A, A)\n", &opts()).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(
+        report.layouts.get("A").map(String::as_str),
+        Some("I:HW"),
+        "the declared geometry must survive"
+    );
+
+    let mismatch = asm::verify("IN A AS F:HW\nOUT = IADD(A, A)\n", &opts()).unwrap();
+    assert!(
+        mismatch.errors.iter().any(|e| e.contains("kind mismatch")),
+        "{:?}",
+        mismatch.errors
+    );
+}
+
+#[test]
 fn unknown_mnemonic_is_loud() {
     let err = asm::assemble("IN a\nOUT = NOPE(a)\n", &opts()).unwrap_err();
     assert!(err.to_string().contains("unknown mnemonic"), "{err}");
