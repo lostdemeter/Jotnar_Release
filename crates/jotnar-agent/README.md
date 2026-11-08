@@ -20,6 +20,30 @@ search depth, the refinement policy, and the experience memory). What stays
 fixed is the **substrate**: candidate programs are ordinary Jotnar listings,
 resolved by the reference interpreter and certified by `jotnar-lab`.
 
+## Run the demo
+
+One command runs the consolidated story: compose two independent fixes, adopt
+only after the exact gate, retain the incumbent, check held-out
+non-regression, and audit the result on a separate hard set.
+
+```sh
+cargo run -q -p jotnar-agent -- demo --out runs/demo
+```
+
+```text
+demo: quick 3/5 -> 5/5 (held-out 5/5)
+demo: generated 11/19 -> 19/19 (held-out 6/6)
+demo: corpus 14/18 -> 18/18 (held-out 6/6)
+demo: hard audit 13/13; state model 1.000
+demo: learned-only 19/19 (held-out 6/6, hard 13/13)
+demo: report runs/demo/report.md
+```
+
+The demo writes `report.md`, `summary.json`, model weights, per-round
+certificates, and traces. It exits non-zero if an expectation fails. See
+[`docs/DEMO.md`](docs/DEMO.md) for the artifact layout and the honest scope:
+this is a **certified harness tuner**, not an open-ended self-improving agent.
+
 ## The circuit
 
 ```

@@ -23,6 +23,7 @@ pub mod budget_predictor;
 pub mod certificate;
 pub mod corpus;
 pub mod cost_model;
+pub mod demo;
 pub mod driver;
 pub mod effect_model;
 pub mod effects;

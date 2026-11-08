@@ -34,7 +34,7 @@ fn usage() -> &'static str {
        jotnar-agent gen-transitions [--out FILE] [--corpus] [--depth N]\n\
        jotnar-agent gen-teacher [--out FILE] [--generated] [--source NAME]\n\
        jotnar-agent distill-qwen --teacher FILE [--out DIR] [--readout|--end-to-end] [--corpus|--generated] [--epochs N] [--lr F] [--dim N] [--inter N] [--seed N] [--scale F] [--ridge F] [--rounds N] [--max-loops N]\n\
-       jotnar-agent list\n"
+       jotnar-agent demo [--out DIR]\n       jotnar-agent list\n"
 }
 
 fn main() -> ExitCode {
@@ -861,6 +861,43 @@ fn run() -> Result<ExitCode, String> {
                     entry.label
                 );
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        "demo" => {
+            let mut out = PathBuf::from("runs/demo");
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--out" => {
+                        out = PathBuf::from(args.next().ok_or("--out needs a path")?);
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            let summary = jotnar_agent::demo::run_demo(&out)?;
+            println!(
+                "demo: quick {}/5 -> {}/5 (held-out {}/5)",
+                summary.quick_base, summary.quick_adopted, summary.quick_heldout
+            );
+            println!(
+                "demo: generated {}/19 -> {}/19 (held-out {}/6)",
+                summary.generated_base, summary.generated_adopted, summary.generated_heldout
+            );
+            println!(
+                "demo: corpus {}/18 -> {}/18 (held-out {}/6)",
+                summary.corpus_base, summary.corpus_adopted, summary.corpus_heldout
+            );
+            println!(
+                "demo: hard audit {}/{}; state model {:.3}",
+                summary.hard_correct, summary.hard_total, summary.model_accuracy
+            );
+            println!(
+                "demo: learned-only {}/19 (held-out {}/6, hard {}/{})",
+                summary.learned_only_adopted,
+                summary.learned_only_heldout,
+                summary.learned_only_hard,
+                summary.hard_total
+            );
+            println!("demo: report {}/report.md", summary.out_dir.display());
             Ok(ExitCode::SUCCESS)
         }
         "feature-audit" => {
