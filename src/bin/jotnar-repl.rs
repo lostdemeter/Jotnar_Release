@@ -44,6 +44,7 @@ struct Repl {
     stats: bool,
 }
 
+#[allow(clippy::type_complexity)]
 fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, bool), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {

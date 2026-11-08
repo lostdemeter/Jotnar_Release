@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use jotnar::payload::{self, Feeds};
-use jotnar::protocol::{decode_frame, decode_stream, encode_stream, StreamSpec, PROTO_V};
+use jotnar::protocol::{decode_frame, decode_stream, encode_stream, StreamSpec};
 use serde_json::{json, Value as Json};
 
 fn usage() -> &'static str {
@@ -40,6 +40,8 @@ fn usage() -> &'static str {
 fn connect(addr: &str) -> Result<TcpStream, String> {
     let stream = TcpStream::connect(addr).map_err(|e| format!("cannot connect to {addr}: {e}"))?;
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
     Ok(stream)
 }
 
@@ -67,6 +69,12 @@ fn roundtrip(
         .read_exact(&mut hdr)
         .map_err(|e| format!("read header: {e}"))?;
     let n = u32::from_be_bytes(hdr) as usize;
+    const MAX_CLIENT_FRAME: usize = 256 * 1024 * 1024;
+    if n > MAX_CLIENT_FRAME {
+        return Err(format!(
+            "response frame too large ({n} > {MAX_CLIENT_FRAME})"
+        ));
+    }
     let mut body = vec![0u8; n];
     stream
         .read_exact(&mut body)
@@ -74,7 +82,17 @@ fn roundtrip(
     let mut full = Vec::with_capacity(4 + n);
     full.extend_from_slice(&hdr);
     full.extend_from_slice(&body);
-    decode_frame(&full).map_err(|e| e.to_string())
+    let (header, payload) = decode_frame(&full).map_err(|e| e.to_string())?;
+    if header.get("id").and_then(|x| x.as_u64()) != Some(id) {
+        return Err(format!("response id mismatch: expected {id}, got {header}"));
+    }
+    if header.get("v").and_then(|x| x.as_u64()) != Some(jotnar::protocol::PROTO_V) {
+        return Err(format!(
+            "response version mismatch: {}",
+            header.get("v").cloned().unwrap_or(json!("?"))
+        ));
+    }
+    Ok((header, payload))
 }
 
 fn ok_or_show(header: &Json) -> Result<(), String> {
@@ -106,11 +124,20 @@ fn real_main() -> Result<(), String> {
         match args.first().map(|s| s.as_str()) {
             Some("--addr") => {
                 args.remove(0);
-                addr = args.remove(0);
+                addr = args
+                    .first()
+                    .cloned()
+                    .ok_or("--addr needs a value".to_string())?;
+                args.remove(0);
             }
             Some("--token") => {
                 args.remove(0);
-                token = Some(args.remove(0));
+                token = Some(
+                    args.first()
+                        .cloned()
+                        .ok_or("--token needs a value".to_string())?,
+                );
+                args.remove(0);
             }
             _ => break,
         }
@@ -119,6 +146,13 @@ fn real_main() -> Result<(), String> {
         return Err(usage().to_string());
     }
     let cmd = args.remove(0);
+    if ![
+        "ping", "list", "program", "store", "exec", "drop", "-h", "--help", "help",
+    ]
+    .contains(&cmd.as_str())
+    {
+        return Err(format!("unknown command '{cmd}'\n\n{}", usage()));
+    }
     let mut stream = connect(&addr)?;
     match cmd.as_str() {
         "ping" => {
@@ -142,7 +176,13 @@ fn real_main() -> Result<(), String> {
                 let a = a.clone();
                 args.remove(0);
                 match a.as_str() {
-                    "--backend" => backend = args.remove(0),
+                    "--backend" => {
+                        backend = args
+                            .first()
+                            .cloned()
+                            .ok_or("--backend needs a value".to_string())?;
+                        args.remove(0);
+                    }
                     "-h" | "--help" => return Err(usage().to_string()),
                     other => return Err(format!("unknown argument '{other}'")),
                 }
@@ -161,7 +201,7 @@ fn real_main() -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
         "store" => {
-            if args.len() < 1 {
+            if args.is_empty() {
                 return Err(format!("store needs <name>\n\n{}", usage()));
             }
             let name = args.remove(0);
@@ -178,7 +218,7 @@ fn real_main() -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
         "exec" => {
-            if args.len() < 1 {
+            if args.is_empty() {
                 return Err(format!("exec needs <handle>\n\n{}", usage()));
             }
             let handle = args.remove(0);
@@ -207,8 +247,11 @@ fn real_main() -> Result<(), String> {
                     let spec = StreamSpec::from_json(s).map_err(|e| e.to_string())?;
                     let off = s.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                     let len = s.get("len").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    let v =
-                        decode_stream(&spec, &resp[off..off + len]).map_err(|e| e.to_string())?;
+                    let end = off.checked_add(len).ok_or("exec output offset overflow")?;
+                    if end > resp.len() {
+                        return Err(format!("exec output {name} truncated"));
+                    }
+                    let v = decode_stream(&spec, &resp[off..end]).map_err(|e| e.to_string())?;
                     out_streams.insert(
                         name.clone(),
                         payload::value_to_json(&v).map_err(|e| e.to_string())?,
@@ -242,7 +285,7 @@ fn su(m: Option<&mut serde_json::Map<String, Json>>, k: &str, v: Json) {
     }
 }
 
-fn read_feeds(path: &PathBuf) -> Result<Feeds, String> {
+fn read_feeds(path: &std::path::Path) -> Result<Feeds, String> {
     payload::read_payload(path).map_err(|e| e.to_string())
 }
 
@@ -283,9 +326,4 @@ fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
         file.ok_or("--payload is required")?,
         outputs.ok_or("--outputs is required")?,
     ))
-}
-
-#[allow(dead_code)]
-fn _v() -> u64 {
-    PROTO_V
 }

@@ -1,10 +1,10 @@
 # Runtime research: warm interpreter + network node
 
-Status: research scaffolding. Local branch only (`runtime-interpreter`),
-no commits to the parent checkout. The goal is twofold: (1) a small-footprint
-processor that takes Jotnar listings and processes them like an interpreted
-language locally, and (2) a network stack so the same processor can live on
-another machine, model-blind, and do work for a smart controller.
+Status: candidate branch for review; not merged. The goal is twofold:
+(1) a small-footprint processor that takes Jotnar listings and processes
+them like an interpreted language locally, and (2) a network stack so
+the same processor can live on another machine, model-blind, and do work
+for a smart controller.
 
 This note records what the evidence says today, the candidate shapes for
 (1) and (2), and what we are building first to let measurement arbitrate.
@@ -211,17 +211,18 @@ at 64 MiB by default (`--max-frame`, oversize → `error/too-large` and
 connection close since the NM prefix cannot be trusted), and persists
 one `Node` (program registry + blob shelf) across sequential clients.
 
-Prototype 1 numbers also landed: warm REPL vs cold CLI for 50× matmul2
-payloads was 1.7 ms total vs 45.8 ms total (26×), i.e. 0.03 ms vs
-0.92 ms per payload.
+Preliminary observation (single run, not a gate): warm REPL vs cold CLI
+for 50× matmul2 payloads was 1.7 ms total vs 45.8 ms total (~26×), i.e.
+0.03 ms vs 0.92 ms per payload. No checked-in reproducible warm-vs-cold
+command yet.
 
-Footprint check (measured, not assumed): `jotnar-node`/`jotnar-repl`
-are both 4.2M (3.3M stripped), `jotnar-ctl` is 804K because it never
-links the interpreter. `nm` shows zero `png` symbols in the REPL binary
-and no DOOM/Verilog strings — dead-code elimination already removes
-rv32/showcase/codegen/image from node/REPL builds. The remaining text
-(~3.2M) is the 90-mnemonic registry + `phi-core` substrate, i.e. the
-actual language. A feature split would save only a few percent of
+Footprint check (single-machine observation, not a gate): `jotnar-node`/
+`jotnar-repl` are both 4.2M (3.3M stripped), `jotnar-ctl` is 804K because
+it never links the interpreter. Reproduce with `nm`/`strings` on the
+built binaries (see `showcase/runtime/`). Dead-code elimination already
+removes rv32/showcase/codegen/image from node/REPL builds. The remaining
+text (~3.2M) is the registry + `phi-core` substrate, i.e. the actual
+language. A feature split would save only a few percent of
 already-eliminated code and would fork maintenance for it, so it is
 deferred until measurements say otherwise. Ship stripped binaries.
 
@@ -297,5 +298,7 @@ do, with a migration note. Frames over `--max-frame` are rejected as
 
 ---
 
-Generated locally on branch `runtime-interpreter`. PR-ready: see
-`showcase/runtime/` for the exhibit and `docs/USAGE.md` for the CLI.
+Candidate branch for review; not merged. See `showcase/runtime/` for the
+candidate exhibit and `docs/USAGE.md` for the CLI. All timings are local
+one-machine observations (labels: `clock=host_wall, scope=end_to_end,
+kind=measured`), not cross-host gates.

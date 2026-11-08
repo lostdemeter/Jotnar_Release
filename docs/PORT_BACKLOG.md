@@ -215,8 +215,9 @@ Curation rule: no two public examples should demonstrate the same lesson.
    - Evidence: 3 batches, 12 independent jobs, 4 nodes, different
      completion/placement orders, byte-identical outputs; 5/5 protocol
      unit tests green.
-   - Boundary: no sockets by design; frames/channels preserve the wire
-     contract and the model-blind node.
+   - Boundary: framed (in-process and TCP) transport over the same
+     wire contract and model-blind node; serve-mode resident loops,
+     codec ABI, CUDA graphs, and packed outputs are NOT done.
 
 3. **DOOM on RV32IM** — native core done
    - `src/rv32.rs`: RV32I+M, CSR/Sv32, DOOM MMIO, checkpointing, frame output.

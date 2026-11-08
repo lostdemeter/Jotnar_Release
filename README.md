@@ -193,8 +193,8 @@ These are gates, not a leaderboard. The details and commands are in
 - not a general tensor framework
 - not a GPU performance claim: the CUDA backend is correctness-first
 - not physical analog hardware: the analog work is Jotnar-SIM
-- not finished: the device emitter, CUDA fleet kernel, TCP serving, and
-  several phi-core modules are still on the bench
+- not finished: the device emitter, CUDA fleet kernel, serve mode
+  (`live=` resident loops), and several phi-core modules are still on the bench
 
 The edges are still sharp. That is part of the point.
 

@@ -64,7 +64,13 @@ fn parse_args() -> Result<Config, String> {
                 let s = it.next().ok_or("--max-frame needs a byte count")?;
                 cfg.max_frame = s.parse().map_err(|_| "--max-frame must be an integer")?;
             }
-            "--token" => cfg.token = Some(it.next().ok_or("--token needs a secret")?),
+            "--token" => {
+                let t = it.next().ok_or("--token needs a secret")?;
+                if t.trim().is_empty() {
+                    return Err("--token must be a non-empty secret (empty/whitespace tokens are rejected, not treated as disabled auth)".to_string());
+                }
+                cfg.token = Some(t);
+            }
             "--stats" => cfg.stats = true,
             "-h" | "--help" | "help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
@@ -74,9 +80,26 @@ fn parse_args() -> Result<Config, String> {
 }
 
 fn is_loopback_bind(bind: &str) -> bool {
-    // Accepts 127.*, localhost, [::1], ::1, 0.0.0.0 is NOT loopback-safe.
-    let host = bind.rsplit(':').next().unwrap_or(bind);
-    host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]"
+    // Bare host without a port, e.g. "localhost" or "127.0.0.1".
+    if bind == "localhost" {
+        return true;
+    }
+    if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    // host:port or [ipv6]:port. Resolve via ToSocketAddrs so
+    // "localhost:9999", "[::1]:9999", "127.0.0.1:9999" and
+    // "0.0.0.0:9999" all classify by their IP, not the port.
+    // 0.0.0.0 / :: are NOT loopback.
+    if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&bind) {
+        if let Some(first) = addrs.next() {
+            return first.ip().is_loopback();
+        }
+    }
+    // Bare hostname without a port (e.g. "localhost" already handled).
+    // Anything we cannot classify is treated as non-loopback so the
+    // caller must supply a token (fail safe, not fail open).
+    false
 }
 
 /// Read one frame body: `u32BE` prefix already peeked at. Returns the
@@ -161,6 +184,10 @@ fn run() -> Result<(), String> {
         match conn {
             Ok(mut stream) => {
                 let _ = stream.set_nodelay(true);
+                // One-client, one-request-at-a-time policy: a stalled
+                // client must not block the only slot forever.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(60)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(60)));
                 if let Err(e) = serve(&mut stream, &mut node, &cfg) {
                     eprintln!("connection error: {e}");
                 }
@@ -169,4 +196,28 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_bind;
+
+    #[test]
+    fn loopback_binds_are_classified_as_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:9999"));
+        assert!(is_loopback_bind("localhost:9999"));
+        assert!(is_loopback_bind("[::1]:9999"));
+        assert!(is_loopback_bind("::1"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(is_loopback_bind("127.0.0.1"));
+    }
+
+    #[test]
+    fn non_loopback_binds_require_a_token() {
+        assert!(!is_loopback_bind("0.0.0.0:9999"));
+        assert!(!is_loopback_bind("192.168.1.2:9999"));
+        assert!(!is_loopback_bind("[::]:9999"));
+        assert!(!is_loopback_bind("::"));
+        assert!(!is_loopback_bind("0.0.0.0"));
+    }
 }

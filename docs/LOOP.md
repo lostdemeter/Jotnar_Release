@@ -189,7 +189,7 @@ same loop at different layers:
 | Verilog / CPU8 | integer subset | structural co-sim vs ISA | all RTL |
 | analog field | RC/DAC/ADC grid | digital Laplace + tolerance | geometry completion |
 | Futhark | word corpus | JavaScript reference | DOM / arbitrary contractions |
-| protocol | independent jobs | byte compare + placement | TCP / other backends |
+| protocol | independent jobs | byte compare + placement | multi-stage pipelines / serve mode / other backends |
 | DOOM | RV32IM checkpoint | C native + GPU state | all programs / plan completeness |
 | analog filter | edge/hole field | L1 + cost + nulls | physical analog hardware |
 

@@ -274,6 +274,12 @@ impl Node {
     /// Require a shared `--token` from every client. Requests must
     /// carry `"auth": "<token>"` in the header; otherwise the node
     /// replies `error/unauthorized` before dispatching.
+    ///
+    /// The token is a trusted-LAN convenience, not a cryptographic
+    /// authenticator: it rides cleartext in the JSON header with no
+    /// TLS and is compared with `!=`. Empty or whitespace-only tokens
+    /// are treated as misconfiguration and never authorize a request,
+    /// even if the caller sends no `auth` header.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
         self
@@ -304,7 +310,7 @@ impl Node {
         let id = header.get("id").cloned().unwrap_or(json!(0));
         if let Some(want) = &self.token {
             let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
-            if got != want.as_str() {
+            if want.trim().is_empty() || got != want.as_str() {
                 return Self::err(&id, "unauthorized", "bad or missing auth token");
             }
         }

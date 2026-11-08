@@ -126,6 +126,7 @@ cargo run --release --bin jotnar-repl -- showcase/language/saxpy.asm --outputs O
 # then pipe NDJSON {"streams": {...}} lines on stdin
 
 cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999
+cargo run --release --bin jotnar-node -- --bind 0.0.0.0:9999 --token "$SECRET"  # non-loopback requires --token
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 ping
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 program tile showcase/language/matmul2.asm
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payload payload.json --outputs c00

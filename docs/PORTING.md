@@ -48,8 +48,9 @@ between the two codebases explicit so the port stays reviewable.
 4. **CUDA emitter**: correctness-first FP32 kernels for the reference
    unit/bigram/headt/fp16/width gates. Gated by `scripts/parity_cuda.py`.
    Tuned kernels/cuBLAS scheduling is a performance pass, not a parity gap.
-5. **Serve / codec paths**: `live=` resident loops, pack_outputs, codec ABI,
-   CUDA graphs. This is the main remaining functional surface.
+5. **Serve / codec paths**: TCP transport (`jotnar-node`) is done.
+   `live=` resident loops, pack_outputs, codec ABI, CUDA graphs
+   are still open and are the main remaining functional surface.
 6. **CLI polish**: trace output, payload from `.npy`/raw binary.
 
 ## Adding a mnemonic

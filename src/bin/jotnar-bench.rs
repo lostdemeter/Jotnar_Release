@@ -85,6 +85,9 @@ impl Stats {
         let i = ((v.len() as f64 * 0.99).ceil() as usize).saturating_sub(1);
         v.get(i).copied().unwrap_or(0.0)
     }
+    fn max(&self) -> f64 {
+        self.lat.iter().copied().fold(0.0, f64::max)
+    }
 }
 
 fn scalar(v: i64) -> Value {
@@ -397,7 +400,13 @@ fn json_handle(node: &mut Node, line: &str) -> String {
     }
 }
 
-fn bench_tcp_json(jobs: &[Feeds], handle: &str, listing: &str, outs: &[&str]) -> Stats {
+fn bench_tcp_json(
+    jobs: &[Feeds],
+    refs: &[BTreeMap<String, Vec<u8>>],
+    handle: &str,
+    listing: &str,
+    outs: &[&str],
+) -> Stats {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let h = spawn_json_server(listener);
@@ -427,6 +436,19 @@ fn bench_tcp_json(jobs: &[Feeds], handle: &str, listing: &str, outs: &[&str]) ->
             Some(true),
             "json exec failed: {r}"
         );
+        // Decode the returned streams and compare exact bytes, like
+        // the in-process and framed arms (nothing is claimed without
+        // this comparison).
+        let roundtrip = payload::feeds_from_json(
+            &json!({"streams": r.get("streams").cloned().unwrap_or(json!({}))}),
+        )
+        .expect("json response streams decode");
+        let mut got = BTreeMap::new();
+        for o in outs {
+            let (_, bytes) = encode_stream(roundtrip.get(*o).unwrap()).unwrap();
+            got.insert((*o).to_string(), bytes);
+        }
+        assert_eq!(got, refs[i]);
     }
     drop(reader);
     drop(stream);
@@ -482,7 +504,7 @@ fn bench_shelf(jobs_n: usize, n: usize) {
             let _ = node.request(s).unwrap();
         }
         let mut st = Stats::default();
-        for i in 0..jobs_n {
+        for (i, expected) in refs.iter().cloned().enumerate().take(jobs_n) {
             let s = shelf_scalar(i as i64);
             let (frame, wlen) = if shelf {
                 let (ss, bs) = encode_stream(&s).unwrap();
@@ -515,7 +537,7 @@ fn bench_shelf(jobs_n: usize, n: usize) {
             st.lat.push(t0.elapsed().as_secs_f64() * 1e3);
             st.wire_req += wlen;
             st.wire_resp += resp.len();
-            assert_eq!(exec_outputs(&resp).unwrap(), refs[i]);
+            assert_eq!(exec_outputs(&resp).unwrap(), expected);
         }
         st
     };
@@ -548,7 +570,7 @@ fn bench_shelf(jobs_n: usize, n: usize) {
             let _ = read_frame(&mut stream);
         }
         let mut st = Stats::default();
-        for i in 0..jobs_n {
+        for (i, expected) in refs.iter().cloned().enumerate().take(jobs_n) {
             let (frame, wlen) = if shelf {
                 let s = shelf_scalar(i as i64);
                 let (ss, bs) = encode_stream(&s).unwrap();
@@ -568,7 +590,7 @@ fn bench_shelf(jobs_n: usize, n: usize) {
             st.lat.push(t0.elapsed().as_secs_f64() * 1e3);
             st.wire_req += wlen;
             st.wire_resp += resp.len();
-            assert_eq!(exec_outputs(&resp).unwrap(), refs[i]);
+            assert_eq!(exec_outputs(&resp).unwrap(), expected);
         }
         drop(stream);
         let _ = h.join();
@@ -585,7 +607,10 @@ fn bench_shelf(jobs_n: usize, n: usize) {
         n,
         bytes_b.len()
     );
-    println!("mode               median  p99     jobs/s   bytes/job");
+    println!(
+        "labels: clock=host_wall, scope=end_to_end, kind=measured, runs={jobs_n}, machine=local"
+    );
+    println!("mode               median  p99     max     jobs/s   bytes/job");
     for (name, st) in [
         ("inproc-inline", &a),
         ("inproc-shelf", &b_),
@@ -596,10 +621,11 @@ fn bench_shelf(jobs_n: usize, n: usize) {
         let jps = jobs_n as f64 / (total / 1e3).max(1e-9);
         let bytes_job = (st.wire_req + st.wire_resp) / jobs_n.max(1);
         println!(
-            "{:<18}{:7.3} {:7.3} {:8.1}   {}",
+            "{:<18}{:7.3} {:7.3} {:7.3} {:8.1}   {}",
             name,
             st.median(),
             st.p99(),
+            st.max(),
             jps,
             bytes_job
         );
@@ -611,6 +637,13 @@ fn bench_shelf(jobs_n: usize, n: usize) {
 }
 
 fn main() -> ExitCode {
+    match run_bench() {
+        ExitCode::SUCCESS => ExitCode::SUCCESS,
+        other => other,
+    }
+}
+
+fn run_bench() -> ExitCode {
     let mut jobs_n = 200usize;
     let mut workload = "matmul2".to_string();
     let mut n = 16384usize;
@@ -622,16 +655,52 @@ fn main() -> ExitCode {
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--jobs" => jobs_n = it.next().and_then(|x| x.parse().ok()).unwrap_or(jobs_n),
-            "--workload" => workload = it.next().unwrap_or(workload),
-            "--n" => n = it.next().and_then(|x| x.parse().ok()).unwrap_or(n),
+            "--jobs" => match it.next() {
+                Some(v) => {
+                    jobs_n = match v.parse::<usize>() {
+                        Ok(n) if n > 0 => n,
+                        _ => {
+                            eprintln!("--jobs must be a positive integer, got {v}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                }
+                None => {
+                    eprintln!("--jobs needs a value");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--workload" => match it.next() {
+                Some(v) => workload = v,
+                None => {
+                    eprintln!("--workload needs a value");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--n" => match it.next() {
+                Some(v) => {
+                    n = match v.parse::<usize>() {
+                        Ok(n) if n > 0 => n,
+                        _ => {
+                            eprintln!("--n must be a positive integer, got {v}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                }
+                None => {
+                    eprintln!("--n needs a value");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--modes" => {
-                modes = it
-                    .next()
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect()
+                let s = match it.next() {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("--modes needs a value");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                modes = s.split(',').map(|s| s.trim().to_string()).collect();
             }
             "-h" | "--help" | "help" => {
                 println!("{}", usage());
@@ -643,8 +712,22 @@ fn main() -> ExitCode {
             }
         }
     }
+    if modes.is_empty() || modes.iter().all(|m| m.is_empty()) {
+        eprintln!("--modes must name at least one mode");
+        return ExitCode::FAILURE;
+    }
+    for m in &modes {
+        if !["inproc", "tcp-frames", "tcp-json"].contains(&m.as_str()) {
+            eprintln!(
+                "unknown mode {m} (try inproc,tcp-frames,tcp-json)\n\n{}",
+                usage()
+            );
+            return ExitCode::FAILURE;
+        }
+    }
 
     if workload == "shelf" {
+        println!("note: --workload shelf uses its own inproc/tcp arms; --modes is validated but not used");
         bench_shelf(jobs_n, n);
         return ExitCode::SUCCESS;
     }
@@ -683,42 +766,53 @@ fn main() -> ExitCode {
         .map(|f| reference_for(listing, f, &outs))
         .collect();
 
+    let u8_side = if workload == "u8" && n == 16384 {
+        128
+    } else {
+        n
+    };
     let desc = match workload.as_str() {
         "vec" => format!("vec (n={n}, {} bytes listing)", listing.len()),
         "u8" => format!(
             "u8 ({}x{} = {} bytes, {} bytes listing)",
-            n,
-            n,
-            n * n,
+            u8_side,
+            u8_side,
+            u8_side * u8_side,
             listing.len()
         ),
         "f64" => format!("f64 (n={n}, {} bytes listing)", listing.len()),
         _ => format!("matmul2 ({} bytes listing)", listing.len()),
     };
     println!("jotnar-bench: {} jobs, {}", jobs_n, desc);
-    println!("mode        median  p99     jobs/s   req->resp bytes/job");
+    println!(
+        "labels: clock=host_wall, scope=end_to_end, kind=measured, runs={jobs_n}, machine=local"
+    );
+    println!("mode        median  p99     max     jobs/s   req->resp bytes/job");
+    let mut ran = 0usize;
     for mode in &modes {
         let st = match mode.as_str() {
             "inproc" => bench_inproc(&jobs, &refs, handle, listing, &outs),
             "tcp-frames" => bench_tcp_frames(&jobs, &refs, handle, listing, &outs),
-            "tcp-json" => bench_tcp_json(&jobs, handle, listing, &outs),
-            other => {
-                eprintln!("unknown mode {other}");
-                continue;
-            }
+            "tcp-json" => bench_tcp_json(&jobs, &refs, handle, listing, &outs),
+            _ => unreachable!("modes validated above"),
         };
+        ran += 1;
         let total: f64 = st.lat.iter().sum();
         let jps = jobs_n as f64 / (total / 1e3).max(1e-9);
         let bytes_job = (st.wire_req + st.wire_resp) / jobs_n.max(1);
         println!(
-            "{:<12}{:7.3} {:7.3} {:8.1} {:5}   {}",
+            "{:<12}{:7.3} {:7.3} {:7.3} {:8.1}   {}",
             mode,
             st.median(),
             st.p99(),
+            st.max(),
             jps,
-            "",
             bytes_job
         );
+    }
+    if ran == 0 {
+        eprintln!("no modes ran");
+        return ExitCode::FAILURE;
     }
     println!("determinism: all modes matched reference ({} jobs)", jobs_n);
     ExitCode::SUCCESS

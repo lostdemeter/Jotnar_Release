@@ -38,9 +38,12 @@ cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 
 ## What the numbers say
 
-Warm vs cold, one listing, many payloads (matmul2, 50 payloads):
-cold `jotnar run` 45.8 ms total vs warm `jotnar-repl` 1.7 ms total
-(~26×, 0.92 ms vs 0.03 ms per payload).
+Labels on every bench line: `clock=host_wall, scope=end_to_end,
+kind=measured, machine=local` (one machine, release build).
+
+Warm vs cold (preliminary single-run observation, not a gate: matmul2,
+50 payloads, cold `jotnar run` 45.8 ms total vs warm `jotnar-repl`
+1.7 ms total, ~26×; no checked-in reproducible command yet).
 
 Transport head-to-head (same `Node::handle`, 2000 matmul2 jobs):
 
@@ -77,3 +80,16 @@ Cross-backend float bit-identity (integer/triple are cross-target
 exact; float is exact on identical engines/orders), TLS beyond the
 loopback + `--token` trusted-LAN model, or host-side workload
 placement (that lives in the controller, by design).
+
+## Boundaries (explicit)
+
+- Loopback by default (`--bind 127.0.0.1:9999` needs no token).
+  Non-loopback binds are refused without `--token`; the token is a
+  cleartext shared secret in the JSON header, a trusted-LAN
+  convenience, not a cryptographic authenticator. No TLS.
+- One client at a time; fan-out lives in the controller.
+- No memory quota: programs/stores persist across clients until
+  `drop`. Oversize frames (`--max-frame`, 64 MiB default) are refused
+  as `error/too-large` and the connection closes.
+- The JSON arm is a benchmark/debugging aid, not a supported wire.
+- Numbers above are one-machine observations, not cross-host gates.
