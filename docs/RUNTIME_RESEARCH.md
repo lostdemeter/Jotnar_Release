@@ -158,8 +158,8 @@ cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 program tile showc
 cargo run --release --bin jotnar-bench -- --jobs 2000
 ```
 
-Bench: same 2000 matmul2 jobs (8× `i64` scalars), single sequential client
-per mode, `Node::handle` underneath in all three:
+Bench: same jobs, single sequential client per mode, `Node::handle`
+underneath in all three. Small payload (matmul2, 2000 jobs of 8× `i64`):
 
 ```text
 mode        median  p99     jobs/s   bytes/job (req->resp)
@@ -168,6 +168,30 @@ tcp-frames    0.039   0.062  24140.6         995
 tcp-json      0.061   0.088  16182.3         728
 determinism: all modes matched reference (2000 jobs)
 ```
+
+Large payload (`vec`: `OUT = IADD(X, Y)`, `n` `i64` per stream) to test
+bandwidth scaling:
+
+```text
+n=16384, 100 jobs:
+mode        median  p99     jobs/s   bytes/job
+inproc        0.186   0.579   4969.2    393566
+tcp-frames    0.495   0.701   1950.1    393566
+tcp-json      4.393   7.661    216.5    366324
+
+n=65536, 20 jobs:
+mode        median  p99     jobs/s   bytes/job
+inproc        0.854   3.069    995.5   1573214
+tcp-frames    1.949   3.640    499.6   1573214
+tcp-json     17.060  34.813     55.5   1561035
+```
+
+The frame-vs-JSON gap widens to ~9× at 64K elements and holds: in-process
+scales linearly (0.022/0.186/0.854 ms at 1K/16K/64K), frames stay within
+~2× of it, JSON is CPU-bound by the `Feeds` → JSON → frame → `EXEC`
+double conversion plus integer-string parsing. Bytes-on-wire for small
+ints can slightly favour JSON (728 vs 995 small; 366K vs 394K at 16K),
+but speed still favours frames throughout. No crossover found.
 
 Two early false starts are recorded so nobody re-litigates them:
 
@@ -191,24 +215,31 @@ Prototype 1 numbers also landed: warm REPL vs cold CLI for 50× matmul2
 payloads was 1.7 ms total vs 45.8 ms total (26×), i.e. 0.03 ms vs
 0.92 ms per payload.
 
+Footprint check (measured, not assumed): `jotnar-node`/`jotnar-repl`
+are both 4.2M (3.3M stripped), `jotnar-ctl` is 804K because it never
+links the interpreter. `nm` shows zero `png` symbols in the REPL binary
+and no DOOM/Verilog strings — dead-code elimination already removes
+rv32/showcase/codegen/image from node/REPL builds. The remaining text
+(~3.2M) is the 90-mnemonic registry + `phi-core` substrate, i.e. the
+actual language. A feature split would save only a few percent of
+already-eliminated code and would fork maintenance for it, so it is
+deferred until measurements say otherwise. Ship stripped binaries.
+
 ## 6. Open questions / next measurements
 
-1. Larger payloads: rerun the bench with a `U8` image blob (e.g.
-   256×256) and a float stream. Expect the frame advantage to widen
-   (JSON inflates binary as numbers/strings); frames should stay ~10 µs
-   + bandwidth-proportional. This is the remaining gap in Section 3b.
+1. Larger payloads beyond `i64` vectors: a `U8` image blob (e.g.
+   256×256) and a float stream through the same bench, plus the blob
+   shelf pattern (`store` once, `EXEC` by name) where frames avoid
+   re-sending bytes entirely. Expect frames to stay ~10 µs + bandwidth.
 2. Float vs integer paths: integer/triple are exact; float can differ in
    last ulp across reduction order. The node must not claim bit-identity
    for float across backends — docs already scope this; the transport
    benchmark must compare like-for-like.
-3. Footprint: try a feature-gated minimal binary (no `image`, no `rv32`,
-   no `codegen`) and record size/time deltas. If the win is <20% it is
-   not worth the maintenance split.
-4. Security: the framed node has no auth. Before exposing beyond
+3. Security: the framed node has no auth. Before exposing beyond
    localhost, decide: bind-address default to loopback (already the
    default), bearer token, or mTLS. Protocol `v` bump discipline if the
    header gains fields.
-5. Versioning: `PROTO_V=1`; any new message type (e.g. `hello`) must keep
+4. Versioning: `PROTO_V=1`; any new message type (e.g. `hello`) must keep
    `Node::handle` source-compatible or bump the version with a migration
    note.
 
