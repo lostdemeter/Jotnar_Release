@@ -104,6 +104,15 @@ A certificate looks like:
 - Every accepted kernel result has an auditable certificate, and the
   no-regression count is explicit.
 
+## How it relates to the learned agent
+
+This showcase uses an exhaustive bounded search over 65 ordered pipelines, not
+the learned state-effect model. At this scale exhaustive search is the stronger
+choice. The reusable contribution is the certified loop around it: exact
+interpreter gate, held-out evaluation, C/non-FPU parity, per-program
+certificates, and no-regression accounting. The learned model is for larger
+action spaces where exhaustive enumeration is not practical.
+
 ## What it does not show
 
 - It is not a general compiler optimizer. The pass menu and corpus are fixed
