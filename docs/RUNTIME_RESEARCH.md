@@ -225,25 +225,65 @@ actual language. A feature split would save only a few percent of
 already-eliminated code and would fork maintenance for it, so it is
 deferred until measurements say otherwise. Ship stripped binaries.
 
-## 6. Open questions / next measurements
+## 6. Phase 2 results: image/float payloads, blob shelf, auth
 
-1. Larger payloads beyond `i64` vectors: a `U8` image blob (e.g.
-   256×256) and a float stream through the same bench, plus the blob
-   shelf pattern (`store` once, `EXEC` by name) where frames avoid
-   re-sending bytes entirely. Expect frames to stay ~10 µs + bandwidth.
-2. Float vs integer paths: integer/triple are exact; float can differ in
-   last ulp across reduction order. The node must not claim bit-identity
-   for float across backends — docs already scope this; the transport
-   benchmark must compare like-for-like.
-3. Security: the framed node has no auth. Before exposing beyond
-   localhost, decide: bind-address default to loopback (already the
-   default), bearer token, or mTLS. Protocol `v` bump discipline if the
-   header gains fields.
-4. Versioning: `PROTO_V=1`; any new message type (e.g. `hello`) must keep
-   `Node::handle` source-compatible or bump the version with a migration
-   note.
+`jotnar-bench --workload u8|f64|shelf` added:
 
-## 7. How to extend this without rework
+```text
+u8 128x128 (16KB U8 -> F32), 100 jobs:
+inproc        0.273   0.353   3452.4    82199 B/job
+tcp-frames    0.410   0.560   2596.5    82199 B/job
+tcp-json      1.400   2.571    660.6   380881 B/job   (4.6x bloat vs frames)
+
+u8 256x256 (65KB U8), 50 jobs:
+inproc        1.212   1.798    798.0   327960 B/job
+tcp-frames    1.543   1.883    634.2   327960 B/job
+tcp-json      5.784  10.574    158.9  1522897 B/job   (4.6x bloat vs frames)
+
+f64 (I2F, n=16384, 100 jobs):
+inproc        0.286   0.483   3337.2   262421 B/job
+tcp-frames    0.373   0.554   2611.7   262421 B/job
+tcp-json      2.241   4.215    423.3   263427 B/job
+
+shelf (B n=16384 stored once, S scalar/job), 100 jobs:
+inproc-inline 0.289   0.438   3240.9   262494 B/job
+inproc-shelf  0.268   0.406   3294.4   131367 B/job
+tcp-inline    0.338   0.494   2842.1   262494 B/job
+tcp-shelf     0.330   0.481   2970.3   131367 B/job
+```
+
+Takeaways:
+
+- Image blobs make JSON inflation visible (4.6× bytes vs frames at
+  256×256). Float outputs are byte-identical in-process vs over the wire
+  on the same engine, which is the correct scope: integer/triple are
+  cross-target exact; float is exact for identical engines/orders, not
+  across reduction orders. The node never claims cross-backend float
+  identity.
+- The blob shelf halves steady-state bytes for this workload (262K ->
+  131K per job) and speeds jobs slightly, since the 131K store is paid
+  once and steady-state `EXEC` references `B` by name with zero input
+  bytes for it. The wins grow with jobs served and with output/input
+  size ratios that favour reuse (weights, maps).
+
+Security: `jotnar-node` defaults to loopback. Non-loopback binds are
+refused without `--token` (shared-secret header `"auth"`, rejected as
+`error/unauthorized` by `Node::handle` before dispatch). `jotnar-ctl`
+sends it via `--token`. Threat model is a trusted LAN/cluster; there is
+no TLS in v1. `PROTO_V` discipline: optional header fields (like
+`"auth"`) do not bump the version; breaking header-semantics changes
+do, with a migration note. Frames over `--max-frame` are rejected as
+`error/too-large` and the connection is closed.
+
+## 7. Remaining open questions
+
+1. Line-at-a-time (3a/B) interaction and `npy`/raw payload adapters are
+   still deferred until a real host workload demands them.
+2. TLS/mTLS is deferred until a deployment beyond loopback + token
+   appears. The token field is the seam: it would ride the same header
+   without touching `Node::handle` dispatch.
+
+## 8. How to extend this without rework
 
 - The REPL loop is the same `Node::handle` boundary minus the registry:
   swapping stdin for TCP and swapping NDJSON payloads for framed
@@ -251,11 +291,11 @@ deferred until measurements say otherwise. Ship stripped binaries.
 - If line-at-a-time (3a/B) proves necessary, slot it in behind the same
   NDJSON loop as a different `cmd` (e.g. `{"cmd":"step",...}`), not as a
   new binary.
-- The bench (Section 5) answered the open transport question: frames won,
-  so the frame path stays the canonical one for the determinism gate and
-  the JSON arm is kept only as a benchmark/debugging aid.
+- The bench (Sections 5-6) answered the open transport question: frames
+  won, so the frame path stays the canonical one for the determinism gate
+  and the JSON arm is kept only as a benchmark/debugging aid.
 
 ---
 
-Generated locally on branch `runtime-interpreter`. No push intended until
-reviewed.
+Generated locally on branch `runtime-interpreter`. PR-ready: see
+`showcase/runtime/` for the exhibit and `docs/USAGE.md` for the CLI.

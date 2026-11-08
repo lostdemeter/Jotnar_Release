@@ -65,10 +65,11 @@ bit-exactly.
 - `jotnar-main`'s **device** emitter and the CUDA fleet kernel used by the
   original DOOM GPU demo. The RV32IM machine, checkpoint/MMIO path, native
   DOOM frame, C/non-FPU/CUDA targets, and Verilog backend are in place.
-- TCP transport and serve mode (`live=` resident loops), packed outputs,
+- Serve mode (`live=` resident loops), packed outputs,
   the codec ABI, CUDA graphs, tracing summaries, causal `overrides`, and
   the store-hook fused executor. The in-process frame codec, registry, blob
-  shelf, and deterministic EXEC path are in place.
+  shelf, deterministic EXEC path, and TCP transport (`jotnar-node`) are
+  in place.
 - The model-side phi-core modules (`calibrate`, `score`, `compose`, `stamp`,
   `zoo`); the substrate crate covers the lattice/triple/exact helpers and
   numpy-style ops Jotnar consumes.
@@ -106,6 +107,42 @@ jotnar ops
 declared layouts and prints the DEF interface table. `run` executes and
 writes every stream (or named outputs). `--stdlib DIR` overrides `IMPORT`
 search; otherwise the frontend searches the listing directory and ancestors.
+
+## Runtime binaries (`jotnar-repl`, `jotnar-node`, `jotnar-ctl`, `jotnar-bench`)
+
+```text
+jotnar-repl <file.asm> [--stdlib DIR] [--outputs a,b] [--pretty] [--stats]
+jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]
+jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
+jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
+jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>
+jotnar-ctl  [--addr ADDR] [--token SECRET] exec <handle> --payload <payload.json> --outputs a,b
+jotnar-ctl  [--addr ADDR] [--token SECRET] drop <name>
+jotnar-bench [--jobs N] [--workload matmul2|vec|u8|f64|shelf] [--n N] [--modes inproc,tcp-frames,tcp-json]
+```
+
+```sh
+cargo run --release --bin jotnar-repl -- showcase/language/saxpy.asm --outputs OUT
+# then pipe NDJSON {"streams": {...}} lines on stdin
+
+cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999
+cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 ping
+cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 program tile showcase/language/matmul2.asm
+cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payload payload.json --outputs c00
+
+cargo run --release --bin jotnar-bench -- --jobs 2000
+cargo run --release --bin jotnar-bench -- --workload vec --n 16384 --jobs 100
+cargo run --release --bin jotnar-bench -- --workload u8 --n 128 --jobs 100
+cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
+```
+
+`jotnar-repl` assembles once, then answers one JSON payload per stdin
+line (errors are per-line `{"error": ...}`, the process stays alive).
+`jotnar-node` is the model-blind worker: framed TCP (`u32BE || JSON ||
+payload`), one client at a time, loopback by default, `--max-frame`
+(64 MiB default) and `--token` for non-loopback binds. See
+`docs/RUNTIME_RESEARCH.md` for the transport measurements and
+`showcase/runtime/` for the exhibit.
 
 ## Payload format
 

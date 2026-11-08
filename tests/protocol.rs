@@ -157,3 +157,22 @@ fn frame_roundtrip() {
     assert_eq!(g, h);
     assert_eq!(p, b"abc");
 }
+
+#[test]
+fn node_token_rejects_missing_and_bad_auth() {
+    let mut node = Node::new(vec!["lattice".into()]).with_token("s3cret");
+    // Missing token.
+    let f = request(1, "ping", json!({}), &[]).unwrap();
+    let (h, _) = decode_frame(&node.handle(&f)).unwrap();
+    assert_eq!(h["ok"], false);
+    assert_eq!(h["error"]["code"], "unauthorized");
+    // Wrong token.
+    let f = request(2, "ping", json!({"auth": "wrong"}), &[]).unwrap();
+    let (h, _) = decode_frame(&node.handle(&f)).unwrap();
+    assert_eq!(h["ok"], false);
+    assert_eq!(h["error"]["code"], "unauthorized");
+    // Right token.
+    let f = request(3, "ping", json!({"auth": "s3cret"}), &[]).unwrap();
+    let (h, _) = decode_frame(&node.handle(&f)).unwrap();
+    assert_eq!(h["ok"], true);
+}

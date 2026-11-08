@@ -15,7 +15,12 @@ fn warm_assemble_reuses_bound_program_across_payloads() {
     let opts = AsmOptions::new(".");
     let bound = asm::assemble(SAXPY, &opts).unwrap();
     for (a, x, y, expected) in [
-        (vec![3, 3, 3, 3], vec![1, 2, 3, 4], vec![10, 20, 30, 40], vec![13, 26, 39, 52]),
+        (
+            vec![3, 3, 3, 3],
+            vec![1, 2, 3, 4],
+            vec![10, 20, 30, 40],
+            vec![13, 26, 39, 52],
+        ),
         (vec![2, 2], vec![5, 6], vec![1, 1], vec![11, 13]),
     ] {
         let feeds = feeds_from_json(&payload(&a, &x, &y)).unwrap();

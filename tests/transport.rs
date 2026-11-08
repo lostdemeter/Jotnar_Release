@@ -61,7 +61,13 @@ fn tcp_frames_preserve_bytes_for_large_payload() {
 
     let mut client = TcpStream::connect(&addr).unwrap();
     let _ = client.set_nodelay(true);
-    let prog = request(1, "program", json!({"name": "vec", "backend": "lattice"}), VEC.as_bytes()).unwrap();
+    let prog = request(
+        1,
+        "program",
+        json!({"name": "vec", "backend": "lattice"}),
+        VEC.as_bytes(),
+    )
+    .unwrap();
     client.write_all(&prog).unwrap();
     let (h, _) = decode_frame(&read_frame(&mut client)).unwrap();
     assert_eq!(h["ok"], true);

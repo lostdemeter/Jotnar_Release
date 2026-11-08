@@ -4,6 +4,10 @@
 //! semantics are carried through channels. A node is deliberately
 //! model-blind: it sees a listing, named blobs, and typed streams, never the
 //! workload that produced them.
+//!
+//! `PROTO_V` bumps only on breaking header-semantics changes. Optional
+//! header fields (e.g. `"auth"`) are ignored by older nodes, so they do
+//! not bump the version. Unknown message types are `error/unknown-type`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -252,6 +256,7 @@ struct Stored {
 /// A model-blind node.
 pub struct Node {
     pub allowed: Vec<String>,
+    pub token: Option<String>,
     pub programs: HashMap<String, Program>,
     pub stores: HashMap<String, Stored>,
 }
@@ -260,9 +265,18 @@ impl Node {
     pub fn new(allowed: Vec<String>) -> Self {
         Node {
             allowed,
+            token: None,
             programs: HashMap::new(),
             stores: HashMap::new(),
         }
+    }
+
+    /// Require a shared `--token` from every client. Requests must
+    /// carry `"auth": "<token>"` in the header; otherwise the node
+    /// replies `error/unauthorized` before dispatching.
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
     }
 
     fn err(id: &Json, code: &str, msg: impl Into<String>) -> Vec<u8> {
@@ -288,6 +302,12 @@ impl Node {
             Err(e) => return Self::err(&json!(0), "malformed", e.to_string()),
         };
         let id = header.get("id").cloned().unwrap_or(json!(0));
+        if let Some(want) = &self.token {
+            let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
+            if got != want.as_str() {
+                return Self::err(&id, "unauthorized", "bad or missing auth token");
+            }
+        }
         let typ = header.get("type").and_then(|x| x.as_str()).unwrap_or("");
         let result = match typ {
             "ping" => Ok(Self::ok(

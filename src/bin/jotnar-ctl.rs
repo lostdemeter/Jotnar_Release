@@ -26,12 +26,12 @@ fn usage() -> &'static str {
     "jotnar-ctl - framed client for jotnar-node\n\
      \n\
      usage:\n\
-       jotnar-ctl [--addr ADDR] ping\n\
-       jotnar-ctl [--addr ADDR] list\n\
-       jotnar-ctl [--addr ADDR] program <name> <file.asm> [--backend lattice]\n\
-       jotnar-ctl [--addr ADDR] store <name> --payload <payload.json> --stream <NAME>\n\
-       jotnar-ctl [--addr ADDR] exec <handle> --payload <payload.json> --outputs a,b\n\
-       jotnar-ctl [--addr ADDR] drop <name>\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] ping\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] list\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] exec <handle> --payload <payload.json> --outputs a,b\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] drop <name>\n\
      \n\
      --addr defaults to 127.0.0.1:9999. --payload is the JSON shape from\n\
      `jotnar run --payload` (`{\"streams\": {...}}`).\n"
@@ -44,14 +44,33 @@ fn connect(addr: &str) -> Result<TcpStream, String> {
 }
 
 /// Send one framed request, return `(header, payload)` of the reply.
-fn roundtrip(stream: &mut TcpStream, id: u64, typ: &str, fields: Json, payload: &[u8]) -> Result<(Json, Vec<u8>), String> {
+fn roundtrip(
+    stream: &mut TcpStream,
+    id: u64,
+    typ: &str,
+    fields: Json,
+    payload: &[u8],
+    token: &Option<String>,
+) -> Result<(Json, Vec<u8>), String> {
+    let mut fields = fields;
+    if let Some(t) = token {
+        if let Some(o) = fields.as_object_mut() {
+            o.insert("auth".into(), json!(t));
+        }
+    }
     let frame = jotnar::protocol::request(id, typ, fields, payload).map_err(|e| e.to_string())?;
-    stream.write_all(&frame).map_err(|e| format!("write: {e}"))?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("write: {e}"))?;
     let mut hdr = [0u8; 4];
-    stream.read_exact(&mut hdr).map_err(|e| format!("read header: {e}"))?;
+    stream
+        .read_exact(&mut hdr)
+        .map_err(|e| format!("read header: {e}"))?;
     let n = u32::from_be_bytes(hdr) as usize;
     let mut body = vec![0u8; n];
-    stream.read_exact(&mut body).map_err(|e| format!("read body: {e}"))?;
+    stream
+        .read_exact(&mut body)
+        .map_err(|e| format!("read body: {e}"))?;
     let mut full = Vec::with_capacity(4 + n);
     full.extend_from_slice(&hdr);
     full.extend_from_slice(&body);
@@ -62,7 +81,10 @@ fn ok_or_show(header: &Json) -> Result<(), String> {
     if header.get("ok").and_then(|x| x.as_bool()) == Some(true) {
         Ok(())
     } else {
-        Err(format!("node error: {}", header.get("error").cloned().unwrap_or(json!("?"))))
+        Err(format!(
+            "node error: {}",
+            header.get("error").cloned().unwrap_or(json!("?"))
+        ))
     }
 }
 
@@ -79,9 +101,19 @@ fn main() -> ExitCode {
 fn real_main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut addr = "127.0.0.1:9999".to_string();
-    while args.first().map(|s| s.as_str()) == Some("--addr") {
-        args.remove(0);
-        addr = args.remove(0);
+    let mut token: Option<String> = None;
+    loop {
+        match args.first().map(|s| s.as_str()) {
+            Some("--addr") => {
+                args.remove(0);
+                addr = args.remove(0);
+            }
+            Some("--token") => {
+                args.remove(0);
+                token = Some(args.remove(0));
+            }
+            _ => break,
+        }
     }
     if args.is_empty() {
         return Err(usage().to_string());
@@ -90,12 +122,12 @@ fn real_main() -> Result<(), String> {
     let mut stream = connect(&addr)?;
     match cmd.as_str() {
         "ping" => {
-            let (h, _) = roundtrip(&mut stream, 1, "ping", json!({}), &[])?;
+            let (h, _) = roundtrip(&mut stream, 1, "ping", json!({}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
         "list" => {
-            let (h, _) = roundtrip(&mut stream, 2, "list", json!({}), &[])?;
+            let (h, _) = roundtrip(&mut stream, 2, "list", json!({}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
@@ -115,9 +147,16 @@ fn real_main() -> Result<(), String> {
                     other => return Err(format!("unknown argument '{other}'")),
                 }
             }
-            let listing = std::fs::read(&file)
-                .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-            let (h, _) = roundtrip(&mut stream, 3, "program", json!({"name": name, "backend": backend}), &listing)?;
+            let listing =
+                std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let (h, _) = roundtrip(
+                &mut stream,
+                3,
+                "program",
+                json!({"name": name, "backend": backend}),
+                &listing,
+                &token,
+            )?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
@@ -134,7 +173,7 @@ fn real_main() -> Result<(), String> {
                 .clone();
             let (spec, bytes) = encode_stream(&v).map_err(|e| e.to_string())?;
             let fields = json!({"name": name, "stream": spec.json()});
-            let (h, _) = roundtrip(&mut stream, 4, "store", fields, &bytes)?;
+            let (h, _) = roundtrip(&mut stream, 4, "store", fields, &bytes, &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
@@ -157,8 +196,9 @@ fn real_main() -> Result<(), String> {
                 su(sj.as_object_mut(), "len", json!(bytes.len()));
                 inputs.insert(name.clone(), sj);
             }
-            let fields = json!({"handle": handle, "inputs": Json::Object(inputs), "outputs": outputs});
-            let (h, resp) = roundtrip(&mut stream, 5, "exec", fields, &body)?;
+            let fields =
+                json!({"handle": handle, "inputs": Json::Object(inputs), "outputs": outputs});
+            let (h, resp) = roundtrip(&mut stream, 5, "exec", fields, &body, &token)?;
             ok_or_show(&h)?;
             // Decode outputs to JSON streams where specs are present.
             let mut out_streams = serde_json::Map::new();
@@ -167,18 +207,26 @@ fn real_main() -> Result<(), String> {
                     let spec = StreamSpec::from_json(s).map_err(|e| e.to_string())?;
                     let off = s.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                     let len = s.get("len").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    let v = decode_stream(&spec, &resp[off..off + len]).map_err(|e| e.to_string())?;
-                    out_streams.insert(name.clone(), payload::value_to_json(&v).map_err(|e| e.to_string())?);
+                    let v =
+                        decode_stream(&spec, &resp[off..off + len]).map_err(|e| e.to_string())?;
+                    out_streams.insert(
+                        name.clone(),
+                        payload::value_to_json(&v).map_err(|e| e.to_string())?,
+                    );
                 }
             }
-            println!("{}", serde_json::to_string_pretty(&json!({"streams": Json::Object(out_streams)})).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"streams": Json::Object(out_streams)}))
+                    .unwrap()
+            );
         }
         "drop" => {
             if args.is_empty() {
                 return Err(format!("drop needs <name>\n\n{}", usage()));
             }
             let name = args.remove(0);
-            let (h, _) = roundtrip(&mut stream, 6, "drop", json!({"name": name}), &[])?;
+            let (h, _) = roundtrip(&mut stream, 6, "drop", json!({"name": name}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
@@ -189,7 +237,9 @@ fn real_main() -> Result<(), String> {
 }
 
 fn su(m: Option<&mut serde_json::Map<String, Json>>, k: &str, v: Json) {
-    if let Some(o) = m { o.insert(k.to_string(), v); }
+    if let Some(o) = m {
+        o.insert(k.to_string(), v);
+    }
 }
 
 fn read_feeds(path: &PathBuf) -> Result<Feeds, String> {
@@ -208,7 +258,10 @@ fn parse_payload_args(args: &[String]) -> Result<(PathBuf, String), String> {
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
-    Ok((file.ok_or("--payload is required")?, stream_name.ok_or("--stream is required")?))
+    Ok((
+        file.ok_or("--payload is required")?,
+        stream_name.ok_or("--stream is required")?,
+    ))
 }
 
 fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
@@ -226,8 +279,13 @@ fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
-    Ok((file.ok_or("--payload is required")?, outputs.ok_or("--outputs is required")?))
+    Ok((
+        file.ok_or("--payload is required")?,
+        outputs.ok_or("--outputs is required")?,
+    ))
 }
 
 #[allow(dead_code)]
-fn _v() -> u64 { PROTO_V }
+fn _v() -> u64 {
+    PROTO_V
+}

@@ -14,7 +14,7 @@ The full certificate/schema story is in the trust-spine appendix
 | **DOOM** | <img src="doom/title.png" width="420" alt="DOOM title screen running on the Rust RV32IM core"> |
 | **Analog filter** | <img src="analog_filter/edge_panel.png" width="520" alt="Target / Laplace / RC / best Perona-Malik panel"> |
 
-## The eight exhibits
+## The nine exhibits
 
 ### 1. Language tour
 
@@ -99,8 +99,8 @@ cargo run --release --bin jotnar-demo-protocol
 
 Proves: same program + same input bytes = same output bytes regardless of
 placement or completion order.
-Does not prove: TCP transport, multi-stage pipelines, or the `served`
-backend.
+Does not prove: multi-stage pipelines or the `served` backend.
+TCP transport for this protocol is now exhibit 9.
 
 ### 7. DOOM on RV32IM
 
@@ -133,6 +133,24 @@ Image: [`analog_filter/edge_panel.png`](analog_filter/edge_panel.png).
 Proves: the best synthetic PM gain is about 4% relative for about 10× the
 Laplace cost; on the real hole it is worse.
 Does not prove: analog hardware speed or that a local PDE replaces geometry.
+
+### 9. Interpreter + model-blind node
+
+Warm execution without compiling: `jotnar-repl` assembles once locally,
+`jotnar-node` serves the same deterministic boundary over TCP, and
+`jotnar-bench` measures framed vs JSON transport head-to-head.
+
+```sh
+cargo run --release --bin jotnar-repl -- showcase/language/saxpy.asm --outputs OUT
+cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999 &
+cargo run --release --bin jotnar-ctl  -- --addr 127.0.0.1:9999 ping
+cargo run --release --bin jotnar-bench -- --jobs 2000
+```
+
+Proves: warm local and remote execution share one deterministic
+boundary with no per-command compile step.
+Does not prove: cross-backend float identity, TLS beyond loopback +
+token, or host-side placement (that lives in the controller).
 
 ## Trust spine
 

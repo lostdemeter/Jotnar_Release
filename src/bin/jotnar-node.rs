@@ -29,10 +29,11 @@ fn usage() -> &'static str {
     "jotnar-node - TCP server for the Jotnar node protocol\n\
      \n\
      usage:\n\
-       jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--stats]\n\
+       jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]\n\
      \n\
      ADDR defaults to 127.0.0.1:9999. --allow defaults to lattice.\n\
-     --max-frame defaults to 67108864 (64 MiB). --stats logs per-request ms.\n"
+     --max-frame defaults to 67108864 (64 MiB). --stats logs per-request ms.\n\
+     Non-loopback binds require --token (trusted-LAN requirement).\n"
 }
 
 struct Config {
@@ -40,6 +41,7 @@ struct Config {
     allowed: Vec<String>,
     max_frame: usize,
     stats: bool,
+    token: Option<String>,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -48,6 +50,7 @@ fn parse_args() -> Result<Config, String> {
         allowed: vec!["lattice".to_string()],
         max_frame: 64 * 1024 * 1024,
         stats: false,
+        token: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -61,12 +64,19 @@ fn parse_args() -> Result<Config, String> {
                 let s = it.next().ok_or("--max-frame needs a byte count")?;
                 cfg.max_frame = s.parse().map_err(|_| "--max-frame must be an integer")?;
             }
+            "--token" => cfg.token = Some(it.next().ok_or("--token needs a secret")?),
             "--stats" => cfg.stats = true,
             "-h" | "--help" | "help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
     }
     Ok(cfg)
+}
+
+fn is_loopback_bind(bind: &str) -> bool {
+    // Accepts 127.*, localhost, [::1], ::1, 0.0.0.0 is NOT loopback-safe.
+    let host = bind.rsplit(':').next().unwrap_or(bind);
+    host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]"
 }
 
 /// Read one frame body: `u32BE` prefix already peeked at. Returns the
@@ -80,7 +90,11 @@ fn read_frame(stream: &mut TcpStream, max_frame: usize) -> Option<Result<Vec<u8>
     }
     let n = u32::from_be_bytes(hdr) as usize;
     if n > max_frame {
-        let _ = stream.write_all(&error_frame(&json!(0), "too-large", "frame exceeds max-frame"));
+        let _ = stream.write_all(&error_frame(
+            &json!(0),
+            "too-large",
+            "frame exceeds max-frame",
+        ));
         return Some(Err(()));
     }
     let mut body = vec![0u8; n];
@@ -103,7 +117,12 @@ fn serve(stream: &mut TcpStream, node: &mut Node, cfg: &Config) -> std::io::Resu
         let t0 = Instant::now();
         let out = node.handle(&frame);
         if cfg.stats {
-            eprintln!("req {:.3}ms ({} B -> {} B)", t0.elapsed().as_secs_f64() * 1e3, frame.len(), out.len());
+            eprintln!(
+                "req {:.3}ms ({} B -> {} B)",
+                t0.elapsed().as_secs_f64() * 1e3,
+                frame.len(),
+                out.len()
+            );
         }
         stream.write_all(&out)?;
     }
@@ -121,10 +140,23 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let cfg = parse_args()?;
+    if !is_loopback_bind(&cfg.bind) && cfg.token.is_none() {
+        return Err(format!(
+            "refusing non-loopback bind {} without --token: the node protocol has no TLS; run on a trusted LAN with a shared token\n\n{}",
+            cfg.bind,
+            usage()
+        ));
+    }
     let listener =
         TcpListener::bind(&cfg.bind).map_err(|e| format!("cannot bind {}: {e}", cfg.bind))?;
-    eprintln!("jotnar-node v{} listening on {} (allowed {:?})", PROTO_V, cfg.bind, cfg.allowed);
+    eprintln!(
+        "jotnar-node v{} listening on {} (allowed {:?})",
+        PROTO_V, cfg.bind, cfg.allowed
+    );
     let mut node = Node::new(cfg.allowed.clone());
+    if let Some(t) = cfg.token.clone() {
+        node = node.with_token(t);
+    }
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {

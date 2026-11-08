@@ -58,7 +58,9 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, 
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--stdlib" => {
-                stdlib = Some(PathBuf::from(it.next().ok_or("--stdlib needs a directory")?))
+                stdlib = Some(PathBuf::from(
+                    it.next().ok_or("--stdlib needs a directory")?,
+                ))
             }
             "--outputs" => {
                 let s = it.next().ok_or("--outputs needs a comma list")?;
@@ -74,7 +76,10 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, 
 }
 
 fn options_for(path: &std::path::Path, stdlib: Option<PathBuf>) -> AsmOptions {
-    let basedir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let basedir = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
     let mut opts = AsmOptions::new(basedir);
     opts.stdlib = stdlib;
     opts.origin = Some(path.display().to_string());
@@ -163,7 +168,10 @@ fn real_main() -> Result<(), String> {
         let input: Json = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                println!("{}", render(&repl, &json!({"error": format!("bad json: {e}")})));
+                println!(
+                    "{}",
+                    render(&repl, &json!({"error": format!("bad json: {e}")}))
+                );
                 continue;
             }
         };

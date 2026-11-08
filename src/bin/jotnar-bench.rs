@@ -40,23 +40,30 @@ use serde_json::{json, Value as Json};
 
 use jotnar::payload::{self, Feeds};
 use jotnar::protocol::{
-    decode_frame, decode_stream, encode_stream, exec_outputs, request, Node, NodeHandle,
-    StreamSpec,
+    decode_frame, decode_stream, encode_stream, exec_outputs, request, Node, NodeHandle, StreamSpec,
 };
 use jotnar::value::Value;
 
 const MATMUL_LISTING: &str = include_str!("../../showcase/language/matmul2.asm");
 const VEC_LISTING: &str = "IN X\nIN Y\nOUT = IADD(X, Y)\n";
+const U8_LISTING: &str = "IN RGB\nOUT = SRGB_DECODE(RGB)\n";
+const F64_LISTING: &str = "IN X\nOUT = I2F(X)\n";
+const SHELF_LISTING: &str = "IN B\nIN S\nOUT = IADD(B, S)\n";
 const NAMES: [&str; 8] = ["a00", "a01", "a10", "a11", "b00", "b01", "b10", "b11"];
 const MATMUL_OUTS: [&str; 4] = ["c00", "c01", "c10", "c11"];
 const VEC_OUTS: [&str; 1] = ["OUT"];
+const U8_OUTS: [&str; 1] = ["OUT"];
+const F64_OUTS: [&str; 1] = ["OUT"];
+const SHELF_OUTS: [&str; 1] = ["OUT"];
 
 fn usage() -> &'static str {
     "jotnar-bench - transport benchmark (in-process vs TCP frames vs TCP JSON)\n\
      \n\
-     usage: jotnar-bench [--jobs N] [--workload matmul2|vec] [--n N] [--modes inproc,tcp-frames,tcp-json]\n\
+     usage: jotnar-bench [--jobs N] [--workload matmul2|vec|u8|f64|shelf] [--n N] [--modes inproc,tcp-frames,tcp-json]\n\
      \n\
-     --workload defaults to matmul2. --n sets vector length for vec (default 16384).\n"
+     --workload defaults to matmul2. --n sets vector length for vec/f64/shelf\n\
+     (default 16384) and side length for u8 (default 128, i.e. 128x128).\n\
+     shelf stores a large B once and references it by name per EXEC.\n"
 }
 
 #[derive(Default)]
@@ -107,6 +114,27 @@ fn vec_feeds(seed: i64, n: usize) -> Feeds {
     f
 }
 
+fn u8_feeds(seed: usize, side: usize) -> Feeds {
+    let total = side * side;
+    let bytes: Vec<u8> = (0..total).map(|i| ((seed + i) % 256) as u8).collect();
+    let mut f = Feeds::new();
+    f.insert(
+        "RGB".to_string(),
+        Value::U8(jotnar::value::array_from_vec(&[side, side], bytes).unwrap()),
+    );
+    f
+}
+
+fn f64_feeds(seed: i64, n: usize) -> Feeds {
+    let xs: Vec<i64> = (0..n as i64).map(|i| seed + i * 7).collect();
+    let mut f = Feeds::new();
+    f.insert(
+        "X".to_string(),
+        Value::I64(jotnar::value::array_from_vec(&[n], xs).unwrap()),
+    );
+    f
+}
+
 fn reference_for(listing: &str, feeds: &Feeds, outs: &[&str]) -> BTreeMap<String, Vec<u8>> {
     let got = jotnar::run_text(listing, &jotnar::asm::AsmOptions::new("."), feeds)
         .expect("reference run");
@@ -152,9 +180,21 @@ fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
     full
 }
 
-fn bench_inproc(jobs: &[Feeds], refs: &[BTreeMap<String, Vec<u8>>], handle: &str, listing: &str, outs: &[&str]) -> Stats {
+fn bench_inproc(
+    jobs: &[Feeds],
+    refs: &[BTreeMap<String, Vec<u8>>],
+    handle: &str,
+    listing: &str,
+    outs: &[&str],
+) -> Stats {
     let node = NodeHandle::spawn(0, &["lattice"]);
-    let f = request(1, "program", json!({"name": handle, "backend": "lattice"}), listing.as_bytes()).unwrap();
+    let f = request(
+        1,
+        "program",
+        json!({"name": handle, "backend": "lattice"}),
+        listing.as_bytes(),
+    )
+    .unwrap();
     let _ = node.request(f).unwrap();
     let mut st = Stats::default();
     for (i, feeds) in jobs.iter().enumerate() {
@@ -199,13 +239,25 @@ fn spawn_frames_server(listener: TcpListener) -> thread::JoinHandle<()> {
     })
 }
 
-fn bench_tcp_frames(jobs: &[Feeds], refs: &[BTreeMap<String, Vec<u8>>], handle: &str, listing: &str, outs: &[&str]) -> Stats {
+fn bench_tcp_frames(
+    jobs: &[Feeds],
+    refs: &[BTreeMap<String, Vec<u8>>],
+    handle: &str,
+    listing: &str,
+    outs: &[&str],
+) -> Stats {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let h = spawn_frames_server(listener);
     let mut stream = TcpStream::connect(&addr).unwrap();
     let _ = stream.set_nodelay(true);
-    let prog = request(1, "program", json!({"name": handle, "backend": "lattice"}), listing.as_bytes()).unwrap();
+    let prog = request(
+        1,
+        "program",
+        json!({"name": handle, "backend": "lattice"}),
+        listing.as_bytes(),
+    )
+    .unwrap();
     stream.write_all(&prog).unwrap();
     let _ = read_frame(&mut stream);
     let mut st = Stats::default();
@@ -259,14 +311,22 @@ fn spawn_json_server(listener: TcpListener) -> thread::JoinHandle<()> {
 fn json_handle(node: &mut Node, line: &str) -> String {
     let v: Json = match serde_json::from_str(line) {
         Ok(x) => x,
-        Err(e) => return serde_json::to_string(&json!({"ok": false, "error": e.to_string()})).unwrap(),
+        Err(e) => {
+            return serde_json::to_string(&json!({"ok": false, "error": e.to_string()})).unwrap()
+        }
     };
     let id = v.get("id").cloned().unwrap_or(json!(0));
     match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
         "program" => {
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
             let listing = v.get("listing").and_then(|x| x.as_str()).unwrap_or("");
-            let f = request(id.as_u64().unwrap_or(0), "program", json!({"name": name, "backend": "lattice"}), listing.as_bytes()).unwrap();
+            let f = request(
+                id.as_u64().unwrap_or(0),
+                "program",
+                json!({"name": name, "backend": "lattice"}),
+                listing.as_bytes(),
+            )
+            .unwrap();
             let (h, _) = decode_frame(&node.handle(&f)).unwrap();
             serde_json::to_string(&h).unwrap()
         }
@@ -274,12 +334,19 @@ fn json_handle(node: &mut Node, line: &str) -> String {
             let payload = v.get("payload").cloned().unwrap_or(json!({"streams": {}}));
             let feeds = match payload::feeds_from_json(&payload) {
                 Ok(f) => f,
-                Err(e) => return serde_json::to_string(&json!({"ok": false, "error": e.to_string()})).unwrap(),
+                Err(e) => {
+                    return serde_json::to_string(&json!({"ok": false, "error": e.to_string()}))
+                        .unwrap()
+                }
             };
             let outs: Vec<String> = v
                 .get("outputs")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().filter_map(|o| o.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| o.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let mut inputs = serde_json::Map::new();
             let mut body = Vec::new();
@@ -293,7 +360,13 @@ fn json_handle(node: &mut Node, line: &str) -> String {
                 inputs.insert(name.clone(), sj);
             }
             let handle_name = v.get("handle").and_then(|x| x.as_str()).unwrap_or("tile");
-            let f = request(id.as_u64().unwrap_or(0), "exec", json!({"handle": handle_name, "inputs": Json::Object(inputs), "outputs": outs}), &body).unwrap();
+            let f = request(
+                id.as_u64().unwrap_or(0),
+                "exec",
+                json!({"handle": handle_name, "inputs": Json::Object(inputs), "outputs": outs}),
+                &body,
+            )
+            .unwrap();
             let resp = node.handle(&f);
             let (h, p) = decode_frame(&resp).unwrap();
             if h.get("ok").and_then(|x| x.as_bool()) != Some(true) {
@@ -301,17 +374,26 @@ fn json_handle(node: &mut Node, line: &str) -> String {
             }
             // Decode outputs back to JSON streams for the wire.
             let mut streams = serde_json::Map::new();
-            for (name, s) in h.get("outputs").and_then(|x| x.as_object()).cloned().unwrap_or_default() {
+            for (name, s) in h
+                .get("outputs")
+                .and_then(|x| x.as_object())
+                .cloned()
+                .unwrap_or_default()
+            {
                 let spec = StreamSpec::from_json(&s).unwrap();
                 let off = s.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 let len = s.get("len").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 let val = decode_stream(&spec, &p[off..off + len]).unwrap();
                 streams.insert(name.clone(), payload::value_to_json(&val).unwrap());
             }
-            serde_json::to_string(&json!({"id": id, "ok": true, "streams": Json::Object(streams)})).unwrap()
+            serde_json::to_string(&json!({"id": id, "ok": true, "streams": Json::Object(streams)}))
+                .unwrap()
         }
         "ping" => serde_json::to_string(&json!({"id": id, "ok": true, "type": "pong"})).unwrap(),
-        other => serde_json::to_string(&json!({"id": id, "ok": false, "error": format!("no such message {other:?}")})).unwrap(),
+        other => serde_json::to_string(
+            &json!({"id": id, "ok": false, "error": format!("no such message {other:?}")}),
+        )
+        .unwrap(),
     }
 }
 
@@ -340,7 +422,11 @@ fn bench_tcp_json(jobs: &[Feeds], handle: &str, listing: &str, outs: &[&str]) ->
         st.wire_req += req_line.len();
         st.wire_resp += resp_line.len();
         let r: Json = serde_json::from_str(&resp_line).unwrap();
-        assert_eq!(r.get("ok").and_then(|x| x.as_bool()), Some(true), "json exec failed: {r}");
+        assert_eq!(
+            r.get("ok").and_then(|x| x.as_bool()),
+            Some(true),
+            "json exec failed: {r}"
+        );
     }
     drop(reader);
     drop(stream);
@@ -348,18 +434,205 @@ fn bench_tcp_json(jobs: &[Feeds], handle: &str, listing: &str, outs: &[&str]) ->
     st
 }
 
+/// Shelf workload: large B stored once, tiny scalar S per job.
+/// Steady-state EXEC references B by name (zero input bytes for B).
+fn shelf_b(n: usize) -> Value {
+    let data: Vec<i64> = (0..n as i64).map(|i| i * 3).collect();
+    Value::I64(jotnar::value::array_from_vec(&[n], data).unwrap())
+}
+
+fn shelf_scalar(v: i64) -> Value {
+    Value::I64(ndarray::ArrayD::from_elem(
+        ndarray::IxDyn(&[] as &[usize]),
+        v,
+    ))
+}
+
+fn bench_shelf(jobs_n: usize, n: usize) {
+    // Reference: run once with B+S inline, then per-scalar varying S.
+    let b = shelf_b(n);
+    let mut refs = Vec::with_capacity(jobs_n);
+    for i in 0..jobs_n {
+        let mut f = Feeds::new();
+        f.insert("B".to_string(), b.clone());
+        f.insert("S".to_string(), shelf_scalar(i as i64));
+        refs.push(reference_for(SHELF_LISTING, &f, &SHELF_OUTS));
+    }
+    let (spec_b, bytes_b) = encode_stream(&b).unwrap();
+
+    // --- in-process, shelf vs inline ---
+    let inproc = |shelf: bool| -> Stats {
+        let node = NodeHandle::spawn(0, &["lattice"]);
+        let f = request(
+            1,
+            "program",
+            json!({"name": "shelf", "backend": "lattice"}),
+            SHELF_LISTING.as_bytes(),
+        )
+        .unwrap();
+        let _ = node.request(f).unwrap();
+        if shelf {
+            let s = request(
+                2,
+                "store",
+                json!({"name": "B", "stream": spec_b.json()}),
+                &bytes_b,
+            )
+            .unwrap();
+            let _ = node.request(s).unwrap();
+        }
+        let mut st = Stats::default();
+        for i in 0..jobs_n {
+            let s = shelf_scalar(i as i64);
+            let (frame, wlen) = if shelf {
+                let (ss, bs) = encode_stream(&s).unwrap();
+                let fields = json!({"handle": "shelf", "inputs": {"B": {"store": "B"}, "S": {"kind": ss.kind, "dtype": ss.dtype, "shape": ss.shape, "off": 0, "len": bs.len()}}, "outputs": SHELF_OUTS});
+                let f = request(100 + i as u64, "exec", fields, &bs).unwrap();
+                let l = f.len();
+                (f, l)
+            } else {
+                let mut f_ = Feeds::new();
+                f_.insert("B".to_string(), b.clone());
+                f_.insert("S".to_string(), s);
+                // Inline both, scalars shape [] encode as 8 bytes.
+                let mut payload = Vec::new();
+                let mut inputs = serde_json::Map::new();
+                for (name, v) in &f_ {
+                    let (spec, bytes) = encode_stream(v).unwrap();
+                    let off = payload.len();
+                    payload.extend_from_slice(&bytes);
+                    let mut sj = spec.json();
+                    sj["off"] = json!(off);
+                    sj["len"] = json!(bytes.len());
+                    inputs.insert(name.clone(), sj);
+                }
+                let f = request(100 + i as u64, "exec", json!({"handle": "shelf", "inputs": Json::Object(inputs), "outputs": SHELF_OUTS}), &payload).unwrap();
+                let l = f.len();
+                (f, l)
+            };
+            let t0 = Instant::now();
+            let resp = node.request(frame).unwrap();
+            st.lat.push(t0.elapsed().as_secs_f64() * 1e3);
+            st.wire_req += wlen;
+            st.wire_resp += resp.len();
+            assert_eq!(exec_outputs(&resp).unwrap(), refs[i]);
+        }
+        st
+    };
+
+    // --- TCP frames: one process, two modes (fresh listener each) ---
+    let tcp = |shelf: bool| -> Stats {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let h = spawn_frames_server(listener);
+        let mut stream = TcpStream::connect(&addr).unwrap();
+        let _ = stream.set_nodelay(true);
+        let prog = request(
+            1,
+            "program",
+            json!({"name": "shelf", "backend": "lattice"}),
+            SHELF_LISTING.as_bytes(),
+        )
+        .unwrap();
+        stream.write_all(&prog).unwrap();
+        let _ = read_frame(&mut stream);
+        if shelf {
+            let s = request(
+                2,
+                "store",
+                json!({"name": "B", "stream": spec_b.json()}),
+                &bytes_b,
+            )
+            .unwrap();
+            stream.write_all(&s).unwrap();
+            let _ = read_frame(&mut stream);
+        }
+        let mut st = Stats::default();
+        for i in 0..jobs_n {
+            let (frame, wlen) = if shelf {
+                let s = shelf_scalar(i as i64);
+                let (ss, bs) = encode_stream(&s).unwrap();
+                let fields = json!({"handle": "shelf", "inputs": {"B": {"store": "B"}, "S": {"kind": ss.kind, "dtype": ss.dtype, "shape": ss.shape, "off": 0, "len": bs.len()}}, "outputs": SHELF_OUTS});
+                let f = request(100 + i as u64, "exec", fields, &bs).unwrap();
+                let l = f.len();
+                (f, l)
+            } else {
+                let mut f_ = Feeds::new();
+                f_.insert("B".to_string(), b.clone());
+                f_.insert("S".to_string(), shelf_scalar(i as i64));
+                exec_frame_from_feeds(100 + i as u64, "shelf", &f_, &SHELF_OUTS)
+            };
+            let t0 = Instant::now();
+            stream.write_all(&frame).unwrap();
+            let resp = read_frame(&mut stream);
+            st.lat.push(t0.elapsed().as_secs_f64() * 1e3);
+            st.wire_req += wlen;
+            st.wire_resp += resp.len();
+            assert_eq!(exec_outputs(&resp).unwrap(), refs[i]);
+        }
+        drop(stream);
+        let _ = h.join();
+        st
+    };
+
+    let a = inproc(false);
+    let b_ = inproc(true);
+    let c = tcp(false);
+    let d = tcp(true);
+    println!(
+        "jotnar-bench: {} shelf jobs, blob B n={} ({} bytes stored once)",
+        jobs_n,
+        n,
+        bytes_b.len()
+    );
+    println!("mode               median  p99     jobs/s   bytes/job");
+    for (name, st) in [
+        ("inproc-inline", &a),
+        ("inproc-shelf", &b_),
+        ("tcp-inline", &c),
+        ("tcp-shelf", &d),
+    ] {
+        let total: f64 = st.lat.iter().sum();
+        let jps = jobs_n as f64 / (total / 1e3).max(1e-9);
+        let bytes_job = (st.wire_req + st.wire_resp) / jobs_n.max(1);
+        println!(
+            "{:<18}{:7.3} {:7.3} {:8.1}   {}",
+            name,
+            st.median(),
+            st.p99(),
+            jps,
+            bytes_job
+        );
+    }
+    println!(
+        "determinism: shelf == inline == reference ({} jobs)",
+        jobs_n
+    );
+}
+
 fn main() -> ExitCode {
     let mut jobs_n = 200usize;
     let mut workload = "matmul2".to_string();
     let mut n = 16384usize;
-    let mut modes = vec!["inproc".to_string(), "tcp-frames".to_string(), "tcp-json".to_string()];
+    let mut modes = vec![
+        "inproc".to_string(),
+        "tcp-frames".to_string(),
+        "tcp-json".to_string(),
+    ];
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--jobs" => jobs_n = it.next().and_then(|x| x.parse().ok()).unwrap_or(jobs_n),
             "--workload" => workload = it.next().unwrap_or(workload),
             "--n" => n = it.next().and_then(|x| x.parse().ok()).unwrap_or(n),
-            "--modes" => modes = it.next().unwrap_or_default().split(',').map(|s| s.trim().to_string()).collect(),
+            "--modes" => {
+                modes = it
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            }
             "-h" | "--help" | "help" => {
                 println!("{}", usage());
                 return ExitCode::SUCCESS;
@@ -371,7 +644,12 @@ fn main() -> ExitCode {
         }
     }
 
-    let (listing, handle, outs, jobs): (&str, &str, Vec<&str>, Vec<Feeds>) = match workload.as_str() {
+    if workload == "shelf" {
+        bench_shelf(jobs_n, n);
+        return ExitCode::SUCCESS;
+    }
+    let (listing, handle, outs, jobs): (&str, &str, Vec<&str>, Vec<Feeds>) = match workload.as_str()
+    {
         "matmul2" => {
             let jobs = (0..jobs_n)
                 .map(|i| {
@@ -385,17 +663,37 @@ fn main() -> ExitCode {
             let jobs = (0..jobs_n).map(|i| vec_feeds(i as i64, n)).collect();
             (VEC_LISTING, "vec", VEC_OUTS.to_vec(), jobs)
         }
+        "u8" => {
+            // For u8, --n is the side length (default sentinel 16384 -> 128).
+            let side = if n == 16384 { 128 } else { n };
+            let jobs = (0..jobs_n).map(|i| u8_feeds(i, side)).collect();
+            (U8_LISTING, "u8", U8_OUTS.to_vec(), jobs)
+        }
+        "f64" => {
+            let jobs = (0..jobs_n).map(|i| f64_feeds(i as i64, n)).collect();
+            (F64_LISTING, "f64", F64_OUTS.to_vec(), jobs)
+        }
         other => {
-            eprintln!("unknown workload {other} (try matmul2|vec)");
+            eprintln!("unknown workload {other} (try matmul2|vec|u8|f64|shelf)");
             return ExitCode::FAILURE;
         }
     };
-    let refs: Vec<BTreeMap<String, Vec<u8>>> = jobs.iter().map(|f| reference_for(listing, f, &outs)).collect();
+    let refs: Vec<BTreeMap<String, Vec<u8>>> = jobs
+        .iter()
+        .map(|f| reference_for(listing, f, &outs))
+        .collect();
 
-    let desc = if workload == "vec" {
-        format!("vec (n={n}, {} bytes listing)", listing.len())
-    } else {
-        format!("matmul2 ({} bytes listing)", listing.len())
+    let desc = match workload.as_str() {
+        "vec" => format!("vec (n={n}, {} bytes listing)", listing.len()),
+        "u8" => format!(
+            "u8 ({}x{} = {} bytes, {} bytes listing)",
+            n,
+            n,
+            n * n,
+            listing.len()
+        ),
+        "f64" => format!("f64 (n={n}, {} bytes listing)", listing.len()),
+        _ => format!("matmul2 ({} bytes listing)", listing.len()),
     };
     println!("jotnar-bench: {} jobs, {}", jobs_n, desc);
     println!("mode        median  p99     jobs/s   req->resp bytes/job");
