@@ -1,6 +1,7 @@
 # Runtime research: warm interpreter + network node
 
-Status: candidate branch for review; not merged. The goal is twofold:
+Status: merged runtime research note. TCP transport is in place; serve mode
+is still open. The goal is twofold:
 (1) a small-footprint processor that takes Jotnar listings and processes
 them like an interpreted language locally, and (2) a network stack so
 the same processor can live on another machine, model-blind, and do work
@@ -298,7 +299,6 @@ do, with a migration note. Frames over `--max-frame` are rejected as
 
 ---
 
-Candidate branch for review; not merged. See `showcase/runtime/` for the
-candidate exhibit and `docs/USAGE.md` for the CLI. All timings are local
-one-machine observations (labels: `clock=host_wall, scope=end_to_end,
-kind=measured`), not cross-host gates.
+Merged. See `showcase/runtime/` for the exhibit and `docs/USAGE.md` for the
+CLI. All timings are local one-machine observations (labels:
+`clock=host_wall, scope=end_to_end, kind=measured`), not cross-host gates.

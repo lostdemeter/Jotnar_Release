@@ -14,7 +14,7 @@ The full certificate/schema story is in the trust-spine appendix
 | **DOOM** | <img src="doom/title.png" width="420" alt="DOOM title screen running on the Rust RV32IM core"> |
 | **Analog filter** | <img src="analog_filter/edge_panel.png" width="520" alt="Target / Laplace / RC / best Perona-Malik panel"> |
 
-## The eight exhibits (+ pending runtime candidate)
+## The eight exhibits (+ runtime, pending exhibit number)
 
 ### 1. Language tour
 
@@ -135,7 +135,7 @@ Proves: the best synthetic PM gain is about 4% relative for about 10× the
 Laplace cost; on the real hole it is worse.
 Does not prove: analog hardware speed or that a local PDE replaces geometry.
 
-### Runtime candidate (pending exhibit number): interpreter + model-blind node
+### Runtime (pending exhibit number): interpreter + model-blind node
 
 Warm execution without compiling: `jotnar-repl` assembles once locally,
 `jotnar-node` serves the same deterministic boundary over TCP, and

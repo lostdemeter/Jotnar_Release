@@ -91,9 +91,14 @@ fn is_loopback_bind(bind: &str) -> bool {
     // "localhost:9999", "[::1]:9999", "127.0.0.1:9999" and
     // "0.0.0.0:9999" all classify by their IP, not the port.
     // 0.0.0.0 / :: are NOT loopback.
-    if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&bind) {
-        if let Some(first) = addrs.next() {
-            return first.ip().is_loopback();
+    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&bind) {
+        let ips: Vec<std::net::IpAddr> = addrs.map(|a| a.ip()).collect();
+        if !ips.is_empty() {
+            // Require every resolved address to be loopback. `TcpListener`
+            // may bind a later address if the first is unavailable, so a
+            // hostname resolving to both loopback and a LAN address must
+            // not be treated as loopback-safe.
+            return ips.iter().all(|ip| ip.is_loopback());
         }
     }
     // Bare hostname without a port (e.g. "localhost" already handled).
