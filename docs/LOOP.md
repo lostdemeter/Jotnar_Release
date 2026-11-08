@@ -179,7 +179,7 @@ exception path; it is a first-class result.
 
 ## Current exhibit registry
 
-The Rust rewrite currently exposes eight exhibits. They are instances of the
+The Rust rewrite currently exposes nine exhibits. They are instances of the
 same loop at different layers:
 
 | exhibit | small space | gate | does not prove |
@@ -192,6 +192,7 @@ same loop at different layers:
 | protocol | independent jobs | byte compare + placement | TCP / other backends |
 | DOOM | RV32IM checkpoint | C native + GPU state | all programs / plan completeness |
 | analog filter | edge/hole field | L1 + cost + nulls | physical analog hardware |
+| certified agent | harness/pipeline edits | exact interpreter + C/non-FPU parity | open-ended self-improvement / universal equivalence |
 
 The broader eight from the other Jotnar projects — board v2, solver, field
 guide, Yarnball, Echion, resonance/Hopfield, depth — are registered later

@@ -131,7 +131,7 @@ cargo run -p jotnar-lab -- verify certificates/example/certificate.json
 
 [The loop](docs/LOOP.md) · [Certificate schema](docs/appendix/TRUST_SPINE.md) · [Harness](crates/jotnar-lab/)
 
-## The eight exhibits
+## The nine exhibits
 
 Each one is a different angle on the same stack. The full visual index is
 [`showcase/README.md`](showcase/README.md).
@@ -146,6 +146,7 @@ Each one is a different angle on the same stack. The full visual index is
 | [Protocol](showcase/protocol/) | same bytes under order and placement changes |
 | [DOOM](showcase/doom/) | native frame exact; checkpoint frame 2 exact vs GPU |
 | [Analog filter](showcase/analog_filter/) | quality and cost, including the negative real-hole limit |
+| [Certified agent](showcase/agent/) | exact-gate harness composition; bit-exact backend pipeline with C/non-FPU parity |
 
 ## Start here
 
