@@ -28,7 +28,7 @@ pub struct StreamSpec {
 }
 
 impl StreamSpec {
-    fn from_json(v: &Json) -> Result<Self> {
+    pub fn from_json(v: &Json) -> Result<Self> {
         let kind = v
             .get("kind")
             .and_then(|x| x.as_str())
@@ -94,6 +94,14 @@ pub fn decode_frame(frame: &[u8]) -> Result<(Json, Vec<u8>)> {
         return Err(Error::runtime("protocol: header needs id + type"));
     }
     Ok((header, body[pos + 1..].to_vec()))
+}
+
+/// Build an error frame without a `Node` (for transport-level rejects
+/// such as an oversized length prefix, before `Node::handle` can run).
+pub fn error_frame(id: &Json, code: &str, msg: impl Into<String>) -> Vec<u8> {
+    let h = json!({"v": PROTO_V, "id": id, "type": "error", "ok": false,
+                   "error": {"code": code, "msg": msg.into()}});
+    encode_frame(&h, &[]).unwrap()
 }
 
 pub fn encode_stream(v: &Value) -> Result<(StreamSpec, Vec<u8>)> {

@@ -146,11 +146,57 @@ Known limits (intentional for the prototype):
 - Single listing per process; multi-program jobs belong on the network
   node (Section 3b), which already does program/blob registry per node.
 
-## 5. Open questions / next measurements
+## 5. Phase 1 results: TCP node + transport benchmark
 
-1. Python-driver latency: spawn `jotnar-repl` once and feed N payloads vs
-   N× `jotnar run`. Expect the warm loop to win by the process-spawn +
-   reassembly margin; measure at N=100 with a mid-size listing.
+Added on this branch: `jotnar-node` (TCP server wrapping `Node::handle`),
+`jotnar-ctl` (framed shell client), `jotnar-bench` (head-to-head).
+
+```sh
+cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999
+cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 ping
+cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 program tile showcase/language/matmul2.asm
+cargo run --release --bin jotnar-bench -- --jobs 2000
+```
+
+Bench: same 2000 matmul2 jobs (8× `i64` scalars), single sequential client
+per mode, `Node::handle` underneath in all three:
+
+```text
+mode        median  p99     jobs/s   bytes/job (req->resp)
+inproc        0.029   0.050  33017.1         995
+tcp-frames    0.039   0.062  24140.6         995
+tcp-json      0.061   0.088  16182.3         728
+determinism: all modes matched reference (2000 jobs)
+```
+
+Two early false starts are recorded so nobody re-litigates them:
+
+1. Without `TCP_NODELAY`, the NDJSON path measured ~41 ms/job — a Nagle
+   + delayed-ACK stall, not JSON cost. All TCP endpoints now set
+   `set_nodelay(true)` and coalesce the JSON reply into one write.
+2. The JSON variant preserves `i64` exactly via the string data form
+   (`"data":["..."]`), so it is exact here; its cost is the double
+   conversion (`Feeds` → JSON → frame → `EXEC` → frame → JSON → `Feeds`)
+   plus integer-string parsing, not base64.
+
+Verdict: **framed TCP is the canonical transport.** It costs ~10 µs over
+in-process on loopback and is ~1.6× faster than JSON with zero extra
+conversion. JSON stays a benchmark arm and a debugging aid, not a
+second supported wire. `jotnar-node` defaults to loopback, caps frames
+at 64 MiB by default (`--max-frame`, oversize → `error/too-large` and
+connection close since the NM prefix cannot be trusted), and persists
+one `Node` (program registry + blob shelf) across sequential clients.
+
+Prototype 1 numbers also landed: warm REPL vs cold CLI for 50× matmul2
+payloads was 1.7 ms total vs 45.8 ms total (26×), i.e. 0.03 ms vs
+0.92 ms per payload.
+
+## 6. Open questions / next measurements
+
+1. Larger payloads: rerun the bench with a `U8` image blob (e.g.
+   256×256) and a float stream. Expect the frame advantage to widen
+   (JSON inflates binary as numbers/strings); frames should stay ~10 µs
+   + bandwidth-proportional. This is the remaining gap in Section 3b.
 2. Float vs integer paths: integer/triple are exact; float can differ in
    last ulp across reduction order. The node must not claim bit-identity
    for float across backends — docs already scope this; the transport
@@ -159,13 +205,14 @@ Known limits (intentional for the prototype):
    no `codegen`) and record size/time deltas. If the win is <20% it is
    not worth the maintenance split.
 4. Security: the framed node has no auth. Before exposing beyond
-   localhost, decide: bind-address default to loopback, bearer token,
-   or mTLS. Protocol `v` bump discipline if the header gains fields.
+   localhost, decide: bind-address default to loopback (already the
+   default), bearer token, or mTLS. Protocol `v` bump discipline if the
+   header gains fields.
 5. Versioning: `PROTO_V=1`; any new message type (e.g. `hello`) must keep
    `Node::handle` source-compatible or bump the version with a migration
    note.
 
-## 6. How to extend this without rework
+## 7. How to extend this without rework
 
 - The REPL loop is the same `Node::handle` boundary minus the registry:
   swapping stdin for TCP and swapping NDJSON payloads for framed
@@ -173,9 +220,9 @@ Known limits (intentional for the prototype):
 - If line-at-a-time (3a/B) proves necessary, slot it in behind the same
   NDJSON loop as a different `cmd` (e.g. `{"cmd":"step",...}`), not as a
   new binary.
-- If JSON transport somehow beats frames on the benchmark (Section 3b),
-  the service can offer both behind a flag; the frame path stays the
-  canonical one for the determinism gate.
+- The bench (Section 5) answered the open transport question: frames won,
+  so the frame path stays the canonical one for the determinism gate and
+  the JSON arm is kept only as a benchmark/debugging aid.
 
 ---
 
