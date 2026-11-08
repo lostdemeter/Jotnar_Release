@@ -44,6 +44,32 @@ certificates, and traces. It exits non-zero if an expectation fails. See
 [`docs/DEMO.md`](docs/DEMO.md) for the artifact layout and the honest scope:
 this is a **certified harness tuner**, not an open-ended self-improving agent.
 
+## Backend-tuning showcase
+
+The compiler/backend application of the same loop:
+
+```sh
+cargo run -q -p jotnar-agent -- backend-showcase --out runs/backend-showcase
+```
+
+It selects an optimizer pipeline (CSE, DCE, strength reduction, and
+`IMUL`+`IADD` -> `IMAD` fusion) over a training corpus, checks every candidate
+against the reference interpreter, and lowers the adopted pipeline through both
+the C and non-FPU backends for exact parity.
+
+```text
+selected: cse -> dce -> strength -> fuse_imad
+train:    ops 27 -> 20 (25.9%), weighted 58 -> 35 (39.7%)
+heldout:  ops 13 -> 11 (15.4%), weighted 33 -> 23 (30.3%)
+parity:   C 18/18, non-FPU 18/18; regressions 0
+```
+
+It writes `report.md`, `summary.json`, one certificate per kernel, optimized
+listings, and the emitted backend sources. See
+[`docs/BACKEND_SHOWCASE.md`](docs/BACKEND_SHOWCASE.md) for the corpus, pass
+menu, artifact layout, and the honest limits (fixed menu, curated corpus,
+finite-sample certificates).
+
 ## The circuit
 
 ```

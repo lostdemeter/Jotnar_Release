@@ -39,6 +39,10 @@ demo: report runs/demo/report.md
 Runtime is about 35 seconds on the development machine; most of it is fitting
 the 7,790-row depth-3 transition table.
 
+For the focused compiler/backend application — a real optimizer pipeline over
+integer kernels with C and non-FPU parity — see
+[`BACKEND_SHOWCASE.md`](BACKEND_SHOWCASE.md).
+
 ## What the demo shows
 
 - The exact interpreter gate is the only judge; every candidate gets a

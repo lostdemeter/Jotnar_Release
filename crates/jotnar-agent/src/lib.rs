@@ -19,6 +19,7 @@
 
 pub mod archive;
 pub mod backbone;
+pub mod backend_showcase;
 pub mod budget_predictor;
 pub mod certificate;
 pub mod corpus;

@@ -34,7 +34,7 @@ fn usage() -> &'static str {
        jotnar-agent gen-transitions [--out FILE] [--corpus] [--depth N]\n\
        jotnar-agent gen-teacher [--out FILE] [--generated] [--source NAME]\n\
        jotnar-agent distill-qwen --teacher FILE [--out DIR] [--readout|--end-to-end] [--corpus|--generated] [--epochs N] [--lr F] [--dim N] [--inter N] [--seed N] [--scale F] [--ridge F] [--rounds N] [--max-loops N]\n\
-       jotnar-agent demo [--out DIR]\n       jotnar-agent list\n"
+       jotnar-agent demo [--out DIR]\n       jotnar-agent backend-showcase [--out DIR]\n       jotnar-agent list\n"
 }
 
 fn main() -> ExitCode {
@@ -861,6 +861,20 @@ fn run() -> Result<ExitCode, String> {
                     entry.label
                 );
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        "backend-showcase" => {
+            let mut out = PathBuf::from("runs/backend-showcase");
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--out" => {
+                        out = PathBuf::from(args.next().ok_or("--out needs a path")?);
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+            }
+            jotnar_agent::backend_showcase::run(&out)?;
+            println!("backend showcase: {}/report.md", out.display());
             Ok(ExitCode::SUCCESS)
         }
         "demo" => {
