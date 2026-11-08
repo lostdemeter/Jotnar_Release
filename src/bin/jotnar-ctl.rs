@@ -116,6 +116,98 @@ fn main() -> ExitCode {
     }
 }
 
+enum Plan {
+    Ping,
+    List,
+    Program {
+        name: String,
+        file: PathBuf,
+        backend: String,
+    },
+    Store {
+        name: String,
+        payload: PathBuf,
+        stream: String,
+    },
+    Exec {
+        handle: String,
+        payload: PathBuf,
+        outputs: Vec<String>,
+    },
+    Drop {
+        name: String,
+    },
+}
+
+fn parse_plan(cmd: &str, mut args: Vec<String>) -> Result<Plan, String> {
+    match cmd {
+        "ping" => Ok(Plan::Ping),
+        "list" => Ok(Plan::List),
+        "program" => {
+            if args.len() < 2 {
+                return Err(format!("program needs <name> <file.asm>\n\n{}", usage()));
+            }
+            let name = args.remove(0);
+            let file = PathBuf::from(args.remove(0));
+            let mut backend = "lattice".to_string();
+            while let Some(a) = args.first() {
+                let a = a.clone();
+                args.remove(0);
+                match a.as_str() {
+                    "--backend" => {
+                        backend = args
+                            .first()
+                            .cloned()
+                            .ok_or("--backend needs a value".to_string())?;
+                        args.remove(0);
+                    }
+                    "-h" | "--help" => return Err(usage().to_string()),
+                    other => return Err(format!("unknown argument '{other}'")),
+                }
+            }
+            Ok(Plan::Program {
+                name,
+                file,
+                backend,
+            })
+        }
+        "store" => {
+            if args.is_empty() {
+                return Err(format!("store needs <name>\n\n{}", usage()));
+            }
+            let name = args.remove(0);
+            let (payload, stream) = parse_payload_args(&args)?;
+            Ok(Plan::Store {
+                name,
+                payload,
+                stream,
+            })
+        }
+        "exec" => {
+            if args.is_empty() {
+                return Err(format!("exec needs <handle>\n\n{}", usage()));
+            }
+            let handle = args.remove(0);
+            let (payload, outputs) = parse_exec_args(&args)?;
+            Ok(Plan::Exec {
+                handle,
+                payload,
+                outputs,
+            })
+        }
+        "drop" => {
+            if args.is_empty() {
+                return Err(format!("drop needs <name>\n\n{}", usage()));
+            }
+            Ok(Plan::Drop {
+                name: args.remove(0),
+            })
+        }
+        "-h" | "--help" | "help" => Err(usage().to_string()),
+        _ => Err(format!("unknown command '{cmd}'\n\n{}", usage())),
+    }
+}
+
 fn real_main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut addr = "127.0.0.1:9999".to_string();
@@ -146,47 +238,26 @@ fn real_main() -> Result<(), String> {
         return Err(usage().to_string());
     }
     let cmd = args.remove(0);
-    if ![
-        "ping", "list", "program", "store", "exec", "drop", "-h", "--help", "help",
-    ]
-    .contains(&cmd.as_str())
-    {
-        return Err(format!("unknown command '{cmd}'\n\n{}", usage()));
-    }
+    // Validate all subcommand arguments before connecting so malformed
+    // commands fail with usage, not a connection error.
+    let plan = parse_plan(&cmd, args)?;
     let mut stream = connect(&addr)?;
-    match cmd.as_str() {
-        "ping" => {
+    match plan {
+        Plan::Ping => {
             let (h, _) = roundtrip(&mut stream, 1, "ping", json!({}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
-        "list" => {
+        Plan::List => {
             let (h, _) = roundtrip(&mut stream, 2, "list", json!({}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
-        "program" => {
-            if args.len() < 2 {
-                return Err(format!("program needs <name> <file.asm>\n\n{}", usage()));
-            }
-            let name = args.remove(0);
-            let file = PathBuf::from(args.remove(0));
-            let mut backend = "lattice".to_string();
-            while let Some(a) = args.first() {
-                let a = a.clone();
-                args.remove(0);
-                match a.as_str() {
-                    "--backend" => {
-                        backend = args
-                            .first()
-                            .cloned()
-                            .ok_or("--backend needs a value".to_string())?;
-                        args.remove(0);
-                    }
-                    "-h" | "--help" => return Err(usage().to_string()),
-                    other => return Err(format!("unknown argument '{other}'")),
-                }
-            }
+        Plan::Program {
+            name,
+            file,
+            backend,
+        } => {
             let listing =
                 std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
             let (h, _) = roundtrip(
@@ -200,12 +271,11 @@ fn real_main() -> Result<(), String> {
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
-        "store" => {
-            if args.is_empty() {
-                return Err(format!("store needs <name>\n\n{}", usage()));
-            }
-            let name = args.remove(0);
-            let (payload_file, stream_name) = parse_payload_args(&args)?;
+        Plan::Store {
+            name,
+            payload: payload_file,
+            stream: stream_name,
+        } => {
             let feeds = read_feeds(&payload_file)?;
             let v = feeds
                 .get(&stream_name)
@@ -217,12 +287,11 @@ fn real_main() -> Result<(), String> {
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
-        "exec" => {
-            if args.is_empty() {
-                return Err(format!("exec needs <handle>\n\n{}", usage()));
-            }
-            let handle = args.remove(0);
-            let (payload_file, outputs) = parse_exec_args(&args)?;
+        Plan::Exec {
+            handle,
+            payload: payload_file,
+            outputs,
+        } => {
             let feeds = read_feeds(&payload_file)?;
             // Inline all inputs as segments.
             let mut inputs = serde_json::Map::new();
@@ -264,17 +333,11 @@ fn real_main() -> Result<(), String> {
                     .unwrap()
             );
         }
-        "drop" => {
-            if args.is_empty() {
-                return Err(format!("drop needs <name>\n\n{}", usage()));
-            }
-            let name = args.remove(0);
+        Plan::Drop { name } => {
             let (h, _) = roundtrip(&mut stream, 6, "drop", json!({"name": name}), &[], &token)?;
             ok_or_show(&h)?;
             println!("{}", serde_json::to_string_pretty(&h).unwrap());
         }
-        "-h" | "--help" | "help" => return Err(usage().to_string()),
-        other => return Err(format!("unknown command '{other}'\n\n{}", usage())),
     }
     Ok(())
 }

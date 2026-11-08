@@ -59,10 +59,10 @@ const SHELF_OUTS: [&str; 1] = ["OUT"];
 fn usage() -> &'static str {
     "jotnar-bench - transport benchmark (in-process vs TCP frames vs TCP JSON)\n\
      \n\
-     usage: jotnar-bench [--jobs N] [--workload matmul2|vec|u8|f64|shelf] [--n N] [--modes inproc,tcp-frames,tcp-json]\n\
+     usage: jotnar-bench [--jobs N] [--workload matmul2|vec|u8|f64|shelf] [--n N] [--side N] [--modes inproc,tcp-frames,tcp-json]\n\
      \n\
      --workload defaults to matmul2. --n sets vector length for vec/f64/shelf\n\
-     (default 16384) and side length for u8 (default 128, i.e. 128x128).\n\
+     (default 16384). --side sets u8 image side length (default 128).\n\
      shelf stores a large B once and references it by name per EXEC.\n"
 }
 
@@ -647,6 +647,7 @@ fn run_bench() -> ExitCode {
     let mut jobs_n = 200usize;
     let mut workload = "matmul2".to_string();
     let mut n = 16384usize;
+    let mut side = 128usize;
     let mut modes = vec![
         "inproc".to_string(),
         "tcp-frames".to_string(),
@@ -689,6 +690,21 @@ fn run_bench() -> ExitCode {
                 }
                 None => {
                     eprintln!("--n needs a value");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--side" => match it.next() {
+                Some(v) => {
+                    side = match v.parse::<usize>() {
+                        Ok(s) if s > 0 => s,
+                        _ => {
+                            eprintln!("--side must be a positive integer, got {v}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                }
+                None => {
+                    eprintln!("--side needs a value");
                     return ExitCode::FAILURE;
                 }
             },
@@ -747,8 +763,6 @@ fn run_bench() -> ExitCode {
             (VEC_LISTING, "vec", VEC_OUTS.to_vec(), jobs)
         }
         "u8" => {
-            // For u8, --n is the side length (default sentinel 16384 -> 128).
-            let side = if n == 16384 { 128 } else { n };
             let jobs = (0..jobs_n).map(|i| u8_feeds(i, side)).collect();
             (U8_LISTING, "u8", U8_OUTS.to_vec(), jobs)
         }
@@ -766,18 +780,13 @@ fn run_bench() -> ExitCode {
         .map(|f| reference_for(listing, f, &outs))
         .collect();
 
-    let u8_side = if workload == "u8" && n == 16384 {
-        128
-    } else {
-        n
-    };
     let desc = match workload.as_str() {
         "vec" => format!("vec (n={n}, {} bytes listing)", listing.len()),
         "u8" => format!(
             "u8 ({}x{} = {} bytes, {} bytes listing)",
-            u8_side,
-            u8_side,
-            u8_side * u8_side,
+            side,
+            side,
+            side * side,
             listing.len()
         ),
         "f64" => format!("f64 (n={n}, {} bytes listing)", listing.len()),

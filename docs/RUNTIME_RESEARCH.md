@@ -217,15 +217,15 @@ for 50× matmul2 payloads was 1.7 ms total vs 45.8 ms total (~26×), i.e.
 0.03 ms vs 0.92 ms per payload. No checked-in reproducible warm-vs-cold
 command yet.
 
-Footprint check (single-machine observation, not a gate): `jotnar-node`/
-`jotnar-repl` are both 4.2M (3.3M stripped), `jotnar-ctl` is 804K because
-it never links the interpreter. Reproduce with `nm`/`strings` on the
-built binaries (see `showcase/runtime/`). Dead-code elimination already
-removes rv32/showcase/codegen/image from node/REPL builds. The remaining
-text (~3.2M) is the registry + `phi-core` substrate, i.e. the actual
-language. A feature split would save only a few percent of
-already-eliminated code and would fork maintenance for it, so it is
-deferred until measurements say otherwise. Ship stripped binaries.
+Footprint check (single-machine one-off observation, not a gate):
+`jotnar-node`/`jotnar-repl` are both 4.2M (3.3M stripped),
+`jotnar-ctl` is 804K because it never links the interpreter. Dead-code
+elimination already removes rv32/showcase/codegen/image from node/REPL
+builds. The remaining text (~3.2M) is the registry + `phi-core`
+substrate, i.e. the actual language. A feature split would save only a
+few percent of already-eliminated code and would fork maintenance for
+it, so it is deferred until measurements say otherwise. Ship stripped
+binaries.
 
 ## 6. Phase 2 results: image/float payloads, blob shelf, auth
 

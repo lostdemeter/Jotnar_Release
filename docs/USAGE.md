@@ -54,7 +54,7 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          189/189
+workspace tests          190/190
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms
@@ -134,7 +134,7 @@ cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payloa
 
 cargo run --release --bin jotnar-bench -- --jobs 2000
 cargo run --release --bin jotnar-bench -- --workload vec --n 16384 --jobs 100
-cargo run --release --bin jotnar-bench -- --workload u8 --n 128 --jobs 100
+cargo run --release --bin jotnar-bench -- --workload u8 --side 128 --jobs 100
 cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 ```
 

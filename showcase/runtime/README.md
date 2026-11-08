@@ -32,7 +32,7 @@ cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payloa
 # Transport benchmark: in-process vs TCP frames vs TCP JSON
 cargo run --release --bin jotnar-bench -- --jobs 2000
 cargo run --release --bin jotnar-bench -- --workload vec --n 16384 --jobs 100
-cargo run --release --bin jotnar-bench -- --workload u8  --n 128   --jobs 100
+cargo run --release --bin jotnar-bench -- --workload u8  --side 128 --jobs 100
 cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 ```
 
@@ -93,3 +93,17 @@ placement (that lives in the controller, by design).
   as `error/too-large` and the connection closes.
 - The JSON arm is a benchmark/debugging aid, not a supported wire.
 - Numbers above are one-machine observations, not cross-host gates.
+
+## Footprint (one-off observation, reproducible)
+
+```sh
+cargo build --release --bin jotnar-repl --bin jotnar-node --bin jotnar-ctl
+ls -lh target/release/jotnar-repl target/release/jotnar-node target/release/jotnar-ctl
+nm target/release/jotnar-repl | grep -c png
+strings target/release/jotnar-repl | grep -E 'DOOM|Verilog' || echo "no DOOM/Verilog strings"
+```
+
+One machine observed `jotnar-repl`/`jotnar-node` at 4.2M (3.3M stripped)
+and `jotnar-ctl` at 804K, with zero `png` symbols and no DOOM/Verilog
+strings (dead-code elimination removes rv32/showcase/codegen/image
+from these builds).
