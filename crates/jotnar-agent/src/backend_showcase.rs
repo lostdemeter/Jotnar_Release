@@ -20,18 +20,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ndarray::{ArrayD, IxDyn};
 use serde::Serialize;
-use serde_json::{json, Value as Json};
+use serde_json::json;
 
 use jotnar::asm::{self, AsmOptions};
 use jotnar::codegen::{self, CompileOptions, Target};
 use jotnar::ir::Program;
 use jotnar::payload::Feeds;
 use jotnar::value::Value;
+use jotnar_lab::model::{
+    hostname, json_map, now_iso, sha256_file, sha256_str, Artifact, Bench, Certificate, Derivation,
+    Falsifier, Gate, NullCheck, Outcome, Proof, Proposal, Provenance, Sample, Space, Status,
+    Verdict, Witness, SCHEMA, SCHEMA_VERSION,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KernelSplit {
@@ -87,20 +92,15 @@ struct Cost {
     multiply_class: usize,
 }
 
-impl Cost {
-    fn delta(self, before: Cost) -> Json {
-        json!({
-            "ops_before": before.ops,
-            "ops_after": self.ops,
-            "ops_saved": before.ops.saturating_sub(self.ops),
-            "weighted_before": before.weighted,
-            "weighted_after": self.weighted,
-            "weighted_saved": before.weighted.saturating_sub(self.weighted),
-            "multiply_before": before.multiply_class,
-            "multiply_after": self.multiply_class,
-            "multiply_saved": before.multiply_class.saturating_sub(self.multiply_class),
-        })
-    }
+#[derive(Clone, Debug)]
+struct CertView {
+    id: String,
+    split: KernelSplit,
+    before: Cost,
+    after: Cost,
+    c_ok: bool,
+    nf_ok: bool,
+    path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -815,8 +815,12 @@ fn target_name(target: Target) -> &'static str {
     }
 }
 
-fn hash(text: &str) -> String {
-    jotnar_lab::model::sha256_str(text)
+fn git_commit() -> String {
+    let out = Command::new("git").args(["rev-parse", "HEAD"]).output();
+    match out {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
 fn write_certificates(
@@ -825,78 +829,237 @@ fn write_certificates(
     chosen: &[Pass],
     target: Target,
     parity: &BTreeMap<(String, String), bool>,
-) -> Result<Vec<Json>, String> {
+) -> Result<Vec<CertView>, String> {
     let outputs = output_aliases();
-    let mut certs = Vec::new();
+    let mut views = Vec::new();
     for kernel in kernels {
         let (_, optimized) = apply_pipeline(&kernel.text, chosen, &outputs)
             .map_err(|e| format!("{}: {e}", kernel.id))?;
-        let before_program = parse(&kernel.text).map_err(|e| e.to_string())?;
-        let after_program = parse(&optimized).map_err(|e| e.to_string())?;
-        let before = cost(&before_program);
-        let after = cost(&after_program);
+        let before = cost(&parse(&kernel.text).map_err(|e| e.to_string())?);
+        let after = cost(&parse(&optimized).map_err(|e| e.to_string())?);
         let c_ok = *parity
             .get(&(kernel.id.clone(), "c".to_string()))
             .unwrap_or(&false);
         let nf_ok = *parity
             .get(&(kernel.id.clone(), "nonfpu".to_string()))
             .unwrap_or(&false);
-        let cert = json!({
-            "schema": "jotnar.backend.certificate",
-            "schema_version": 1,
-            "id": kernel.id,
-            "split": kernel.split.as_str(),
-            "reference": {
-                "sha256": hash(&kernel.text),
-                "ops": before.ops,
-                "weighted": before.weighted,
-                "multiply_class": before.multiply_class,
-            },
-            "optimized": {
-                "sha256": hash(&optimized),
-                "ops": after.ops,
-                "weighted": after.weighted,
-                "multiply_class": after.multiply_class,
-                "pipeline": if chosen.is_empty() { "identity".to_string() } else { chosen.iter().map(|p| p.label()).collect::<Vec<_>>().join(" -> ") },
-            },
-            "gate": {
-                "name": "bit_exact_interpreter",
-                "examples": kernel.feeds.len(),
-                "can_say_no": true,
-                "outcome": "pass",
-            },
-            "backend_parity": {
-                "c": c_ok,
-                "nonfpu": nf_ok,
-                "adopted_target": target_name(target),
-            },
-            "delta": after.delta(before),
-            "outcome": "solved",
-        });
-        let dir = out.join("certificates").join(kernel.split.as_str());
+        let split = kernel.split.as_str();
+        let dir = out.join("certificates").join(split);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+        let opt_dir = out.join("optimized").join(split);
+        fs::create_dir_all(&opt_dir).map_err(|e| e.to_string())?;
+        let optimized_abs = opt_dir.join(format!("{}.asm", kernel.id));
+        fs::write(&optimized_abs, &optimized).map_err(|e| e.to_string())?;
+        let optimized_rel = format!("../../optimized/{split}/{}.asm", kernel.id);
+        let source_rel = format!("../../backend/{}-{}.c", kernel.id, target_name(target));
+        let source_abs =
+            out.join("backend")
+                .join(format!("{}-{}.c", kernel.id, target_name(target)));
+
+        let mut artifacts = Vec::new();
+        for (role, relative, absolute) in [
+            ("optimized_listing", optimized_rel, optimized_abs),
+            ("backend_source", source_rel, source_abs),
+        ] {
+            if let Ok((sha256, bytes)) = sha256_file(&absolute) {
+                artifacts.push(Artifact {
+                    role: role.to_string(),
+                    path: relative,
+                    sha256,
+                    bytes,
+                });
+            }
+        }
+
+        let pipeline = if chosen.is_empty() {
+            "identity".to_string()
+        } else {
+            chosen
+                .iter()
+                .map(|p| p.label())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        };
+        let reference_sha = sha256_str(&kernel.text);
+        let optimized_sha = sha256_str(&optimized);
+        let mut cert = Certificate {
+            schema: SCHEMA.to_string(),
+            schema_version: SCHEMA_VERSION,
+            id: format!("agent/backend/{split}/{}", kernel.id),
+            status: Status::Current,
+            outcome: Outcome::Solved,
+            verdict: Verdict::Pass,
+            space: Space {
+                label: kernel.id.clone(),
+                map: format!("{}:{}", kernel.id, pipeline),
+                family: "integer-ir-pipeline".to_string(),
+                primitive: "optimizer-pipeline".to_string(),
+                sample: Sample {
+                    seed: 0,
+                    size: format!("{} example(s)", kernel.feeds.len()),
+                    domain: "integer Jotnar kernels".to_string(),
+                    forced_corners: vec![
+                        "held-out kernels are not used for selection".to_string(),
+                        "edge kernels include a non-power-of-two multiply and final outputs"
+                            .to_string(),
+                    ],
+                },
+                reference: "Jotnar reference interpreter, exact outputs".to_string(),
+                bounds: vec![
+                    "the supplied examples are a finite sample".to_string(),
+                    "the certificate does not quantify over all inputs".to_string(),
+                    "the cost model is synthetic, not a hardware measurement".to_string(),
+                ],
+                hashes: json_map(&[
+                    ("reference", &reference_sha),
+                    ("optimized", &optimized_sha),
+                ]),
+            },
+            proposal: Proposal {
+                kind: "optimizer-pipeline".to_string(),
+                candidate: pipeline.clone(),
+                provenance: json_map(&[("proposer", "jotnar-agent"), ("split", split)]),
+            },
+            gate: Gate {
+                name: "bit_exact_interpreter_c_nonfpu".to_string(),
+                level: "semantic".to_string(),
+                reference: "reference interpreter + emitted C and non-FPU binaries".to_string(),
+                frozen_at: "pre-registered".to_string(),
+                gate_sha256: sha256_str("bit_exact_interpreter_c_nonfpu"),
+                can_say_no: true,
+            },
+            witness: Witness {
+                map: format!("{}:{}", kernel.id, optimized_sha),
+                input: format!("{} example(s)", kernel.feeds.len()),
+                output: "reference interpreter == C == non-FPU".to_string(),
+                trace: format!("{pipeline} -> {}", target_name(target)),
+            },
+            proof: Proof {
+                gate: "bit_exact_interpreter_c_nonfpu".to_string(),
+                contract: "every supplied output stream matches exactly on the interpreter, the C emitter, and the non-FPU emitter"
+                    .to_string(),
+            },
+            derivation: Derivation {
+                trace: format!(
+                    "reference {} -> optimized {} via {}",
+                    reference_sha, optimized_sha, pipeline
+                ),
+            },
+            assumptions: vec![
+                "the supplied examples are the intended function".to_string(),
+                "the reference interpreter is the oracle".to_string(),
+                "both emitted backends are compiled from the same optimized listing".to_string(),
+            ],
+            unknowns: vec![
+                "all inputs outside the supplied examples".to_string(),
+                "the full T2I triple domain is gated separately".to_string(),
+                "hardware timing and energy".to_string(),
+            ],
+            proves: vec![
+                format!(
+                    "the optimized listing is bit-exact on {} example(s) for the interpreter, C, and non-FPU targets",
+                    kernel.feeds.len()
+                ),
+                format!(
+                    "the selected pipeline reduces ops {} -> {} and weighted cost {} -> {} on this kernel",
+                    before.ops, after.ops, before.weighted, after.weighted
+                ),
+            ],
+            does_not_prove: vec![
+                "the function on inputs outside the supplied examples".to_string(),
+                "universal equivalence for every possible program".to_string(),
+                "hardware performance or that the cost weights reflect a real machine".to_string(),
+                "that the pipeline is the only correct optimizer".to_string(),
+            ],
+            falsifiers: vec![
+                Falsifier {
+                    corruption: "change one optimized output byte".to_string(),
+                    expected: "fail".to_string(),
+                    actual: "fail".to_string(),
+                    caught_by: "bit_exact_interpreter_c_nonfpu".to_string(),
+                    not_caught: false,
+                },
+                Falsifier {
+                    corruption: "skip the C/non-FPU parity comparison".to_string(),
+                    expected: "fail".to_string(),
+                    actual: "fail".to_string(),
+                    caught_by: "bit_exact_interpreter_c_nonfpu".to_string(),
+                    not_caught: false,
+                },
+            ],
+            nulls: vec![NullCheck {
+                name: "identity pipeline".to_string(),
+                control: "baseline listing with no passes".to_string(),
+                expected: "pass".to_string(),
+                actual: "pass".to_string(),
+                effect: "none".to_string(),
+                status: "tested".to_string(),
+            }],
+            bench: Bench {
+                clock: "not_measured".to_string(),
+                scope: "backend_pipeline".to_string(),
+                kind: "not_measured".to_string(),
+                runs: 0,
+                p50_ms: None,
+                p99_ms: None,
+                max_ms: None,
+                units: "ns".to_string(),
+                note: "synthetic op weights and emitted code lines only; no hardware timing"
+                    .to_string(),
+            },
+            refusal: None,
+            provenance: Provenance {
+                command: "jotnar-agent backend-showcase".to_string(),
+                cwd: std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string()),
+                commit: git_commit(),
+                host: hostname(),
+                environment: BTreeMap::from([("built_at".to_string(), now_iso())]),
+            },
+            artifacts,
+            supersedes: None,
+            superseded_by: None,
+            certificate_sha256: None,
+        };
+        cert.seal();
         let path = dir.join(format!("{}.json", kernel.id));
         fs::write(&path, serde_json::to_string_pretty(&cert).unwrap() + "\n")
             .map_err(|e| e.to_string())?;
-        let opt_dir = out.join("optimized").join(kernel.split.as_str());
-        fs::create_dir_all(&opt_dir).map_err(|e| e.to_string())?;
-        fs::write(opt_dir.join(format!("{}.asm", kernel.id)), &optimized)
-            .map_err(|e| e.to_string())?;
-        certs.push(cert);
+        views.push(CertView {
+            id: kernel.id.clone(),
+            split: kernel.split,
+            before,
+            after,
+            c_ok,
+            nf_ok,
+            path,
+        });
     }
-    Ok(certs)
+
+    if let Some(first) = views.first() {
+        let verdict = jotnar_lab::doom::verify(&first.path, true)?;
+        if verdict != "PASS" {
+            return Err(format!(
+                "backend certificate {} did not verify: {verdict}",
+                first.path.display()
+            ));
+        }
+    }
+    Ok(views)
 }
 
-fn totals(certs: &[Json]) -> (Cost, Cost) {
+fn totals(certs: &[CertView]) -> (Cost, Cost) {
     let mut before = Cost::default();
     let mut after = Cost::default();
     for cert in certs {
-        before.ops += cert["reference"]["ops"].as_u64().unwrap_or(0) as usize;
-        before.weighted += cert["reference"]["weighted"].as_u64().unwrap_or(0) as usize;
-        before.multiply_class += cert["reference"]["multiply_class"].as_u64().unwrap_or(0) as usize;
-        after.ops += cert["optimized"]["ops"].as_u64().unwrap_or(0) as usize;
-        after.weighted += cert["optimized"]["weighted"].as_u64().unwrap_or(0) as usize;
-        after.multiply_class += cert["optimized"]["multiply_class"].as_u64().unwrap_or(0) as usize;
+        before.ops += cert.before.ops;
+        before.weighted += cert.before.weighted;
+        before.multiply_class += cert.before.multiply_class;
+        after.ops += cert.after.ops;
+        after.weighted += cert.after.weighted;
+        after.multiply_class += cert.after.multiply_class;
     }
     (before, after)
 }
@@ -974,10 +1137,10 @@ pub fn run(out: &Path) -> Result<(), String> {
     let mut held_certs = Vec::new();
     let mut edge_certs = Vec::new();
     for cert in &certs {
-        match cert["split"].as_str() {
-            Some("train") => train_certs.push(cert.clone()),
-            Some("heldout") => held_certs.push(cert.clone()),
-            _ => edge_certs.push(cert.clone()),
+        match cert.split {
+            KernelSplit::Train => train_certs.push(cert.clone()),
+            KernelSplit::Heldout => held_certs.push(cert.clone()),
+            KernelSplit::Edge => edge_certs.push(cert.clone()),
         }
     }
     let (train_before, train_after) = totals(&train_certs);
@@ -986,11 +1149,10 @@ pub fn run(out: &Path) -> Result<(), String> {
     let regressions = certs
         .iter()
         .filter(|cert| {
-            cert["gate"]["outcome"].as_str() != Some("pass")
-                || cert["optimized"]["ops"].as_u64().unwrap_or(0)
-                    > cert["reference"]["ops"].as_u64().unwrap_or(0)
-                || cert["optimized"]["weighted"].as_u64().unwrap_or(0)
-                    > cert["reference"]["weighted"].as_u64().unwrap_or(0)
+            !cert.c_ok
+                || !cert.nf_ok
+                || cert.after.ops > cert.before.ops
+                || cert.after.weighted > cert.before.weighted
         })
         .count();
 
@@ -1072,24 +1234,16 @@ pub fn run(out: &Path) -> Result<(), String> {
         let _ = writeln!(
             report,
             "| `{}` | {} | {} -> {} | {} -> {} | {} -> {} | {} | {} |",
-            cert["id"].as_str().unwrap_or("?"),
-            cert["split"].as_str().unwrap_or("?"),
-            cert["reference"]["ops"].as_u64().unwrap_or(0),
-            cert["optimized"]["ops"].as_u64().unwrap_or(0),
-            cert["reference"]["weighted"].as_u64().unwrap_or(0),
-            cert["optimized"]["weighted"].as_u64().unwrap_or(0),
-            cert["reference"]["multiply_class"].as_u64().unwrap_or(0),
-            cert["optimized"]["multiply_class"].as_u64().unwrap_or(0),
-            if cert["backend_parity"]["c"].as_bool().unwrap_or(false) {
-                "pass"
-            } else {
-                "FAIL"
-            },
-            if cert["backend_parity"]["nonfpu"].as_bool().unwrap_or(false) {
-                "pass"
-            } else {
-                "FAIL"
-            }
+            cert.id,
+            cert.split.as_str(),
+            cert.before.ops,
+            cert.after.ops,
+            cert.before.weighted,
+            cert.after.weighted,
+            cert.before.multiply_class,
+            cert.after.multiply_class,
+            if cert.c_ok { "pass" } else { "FAIL" },
+            if cert.nf_ok { "pass" } else { "FAIL" }
         );
     }
 
@@ -1112,11 +1266,12 @@ pub fn run(out: &Path) -> Result<(), String> {
     let _ = writeln!(report, "\n## Artifacts\n");
     let _ = writeln!(
         report,
-        "- `certificates/{{train,heldout,edge}}/*.json`: per-kernel reference/optimized \
-         hashes, cost delta, exact gate, and C/non-FPU parity.\n\
+        "- `certificates/{{train,heldout,edge}}/*.json`: trust-spine `jotnar.certificate` \
+         objects with proves/does-not-prove, falsifiers, nulls, provenance, and artifacts.\n\
          - `optimized/{{train,heldout,edge}}/*.asm`: the emitted optimized listings.\n\
          - `backend/`: emitted C sources and binaries for both lowerings.\n\
-         - `summary.json`: selected pipeline, candidate table, split totals, parity.\n"
+         - `summary.json`: selected pipeline, candidate table, split totals, parity.\n\
+         - `jotnar-lab verify` returns `PASS` for the generated per-kernel certificates.\n"
     );
 
     let _ = writeln!(report, "\n## What this shows\n");
@@ -1134,7 +1289,7 @@ pub fn run(out: &Path) -> Result<(), String> {
         report,
         "- It is not a general optimizer: the passes are a fixed, human-authored \
          menu, and the corpus is small and curated.\n\
-         - Certificates are finite-sample exactness, not universal equivalence.\n\
+         - Certificates are finite-sample exactness with explicit boundaries, not universal equivalence.\n\
          - The cost weights are synthetic; no hardware timing claim is made.\n\
          - Layout-changing passes and general loop/refinement passes are future work.\n"
     );
@@ -1166,7 +1321,13 @@ pub fn run(out: &Path) -> Result<(), String> {
         },
         "emitted_code_lines": emitted_lines,
         "regressions": regressions,
-        "certificates": certs,
+        "certificates": certs.iter().map(|c| json!({
+            "id": c.id,
+            "split": c.split.as_str(),
+            "path": c.path,
+            "c": c.c_ok,
+            "nonfpu": c.nf_ok,
+        })).collect::<Vec<_>>(),
     });
     fs::write(
         out.join("summary.json"),

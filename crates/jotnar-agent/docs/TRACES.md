@@ -214,7 +214,7 @@ whether the distilled student is adopted.
 
 The real Dory model is `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF`; the
 Dory-enabled llama.cpp build and the `gen_teacher_dory.py` script are described
-in [`DORY_TEACHER.md`](../../../docs/DORY_TEACHER.md). Dory's 9-channel latent
+in [`DORY_TEACHER.md`](DORY_TEACHER.md). Dory's 9-channel latent
 fits to ~2.5e-6 teacher error, but the exact gate rejects the distilled student
 because `start_is_one` differs from the named contract. The zero-init candidate
 wins; see `DORY_TEACHER.md` for the gate table. This is the key distillation

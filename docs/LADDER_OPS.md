@@ -136,14 +136,31 @@ the scale. This is a model/contract parameter, not a hidden constant.
 
 | op | signature | behavior | lowering |
 | --- | --- | --- | --- |
-| `T2I` | `$A -> I:*` | decode ladder to int64, round | both |
-| `IGET` | `I:*, F -> I:*` | extract one integer element | both |
+| `T2I` | `T:* -> I:*` | decode ladder to int64, round half away from zero | C + non-FPU (CUDA/Verilog: NoPattern) |
+| `IGET` | `I:*, F:SCALAR -> I:SCALAR` | extract one integer element; literal index in range | C + non-FPU (CUDA/Verilog: NoPattern) |
 | `F2I` | `F:* -> I:*` | binary64 bits to int64, truncating | both |
 | `I2F` | `I:* -> F:*` | int64 to binary64 | both |
 
 `T2I` is the bridge from the ladder transformer path back to the integer
 agent/harness path. `IGET` turns the `[1, D]` latent into scalar `h0_i`
 streams.
+
+**Boundaries.** `T2I` decodes the whole lattice exponent range `0..65535`
+(`z=1` wins and returns 0). The non-FPU target bakes a table computed from the
+same `f64` expression as the interpreter; an exponent outside that range is a
+loud failure in the interpreter and both emitters. `IGET` in v1 accepts an
+integer literal index only, and rejects `idx < 0` or `idx >= numel` at
+assembly/runtime and emit time. `IMATMUL` requires two 2D integer streams with
+matching inner dimensions. `IREDUCE_SUM` returns the scalar stream. CUDA and
+Verilog return `NoPattern` for all four; that is a declared lowering boundary,
+not a silent fallback.
+
+**Why these are general primitives.** `T2I` is the general ladder-to-integer
+bridge; `IGET` is general scalar extraction from a shaped integer stream (the
+literal-index restriction is a v1 safety boundary); `IMATMUL` is exact 2D
+integer contraction; `IREDUCE_SUM` is a shape-defined all-element reduction.
+None of them is a per-arity alias. `IGET` is also used by the agent to read
+latent components, but its semantics are not agent-specific.
 
 ### Integer geometry (agent path)
 
@@ -153,8 +170,8 @@ exist so the harness can reason about integer fields without pretending that
 
 | op | signature | behavior | lowering |
 | --- | --- | --- | --- |
-| `IMATMUL` | `I:*, I:* -> I:*` | exact 2D integer matrix multiply `[M,K] * [K,N] -> [M,N]`, 64-bit wrap | both |
-| `IREDUCE_SUM` | `I:* -> I:*` | exact sum of every element; output is the scalar stream | both |
+| `IMATMUL` | `I:*, I:* -> I:*` | exact 2D integer matrix multiply `[M,K] * [K,N] -> [M,N]`, 64-bit wrap | C + non-FPU (CUDA/Verilog: NoPattern) |
+| `IREDUCE_SUM` | `I:* -> I:SCALAR` | exact sum of every element; output is the scalar stream | C + non-FPU (CUDA/Verilog: NoPattern) |
 
 `IREDUCE_SUM` is deliberately one op. It replaces the per-arity
 `sum4`/`sum9`/`sum16` compose labels with a shape-defined reduction. A new

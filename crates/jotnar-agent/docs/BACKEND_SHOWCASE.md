@@ -6,7 +6,7 @@ kernels, checks every candidate against the reference interpreter, and lowers
 the adopted pipeline through both the C and non-FPU backends for exact parity.
 
 ```sh
-cd Jotnar_Release
+cd "$(git rev-parse --show-toplevel)"
 cargo run -q -p jotnar-agent -- backend-showcase --out runs/backend-showcase
 ```
 
@@ -28,8 +28,10 @@ cargo run -q -p jotnar-agent -- backend-showcase --out runs/backend-showcase
   integer-only non-FPU backend, compiled, run, and compared exactly. The
   lowering with fewer emitted code lines on the training split is adopted;
   both are reported.
-- **Certificates:** one JSON certificate per kernel with reference/optimized
-  hashes, cost delta, exact-gate result, and C/non-FPU parity.
+- **Certificates:** one `jotnar.certificate` trust-spine object per kernel with
+  reference/optimized hashes, proves/does-not-prove, assumptions, unknowns,
+  falsifiers, nulls, bench labels, provenance, artifacts, and C/non-FPU parity.
+  At least one is checked with `jotnar-lab verify` on every run.
 
 ## Expected output
 
@@ -61,35 +63,66 @@ Regressions: 0.
 runs/backend-showcase/
   report.md
   summary.json
-  certificates/{train,heldout,edge}/*.json
+  certificates/{train,heldout,edge}/*.json   # jotnar.certificate objects
   optimized/{train,heldout,edge}/*.asm
   backend/                  # emitted C sources and binaries for both targets
 ```
 
-A certificate looks like:
+A certificate is a real trust-spine object, not a private parity record:
 
 ```json
 {
-  "schema": "jotnar.backend.certificate",
-  "id": "train-scale2",
-  "split": "train",
-  "reference": { "sha256": "...", "ops": 2, "weighted": 4 },
-  "optimized": {
-    "sha256": "...",
-    "ops": 2,
-    "weighted": 2,
-    "pipeline": "cse -> dce -> strength -> fuse_imad"
-  },
+  "schema": "jotnar.certificate",
+  "id": "agent/backend/train/train-scale2",
+  "status": "current",
+  "outcome": "solved",
+  "verdict": "pass",
   "gate": {
-    "name": "bit_exact_interpreter",
-    "examples": 2,
-    "can_say_no": true,
-    "outcome": "pass"
+    "name": "bit_exact_interpreter_c_nonfpu",
+    "can_say_no": true
   },
-  "backend_parity": { "c": true, "nonfpu": true, "adopted_target": "nonfpu" },
-  "delta": { "ops_saved": 0, "weighted_saved": 2, "multiply_saved": 1 },
-  "outcome": "solved"
+  "proves": [
+    "the optimized listing is bit-exact on 2 example(s) for the interpreter, C, and non-FPU targets"
+  ],
+  "does_not_prove": [
+    "the function on inputs outside the supplied examples",
+    "universal equivalence for every possible program"
+  ],
+  "falsifiers": [
+    {
+      "corruption": "change one optimized output byte",
+      "expected": "fail",
+      "actual": "fail",
+      "caught_by": "bit_exact_interpreter_c_nonfpu",
+      "not_caught": false
+    }
+  ],
+  "nulls": [
+    {
+      "name": "identity pipeline",
+      "control": "baseline listing with no passes",
+      "expected": "pass",
+      "actual": "pass",
+      "effect": "none",
+      "status": "tested"
+    }
+  ],
+  "bench": {
+    "clock": "not_measured",
+    "scope": "backend_pipeline",
+    "kind": "not_measured"
+  },
+  "artifacts": [
+    { "role": "optimized_listing", "path": "../../optimized/train/train-scale2.asm" }
+  ]
 }
+```
+
+Verify one with the trust-spine verifier:
+
+```sh
+cargo run -q -p jotnar-lab -- verify \
+  runs/backend-showcase/certificates/train/train-scale2.json
 ```
 
 ## Why this is a real fit
@@ -101,7 +134,7 @@ A certificate looks like:
 - The system **selects and composes** the pipeline; the exact gate decides.
 - The held-out split measures whether a pipeline selected on one set of kernels
   generalizes to a different set.
-- Every accepted kernel result has an auditable certificate, and the
+- Every accepted kernel result has a trust-spine certificate, and the
   no-regression count is explicit.
 
 ## How it relates to the learned agent

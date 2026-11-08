@@ -33,7 +33,7 @@ behind the claims.</p>
 &nbsp;·&nbsp;
 <a href="manual/">source</a>
 </p>
-<p><em>99 pages. 90 mnemonics. One fail-loud rule: if the assembler has to
+<p><em>101 pages. 90 mnemonics. One fail-loud rule: if the assembler has to
 guess, the program is already wrong.</em></p>
 </td>
 </tr>
@@ -179,7 +179,8 @@ The front door is deliberately short. The actual parts are here:
 
 ```text
 90 mnemonics
-88/88 op parity cases
+88/88 Python-oracle cases (original 86)
+4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
 32/32 emitter cases
 Futhark 118/118 words
 DOOM frame 1 exact vs C native

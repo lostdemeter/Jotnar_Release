@@ -1,5 +1,3 @@
-use std::fmt;
-
 /// The one error type used across the assembler and the runtime.
 ///
 /// `Asm` mirrors Python's `AsmError` (parse/assemble/layout/shape failures).

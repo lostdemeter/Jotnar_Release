@@ -8,9 +8,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::ir::BoundProgram;
 use crate::payload::Feeds;
-use crate::value::Value;
 
 use super::infer::{infer_shapes, CKind, StreamInfo};
 use super::{sanitize_cnames, Artifact, CompileOptions};
@@ -411,14 +409,6 @@ __global__ void k_gather3(const float *t, const int64_t *ii, const int64_t *jj, 
 }
 "#;
 
-fn fill(s: &str, vars: &[(&str, String)]) -> String {
-    let mut out = s.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{k}}}"), v);
-    }
-    out
-}
-
 fn launch(kernel: &str, grid: &str, block: &str, args: &str) -> String {
     format!(
         "  {kernel}<<<{grid}, {block}>>>({args});\n  CK(cudaGetLastError());\n  CK(cudaDeviceSynchronize());"
@@ -432,7 +422,6 @@ fn grid_expr(n: &str) -> String {
 struct C {
     streams: HashMap<String, StreamInfo>,
     config: crate::ir::Config,
-    f16: bool,
 }
 
 impl C {
@@ -1048,7 +1037,6 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     let mut c = C {
         streams: streams.clone(),
         config: bound.config.clone(),
-        f16,
     };
 
     let mut src = String::new();
@@ -1088,7 +1076,7 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
 
     // argv count
     let mut n_argv = 0usize;
-    for n in &in_names {
+    for _n in &in_names {
         n_argv += 1;
     }
     for o in &outputs {

@@ -54,6 +54,14 @@ fn wrap(v: i128) -> i64 {
 /// Extract one element of an integer stream as a scalar.
 pub fn op_iget(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let x = int_stream(args, 0, "IGET", "X")?;
+    let index_arg = args
+        .get(1)
+        .ok_or_else(|| Error::runtime("IGET: missing index"))?;
+    if !index_arg.is_literal() {
+        return Err(Error::runtime(
+            "IGET: index must be an integer literal (v1 contract)",
+        ));
+    }
     let idx = arg_i64(args, 1, "IGET", "idx")?;
     if idx < 0 || idx as usize >= x.len() {
         return Err(Error::runtime(format!(

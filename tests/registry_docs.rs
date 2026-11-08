@@ -55,4 +55,37 @@ fn mnemonic_count_is_documented_as_ninety() {
         register.contains(&format!("ALL {count} MNEMONICS")),
         "manual register kicker must state the registry count ({count})"
     );
+    let manual_readme = read("manual/README.md");
+    assert!(
+        manual_readme.contains(&format!("all {count} mnemonics")),
+        "manual README must state the registry count ({count})"
+    );
+    assert!(
+        manual_readme.contains(&format!("{count}-mnemonic register")),
+        "manual README register line must state the registry count ({count})"
+    );
+    let press = read("manual/press/src/main.rs");
+    assert!(
+        press.contains("THE {mnemonic_count}-MNEMONIC REGISTER"),
+        "press cover must derive the register count from manual/data/ops.tsv"
+    );
+    assert!(
+        !press.contains("86-MNEMONIC") && !press.contains("86-mnemonic"),
+        "press must not hardcode the old 86-mnemonic count"
+    );
+    let usage = read("docs/USAGE.md");
+    assert!(
+        usage.contains(&format!("all {count} mnemonics")),
+        "docs/USAGE.md must state the registry count ({count})"
+    );
+    let glossary = read("manual/content/20-glossary.md");
+    assert!(
+        glossary.contains(&format!("{count} mnemonics")),
+        "manual glossary must state the registry count ({count})"
+    );
+    let porting = read("docs/PORTING.md");
+    assert!(
+        porting.contains(&format!("all {count} mnemonics")),
+        "docs/PORTING.md must state the registry count ({count})"
+    );
 }

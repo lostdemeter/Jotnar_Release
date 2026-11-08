@@ -4,7 +4,7 @@
 //! semantics (including 2^-18 fixed units, BIAS counts, and LUT rounding)
 //! match the Python reference.
 
-use ndarray::{ArrayD, IxDyn, Zip};
+use ndarray::{ArrayD, IxDyn};
 
 use crate::error::{Error, Result};
 use crate::lattice::{self, BIAS, NLVL};
@@ -320,7 +320,7 @@ pub fn softmaxN_fixed(q: &ArrayD<i64>, m: i64) -> Result<(ArrayD<i64>, ArrayD<i6
     let (num, den, sh) = softmax_n_fixed(q, m)?;
     let c = last_dim(&sh);
     let mut num2 = vec![0i64; num.len()];
-    for (r, &d) in den.iter().enumerate() {
+    for (r, &_d) in den.iter().enumerate() {
         for j in 0..c {
             num2[r * c + j] = num[r * c + j];
         }

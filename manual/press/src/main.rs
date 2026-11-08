@@ -2,7 +2,7 @@
 //!
 //! The press is deliberately small. It reads a book manifest, renders each
 //! chapter with a handful of zine directives, generates the cover, masthead,
-//! table of contents, part dividers, and the 86-mnemonic register, then hands
+//! table of contents, part dividers, and the mnemonic register, then hands
 //! the HTML to Paged.js and Chromium.
 
 use std::collections::HashMap;
@@ -148,7 +148,7 @@ fn run() -> R<()> {
 
     let css = fs::read_to_string(root.join("theme/book.css"))
         .map_err(|e| format!("cannot read theme/book.css: {e}"))?;
-    let cover = cover_html(&book.book, &loaded);
+    let cover = cover_html(&book.book, &loaded, ops.len());
     let masthead = masthead_html(&book.book);
     let toc = toc_html(&loaded);
     let mut body = String::new();
@@ -796,7 +796,7 @@ fn highlight_generic(src: &str, lang: &str) -> String {
 // Page furniture
 // ---------------------------------------------------------------------------
 
-fn cover_html(m: &Meta, loaded: &[LoadedPart]) -> String {
+fn cover_html(m: &Meta, loaded: &[LoadedPart], mnemonic_count: usize) -> String {
     let inside: String = loaded
         .iter()
         .filter(|p| p.part.number != "00")
@@ -825,7 +825,7 @@ fn cover_html(m: &Meta, loaded: &[LoadedPart]) -> String {
   <div class="cover-box">
     <div class="cover-box-title">INSIDE THIS ISSUE</div>
     {inside}
-    <div class="cover-index-row"><span>+</span>THE 86-MNEMONIC REGISTER</div>
+    <div class="cover-index-row"><span>+</span>THE {mnemonic_count}-MNEMONIC REGISTER</div>
   </div>
   <div class="cover-stamp">DIGITAL<br><b>FIRST DRAFT</b></div>
   <div class="cover-foot">{imprint} / {author}</div>
@@ -837,7 +837,8 @@ fn cover_html(m: &Meta, loaded: &[LoadedPart]) -> String {
         tagline = escape(&m.tagline),
         imprint = escape(&m.imprint),
         author = escape(&m.author),
-        inside = inside
+        inside = inside,
+        mnemonic_count = mnemonic_count
     )
 }
 

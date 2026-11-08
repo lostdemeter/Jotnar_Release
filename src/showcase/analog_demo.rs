@@ -13,7 +13,6 @@
 //!   * an RJM-shaped artifact with a tolerance gate and a baked-map
 //!     deployment profile (the fast path: no DAC at application time).
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

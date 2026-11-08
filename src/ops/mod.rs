@@ -182,7 +182,7 @@ fn build_registry() -> Registry {
         "IREDUCE_SUM",
         1,
         1,
-        sig(&["I:*"], &["I:*"]),
+        sig(&["I:*"], &["I:SCALAR"]),
         Some(op_ireduce_sum),
     );
     add("IDIV", 2, 1, sig(&["I:*", "*"], &["I:*"]), Some(op_idiv));
@@ -218,12 +218,12 @@ fn build_registry() -> Registry {
     );
     add("F2I", 1, 1, sig(&["F:*"], &["I:*"]), Some(op_f2i));
     add("I2F", 1, 1, sig(&["I:*"], &["F:*"]), Some(op_i2f));
-    add("T2I", 1, 1, sig(&["$A"], &["I:*"]), Some(op_t2i));
+    add("T2I", 1, 1, sig(&["T:*"], &["I:*"]), Some(op_t2i));
     add(
         "IGET",
         2,
         1,
-        sig(&["I:*", "F:SCALAR"], &["I:*"]),
+        sig(&["I:*", "F:SCALAR"], &["I:SCALAR"]),
         Some(op_iget),
     );
 

@@ -33,6 +33,7 @@ static SIGX_LUT: OnceLock<Vec<i64>> = OnceLock::new();
 static FRAC_HI_LUT: OnceLock<Vec<i64>> = OnceLock::new();
 static EXP_LUT: OnceLock<Vec<i64>> = OnceLock::new();
 static PHI_LUT: OnceLock<Vec<i64>> = OnceLock::new();
+static T2I_LUT: OnceLock<Vec<i64>> = OnceLock::new();
 
 /// `np.round`: round half to even (banker's rounding).
 pub fn round_half_even(x: f64) -> f64 {
@@ -112,6 +113,22 @@ pub fn exp_lut() -> &'static [i64] {
     EXP_LUT.get_or_init(|| {
         (0..=262144)
             .map(|d| round_i64((2f64.powi(24)) * (-(d as f64) / 16384.0).exp()))
+            .collect()
+    })
+}
+
+/// Exact decoded magnitudes for `T2I`, rounded half-away-from-zero.
+///
+/// The triple exponent is the whole `0..NLVL` lattice range. This table is the
+/// non-FPU bridge: it is computed with the same `f64` expression as the
+/// interpreter, then baked as integers. The sign is applied by the caller.
+pub fn t2i_lut() -> &'static [i64] {
+    T2I_LUT.get_or_init(|| {
+        (0..NLVL)
+            .map(|e| {
+                let v = PHI.powf((e as f64 - BIAS as f64) / K as f64);
+                v.round() as i64
+            })
             .collect()
     })
 }

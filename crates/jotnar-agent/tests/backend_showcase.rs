@@ -32,7 +32,17 @@ fn backend_showcase_is_green() {
     }
 
     assert!(dir.join("report.md").exists());
-    assert!(dir.join("certificates/train/train-scale2.json").exists());
+    let cert_path = dir.join("certificates/train/train-scale2.json");
+    assert!(cert_path.exists());
+    let cert: Value = serde_json::from_str(&fs::read_to_string(&cert_path).unwrap()).unwrap();
+    assert_eq!(cert["schema"], "jotnar.certificate");
+    assert_eq!(cert["outcome"], "solved");
+    assert_eq!(cert["verdict"], "pass");
+    assert_eq!(
+        jotnar_lab::doom::verify(&cert_path, true).unwrap(),
+        "PASS",
+        "backend certificate must verify through the trust spine"
+    );
     assert!(dir.join("optimized/train/train-scale2.asm").exists());
     let _ = fs::remove_dir_all(&dir);
 }

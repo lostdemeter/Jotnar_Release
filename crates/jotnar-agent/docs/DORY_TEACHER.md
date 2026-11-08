@@ -64,6 +64,13 @@ python3 scripts/gen_teacher_dory.py \
   --out runs/teacher-dory.jsonl
 ```
 
+Generated artifacts default to `runs/teacher`. Set `DATA_DIR` if you keep them
+elsewhere:
+
+```sh
+export DATA_DIR="${DATA_DIR:-runs/teacher}"
+```
+
 The generated 20-row file is kept at:
 
 ```text

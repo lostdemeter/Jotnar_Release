@@ -6,11 +6,9 @@
 
 use std::collections::HashMap;
 
+use super::infer::{CKind, StreamInfo};
 use crate::error::{Error, Result};
-use crate::ir::{BoundInstr, BoundProgram, Config};
-use crate::payload::Feeds;
-
-use super::infer::{infer_shapes, CKind, StreamInfo};
+use crate::ir::Config;
 
 pub struct RopeCtx {
     pub p: usize,
@@ -798,12 +796,15 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
             let co = ctx.elems(o)?;
             Ok((
                 fill(
-                    r#"/* {o} = T2I({x}) phi-ladder -> int64 */
+                    r#"/* {o} = T2I({x}) phi-ladder -> int64, round half away from zero */
 for (int64_t t_i = 0; t_i < {co}; ++t_i) {
   double _v = 0.0;
-  if (!{x}_z[t_i])
-    _v = ({x}_s[t_i] < 0 ? -1.0 : 1.0)
-       * pow(1.618033988749895, ((double){x}_e[t_i] - 32768.0) / 512.0);
+  if (!{x}_z[t_i]) {
+    if ({x}_e[t_i] < 0 || {x}_e[t_i] > 65535) return 31;
+    if ({x}_s[t_i] != 0)
+      _v = ({x}_s[t_i] < 0 ? -1.0 : 1.0)
+         * pow(1.618033988749895, ((double){x}_e[t_i] - 32768.0) / 512.0);
+  }
   {o}[t_i] = (int64_t)(_v >= 0.0 ? _v + 0.5 : _v - 0.5);
 }"#,
                     &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
@@ -814,6 +815,12 @@ for (int64_t t_i = 0; t_i < {co}; ++t_i) {
         "IGET" => {
             let (x, o) = (args[0].as_str(), outs[0].as_str());
             let idx = int_lit(&args[1], "IGET idx")?;
+            let elems = ctx.elems(x)?;
+            if idx < 0 || idx as usize >= elems {
+                return Err(Error::asm(format!(
+                    "IGET: index {idx} out of range {elems}"
+                )));
+            }
             Ok((
                 fill(
                     "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",

@@ -5,7 +5,7 @@ A zine-style manual for **Jotnar**, the geometric assembly language implemented 
 to HTML by a small Rust press, paginated by Paged.js, and printed to PDF by
 Chromium through the DevTools Protocol.
 
-The first draft is **99 pages**, landscape 840 × 660 pt, built around a two-page
+The first draft is **101 pages**, landscape 840 × 660 pt, built around a two-page
 spread rhythm: a red cover, a black masthead, a contents page, six part dividers,
 a full register of all 90 mnemonics, nine showcase exhibits, and a trust-spine
 appendix that records what each claim proves and does not prove.

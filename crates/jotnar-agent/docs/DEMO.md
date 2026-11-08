@@ -4,7 +4,7 @@ One command runs the whole consolidated story: propose, exact gate, compose,
 blind select, adopt, retain, and audit on held-out and hard streams.
 
 ```sh
-cd Jotnar_Release
+cd "$(git rev-parse --show-toplevel)"
 cargo run -q -p jotnar-agent -- demo --out runs/demo
 ```
 

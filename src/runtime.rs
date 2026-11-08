@@ -72,7 +72,7 @@ fn check_shapes(mn: &str, args: &[Arg], line: &str) -> Result<()> {
                 }
             }
         }
-        "MATMUL" | "BATCH_MATMUL" => {
+        "MATMUL" | "BATCH_MATMUL" | "IMATMUL" => {
             if let (Some(a), Some(b)) = (stream_shape(&args[0]), stream_shape(&args[1])) {
                 if a.len() < 2 || b.len() < 2 || a[a.len() - 1] != b[b.len() - 2] {
                     return Err(at(format!(

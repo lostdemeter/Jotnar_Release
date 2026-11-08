@@ -1,5 +1,13 @@
 # Certified harness tuning (`jotnar-agent`)
 
+> **Experimental research exhibit.** The language contract, if accepted, is
+> the four integer primitives (`T2I`, `IGET`, `IMATMUL`, `IREDUCE_SUM`) and
+> their documented boundaries. The agent, proposer menus, weights, corpora,
+> demos, and the backend pipeline search are research, not part of the
+> language contract. This is a certified harness/backend tuner, not an
+> open-ended self-improving agent.
+
+
 A bounded proposer edits a harness of composable Jotnar families and steps;
 the exact interpreter gate is the only judge. The loop composes independent
 fixes, keeps a per-case certificate, retains every incumbent-correct case, and
@@ -51,5 +59,5 @@ backend:    selected cse -> dce -> strength -> fuse_imad;
 - [`crates/jotnar-agent/README.md`](../../crates/jotnar-agent/README.md)
 - [`docs/DEMO.md`](../../crates/jotnar-agent/docs/DEMO.md)
 - [`docs/BACKEND_SHOWCASE.md`](../../crates/jotnar-agent/docs/BACKEND_SHOWCASE.md)
-- [`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md)
-- [`docs/WBP_CRITIQUE.md`](../../docs/WBP_CRITIQUE.md)
+- [`docs/WORLD_MODEL.md`](../../crates/jotnar-agent/docs/WORLD_MODEL.md)
+- [`docs/WBP_CRITIQUE.md`](../../crates/jotnar-agent/docs/WBP_CRITIQUE.md)

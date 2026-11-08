@@ -60,6 +60,11 @@ A source-level `float_trap` gate fails the build if a float slips into the gener
 
 The non-FPU gates are exact for bigram decisions, T moves, fixed-point arithmetic, matmul, GT/SELECT, and the full headt block. That is a stronger claim than “close enough.”
 
+The four integer extensions have an explicit lowering boundary: `T2I`, `IGET`,
+`IMATMUL`, and `IREDUCE_SUM` are implemented in C and non-FPU. CUDA and
+Verilog return a loud `NoPattern` for them. That is a declared limit, not a
+silent fallback.
+
 ## CUDA
 
 The CUDA target is correctness-first. It emits one launch per operation, with FP32 kernels for the unit, bigram, and headt paths. It is not tuned; there are no CUDA graphs, no fused executor, and no cuBLAS scheduling.

@@ -46,7 +46,8 @@ What works today:
 - Differential parity:
 
 ```text
-88/88 op cases          scripts/parity_ops.py
+88/88 op cases (original 86)  scripts/parity_ops.py
+4 extension gates       tests/int_geometry.rs
 32/32 emitter cases     scripts/parity_emit.py
 flagship + xf_block     scripts/parity_programs.py
 CUDA units/iext/…       scripts/parity_cuda.py

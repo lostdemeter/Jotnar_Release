@@ -152,8 +152,29 @@ fn matmul_int(a: &Triple, b: &Triple, m_acc: i64) -> Result<Triple> {
 /// triple transformer path to the integer harness/agent path.
 pub fn op_t2i(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let t = arg_triple(args, 0, "T2I")?;
-    let f = lattice::decode_triple(t);
-    Ok(vec![Value::I64(f.mapv(|v| v.round() as i64))])
+    let lut = lattice::t2i_lut();
+    let mut out = ArrayD::<i64>::zeros(t.s.raw_dim());
+    for (idx, &zero) in t.z.indexed_iter() {
+        let value = if zero != 0 {
+            0
+        } else {
+            let e = t.e[idx.clone()];
+            if !(0..lattice::NLVL).contains(&(e as i64)) {
+                return Err(Error::runtime(format!(
+                    "T2I: exponent {e} outside lattice range 0..{}",
+                    lattice::NLVL
+                )));
+            }
+            let magnitude = lut[e as usize];
+            match t.s[idx.clone()] {
+                s if s < 0 => -magnitude,
+                0 => 0,
+                _ => magnitude,
+            }
+        };
+        out[idx.clone()] = value;
+    }
+    Ok(vec![Value::I64(out)])
 }
 
 pub fn op_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {

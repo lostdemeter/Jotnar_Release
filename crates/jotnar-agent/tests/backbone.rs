@@ -164,19 +164,21 @@ fn t2i_iget_lower_to_c_and_nonfpu_and_match_the_interpreter() {
     use std::fs;
     use std::process::Command;
 
-    let listing = "IN x AS T:*\ni = T2I(x)\no = IGET(i, 0)\n";
-    let x = ArrayD::from_shape_vec(IxDyn(&[1, 2]), vec![1.0, 2.0]).unwrap();
+    let listing = "IN x AS T:*\ni = T2I(x)\no0 = IGET(i, 0)\no1 = IGET(i, 1)\n";
+    let x = ArrayD::from_shape_vec(IxDyn(&[2]), vec![1.0, 2.0]).unwrap();
     let triple = jotnar::lattice::encode(&x);
     let mut feeds = jotnar::payload::Feeds::new();
     feeds.insert("x".into(), Value::Triple(triple.clone()));
 
-    // Reference interpreter: T2I rounds to nearest, IGET takes element 0.
     let got = jotnar::run_text(listing, &AsmOptions::new("."), &feeds).expect("interpreter");
-    let want = match got.get("o").expect("o") {
-        Value::I64(a) => *a.iter().next().unwrap(),
-        other => panic!("unexpected {other:?}"),
-    };
-    assert_eq!(want, 1);
+    let want: Vec<i64> = ["o0", "o1"]
+        .iter()
+        .map(|name| match got.get(*name).expect(name) {
+            Value::I64(a) => *a.iter().next().unwrap(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(want, vec![1, 2]);
 
     let dir = std::env::temp_dir().join(format!("jotnar-t2i-iget-parity-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -185,7 +187,7 @@ fn t2i_iget_lower_to_c_and_nonfpu_and_match_the_interpreter() {
     for (target, name) in [(Target::C, "c"), (Target::NonFpu, "nonfpu")] {
         let opts = CompileOptions {
             target,
-            outputs: vec!["o".to_string()],
+            outputs: vec!["o0".to_string(), "o1".to_string()],
             asm: AsmOptions::new("."),
             use_fp16: false,
         };
@@ -195,7 +197,8 @@ fn t2i_iget_lower_to_c_and_nonfpu_and_match_the_interpreter() {
         let s_path = dir.join(format!("{name}-s.bin"));
         let e_path = dir.join(format!("{name}-e.bin"));
         let z_path = dir.join(format!("{name}-z.bin"));
-        let out_path = dir.join(format!("{name}-out.bin"));
+        let o0_path = dir.join(format!("{name}-o0.bin"));
+        let o1_path = dir.join(format!("{name}-o1.bin"));
         let s_bytes: Vec<u8> = triple.s.iter().map(|v| *v as u8).collect();
         fs::write(&s_path, s_bytes).unwrap();
         let mut e_bytes = Vec::new();
@@ -209,13 +212,17 @@ fn t2i_iget_lower_to_c_and_nonfpu_and_match_the_interpreter() {
             .arg(&s_path)
             .arg(&e_path)
             .arg(&z_path)
-            .arg(&out_path)
+            .arg(&o0_path)
+            .arg(&o1_path)
             .status()
             .expect("run emitted binary");
         assert!(status.success(), "{name}: emitted binary failed");
-        let bytes = fs::read(&out_path).unwrap();
-        let got = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        assert_eq!(got, want, "{name}: emitted result must match interpreter");
+        let read = |path: &std::path::Path| {
+            let bytes = fs::read(path).unwrap();
+            i64::from_le_bytes(bytes[0..8].try_into().unwrap())
+        };
+        let got = vec![read(&o0_path), read(&o1_path)];
+        assert_eq!(got, want, "{name}: every T2I/IGET element must match");
     }
 }
 

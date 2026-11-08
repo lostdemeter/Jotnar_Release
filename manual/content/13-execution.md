@@ -55,11 +55,12 @@ The vocabulary matters because the claims are different. “It compiles” is a 
 
 ## What the witness actually checks
 
-The Rust port is gated by differential harnesses:
+The Rust port is gated by differential harnesses. The Python oracle covers the original 86 mnemonics; the four integer extensions (`T2I`, `IGET`, `IMATMUL`, `IREDUCE_SUM`) have no Python oracle and are gated separately by interpreter/C/non-FPU differential tests:
 
 | Gate | What it compares | Current result |
 |---|---|---|
-| `parity_ops.py` | One small listing per mnemonic, Rust vs. Python. | 88/88 op cases. |
+| `parity_ops.py` | One small listing per original mnemonic, Rust vs. Python. | 88/88 cases for the original 86-mnemonic oracle. |
+| `tests/int_geometry.rs` | The four integer extensions: interpreter vs. emitted C and non-FPU, plus T2I’s baked table and IGET bounds. | Exact within the stated test domains. |
 | `parity_emit.py` | Emitted C and non-FPU binaries vs. Python-emitted binaries. | 32 emitter cases. |
 | `parity_programs.py` | The flagship programs, including the image listing. | Streams match within the stated class. |
 | `parity_cuda.py` | CUDA units, bigram, argmax, headt/fp16/D32/D64. | Units within 1e-4; decisions bit-exact. |

@@ -1,11 +1,19 @@
 # jotnar-agent
 
+> **Experimental research exhibit.** The language contract, if accepted, is
+> the four integer primitives (`T2I`, `IGET`, `IMATMUL`, `IREDUCE_SUM`) and
+> their documented boundaries. The agent, proposer menus, weights, corpora,
+> demos, and the backend pipeline search are research, not part of the
+> language contract. This is a certified harness/backend tuner, not an
+> open-ended self-improving agent.
+
+
 A listing-level autonomous circuit for Jotnar.
 
 > Start with [`docs/DEMO.md`](docs/DEMO.md) for the end-to-end demo and
 > [`docs/BACKEND_SHOWCASE.md`](docs/BACKEND_SHOWCASE.md) for the bit-exact
 > backend-tuning showcase. The world-model details are in
-> [`../../docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
+> [`docs/WORLD_MODEL.md`](docs/WORLD_MODEL.md).
 
 This crate applies the *shape* of Harness²'s optimizer loop to the Rust Jotnar
 release, without importing Harness²'s benchmarks or runtime:
@@ -63,8 +71,9 @@ heldout:  ops 13 -> 11 (15.4%), weighted 33 -> 23 (30.3%)
 parity:   C 18/18, non-FPU 18/18; regressions 0
 ```
 
-It writes `report.md`, `summary.json`, one certificate per kernel, optimized
-listings, and the emitted backend sources. See
+It writes `report.md`, `summary.json`, one trust-spine `jotnar.certificate`
+per kernel, optimized listings, and the emitted backend sources. At least one
+certificate is checked with `jotnar-lab verify` on every run. See
 [`docs/BACKEND_SHOWCASE.md`](docs/BACKEND_SHOWCASE.md) for the corpus, pass
 menu, artifact layout, and the honest limits (fixed menu, curated corpus,
 finite-sample certificates).
@@ -381,7 +390,7 @@ to an end-to-end path: warm-start the readouts, backprop through Q/K/V and
 gate/up, then keep the best of zero-init, readout, and end-to-end. With
 `--corpus` or `--generated`, the selection is gate-aware. The real Dory model
 is `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF`; see
-[`docs/DORY_TEACHER.md`](../../docs/DORY_TEACHER.md). Dory's latent fits to
+[`docs/DORY_TEACHER.md`](docs/DORY_TEACHER.md). Dory's latent fits to
 ~2.5e-6 teacher error, but the exact gate rejects the latent-only student
 because `start_is_one` differs; the zero-init candidate wins. That is the
 next co-training target.
@@ -451,7 +460,7 @@ The generated held-out miss is closed by a deep **training** member
 `refinements + 1`. The consumer is the geometric `reduce_sum` action: applicability is the input
 shape, and the model learns it from the shaped training cases. The
 completeness net is still available but is no longer the explanation. See
-[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
+[`docs/WORLD_MODEL.md`](docs/WORLD_MODEL.md).
 
 ## The generalization audit
 
@@ -635,8 +644,8 @@ features: the task vector now encodes the target op family and the
 are what separate `select_min` from `select_max` when the start shape is the
 same; the synthetic min/max ablation in `tests/state_effect_model.rs` fails
 without them. The WBP lag-35 interaction is neutral on this split. See
-[`docs/WBP_CRITIQUE.md`](../../docs/WBP_CRITIQUE.md) and
-[`docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
+[`docs/WBP_CRITIQUE.md`](docs/WBP_CRITIQUE.md) and
+[`docs/WORLD_MODEL.md`](docs/WORLD_MODEL.md).
 
 ## Wall-Breaking Protocol (side quest)
 
@@ -647,7 +656,7 @@ if the residual looks ergodic, inject an irrational harmonic and look again.
 
 The first Jotnar-native slice lives in
 [`src/wall_breaking.rs`](src/wall_breaking.rs) and is documented in
-[`docs/WALL_BREAKING.md`](../../docs/WALL_BREAKING.md). It uses only existing
+[`docs/WALL_BREAKING.md`](docs/WALL_BREAKING.md). It uses only existing
 integer ops (`IWINDOW`, `IMUL`, `ISUM`, `IADD`, `ISUB`, `IDIV`, `IMAX`, `IEQ`,
 `ISELECT`, `IGET`) at a fixed-point scale.
 

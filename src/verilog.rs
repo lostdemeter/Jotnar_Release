@@ -41,7 +41,6 @@ pub struct VOp {
     pub args: Vec<VArg>,
 }
 
-const BINOPS: [&str; 3] = ["IXOR", "IAND", "IOR"];
 const ARITH: [&str; 4] = ["IADD", "ISUB", "IMUL", "IMOD"];
 const SHIFTS: [&str; 2] = ["ISHL", "ISHR"];
 const KNOWN: [&str; 12] = [
@@ -642,13 +641,6 @@ fn arg_ref(a: &VArg) -> Result<&str> {
     match a {
         VArg::Ref(r) => Ok(r),
         VArg::Int(_) => Err(Error::asm("Verilog: expected stream reference")),
-    }
-}
-
-fn arg_int(a: &VArg) -> Result<i64> {
-    match a {
-        VArg::Int(v) => Ok(*v),
-        VArg::Ref(_) => Err(Error::asm("Verilog: expected integer literal")),
     }
 }
 

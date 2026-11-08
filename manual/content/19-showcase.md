@@ -6,7 +6,7 @@ lede: Four exhibits that are deliberately different: a real game, a word-level i
 columns: 2
 ---
 
-A language is only as convincing as the things people build with it. Part IV is a **selected set**: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18). These four exhibits are not benchmarks. They are stories about the same stack under different pressures.
+A language is only as convincing as the things people build with it. The full index has nine exhibits; Part IV is a **selected set of four**: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18), and the certified agent/backend-tuning exhibit lives in `showcase/agent/`. These four stories are not benchmarks. They are stories about the same stack under different pressures.
 
 ## DOOM on the RV32IM core
 
