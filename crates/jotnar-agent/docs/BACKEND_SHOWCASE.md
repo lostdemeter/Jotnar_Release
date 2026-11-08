@@ -6,7 +6,7 @@ kernels, checks every candidate against the reference interpreter, and lowers
 the adopted pipeline through both the C and non-FPU backends for exact parity.
 
 ```sh
-cd /home/balrog/Documents/OpenCode/jotnar_release_work
+cd Jotnar_Release
 cargo run -q -p jotnar-agent -- backend-showcase --out runs/backend-showcase
 ```
 

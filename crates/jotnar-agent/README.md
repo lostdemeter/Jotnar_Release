@@ -2,11 +2,10 @@
 
 A listing-level autonomous circuit for Jotnar.
 
-> New session? Read
-> [`HANDOFF.md`](../../../harness_selfimprove/HANDOFF.md) for the current
-> state, artifacts, known gaps, and next-session plan, then
-> [`NEXT_SESSION_PROMPT.md`](../../../harness_selfimprove/NEXT_SESSION_PROMPT.md)
-> for the self-contained next prompt.
+> Start with [`docs/DEMO.md`](docs/DEMO.md) for the end-to-end demo and
+> [`docs/BACKEND_SHOWCASE.md`](docs/BACKEND_SHOWCASE.md) for the bit-exact
+> backend-tuning showcase. The world-model details are in
+> [`../../docs/WORLD_MODEL.md`](../../docs/WORLD_MODEL.md).
 
 This crate applies the *shape* of Harness²'s optimizer loop to the Rust Jotnar
 release, without importing Harness²'s benchmarks or runtime:

@@ -67,7 +67,7 @@ python3 scripts/gen_teacher_dory.py \
 The generated 20-row file is kept at:
 
 ```text
-/home/balrog/student_runs/depth_jotnaros_data/teacher-dory.jsonl
+$DATA_DIR/teacher-dory.jsonl
 ```
 
 ## Loop probe
@@ -104,7 +104,7 @@ python3 scripts/gen_teacher_dory_actions.py \
 The 20-row action file is at:
 
 ```text
-/home/balrog/student_runs/depth_jotnaros_data/teacher-actions-dory-programs.jsonl
+$DATA_DIR/teacher-actions-dory-programs.jsonl
 ```
 
 Run the teacher through the exact gate:
@@ -142,7 +142,7 @@ Each row contains the base outcome and a 10-entry action table: applicable,
 outcome, correct/wrong, steps, and the gate note. The generated table is at:
 
 ```text
-/home/balrog/student_runs/depth_jotnaros_data/action-effects.jsonl
+$DATA_DIR/action-effects.jsonl
 ```
 
 The Dory action prompt now includes the start listing, target listing,
