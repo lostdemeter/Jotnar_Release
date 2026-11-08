@@ -10,7 +10,7 @@ between the two codebases explicit so the port stays reviewable.
 | `chain/asm.py:expand/parse/assemble/verify` | `src/asm.rs` | textual macro expansion, origins, REPEAT, layout replay |
 | `chain/asm.py:_check_layouts/_resolve` | `src/layout.rs` | `$VAR`, `$VAR^T`, `*`, UNKNOWN |
 | `chain/asm.py:run/_check_shapes` | `src/runtime.rs` | loops, BREAK, kind cross-check, per-op shape rules |
-| `chain/asm_ops.py:REGISTRY/SIGS` | `src/ops/mod.rs` | all 86 mnemonics and signatures, including `SADD/IMAX/ISAR/IDIVU/IMODU/IEQ/ILT/ISELECT` |
+| `chain/asm_ops.py:REGISTRY/SIGS` | `src/ops/mod.rs` | all 90 mnemonics and signatures, including `SADD/IMAX/ISAR/IDIVU/IMODU/IEQ/ILT/ISELECT` |
 | `chain/asm_ops.py:op_*` | `src/ops/*.rs` | reference semantics |
 | `chain/emit_c.py` | `src/codegen/{c,infer}.rs` | C99 patterns + static shapes |
 | `chain/emit_nonfpu.py` | `src/codegen/nonfpu.rs` | integer-only patterns and tables |
@@ -37,7 +37,7 @@ between the two codebases explicit so the port stays reviewable.
    `Triple`, exact compare/clip/bin helpers, and the core numpy-style ops.
    Jotnar consumes it through re-exports; image-specific substrate helpers
    are the next migration pass.
-1. **Runtime parity**: frontend + interpreter + all 86 op semantics.
+1. **Runtime parity**: frontend + interpreter + all 90 op semantics.
    Gated by `scripts/parity_ops.py` and `scripts/parity_programs.py`.
 2. **C emitter**: done for the reference lowering set, plus ROPE/SWIGLU/
    ATTN/TOPK extensions. Gated by `scripts/parity_emit.py` and the headt /

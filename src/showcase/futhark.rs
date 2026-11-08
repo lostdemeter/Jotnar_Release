@@ -14,7 +14,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ndarray::{ArrayD, IxDyn};
 use serde_json::Value as Json;
 
 use crate::builder::{Arg, Prog};
@@ -117,20 +116,12 @@ impl FutharkPayload {
     }
 }
 
-fn op(p: &mut Prog, mn: &str, args: &[Arg]) -> Result<String> {
-    p.op(mn, args, None)
-}
-
 fn named(p: &mut Prog, mn: &str, args: &[Arg], out: &str) -> Result<String> {
     p.op(mn, args, Some(out))
 }
 
 fn lit(v: i64) -> Arg {
     Arg::Int(v)
-}
-
-fn refs(names: &[&str]) -> Vec<Arg> {
-    names.iter().map(|s| Arg::from(*s)).collect()
 }
 
 /// Build the listing. `n` is the lexicon table size; the binary search

@@ -35,7 +35,7 @@ What works today:
 
 - `IMPORT` / `DEF` / `CALL` textual macro expansion with per-call-site
   namespacing, `REPEAT` / `BREAK`, `CONFIG`, layouts, `STATE`, `RANGE`.
-- Registry binding for **all 86 mnemonics**, including `SADD`, `IMAX`,
+- Registry binding for **all 90 mnemonics**, including `SADD`, `IMAX`,
   `ISAR`, `IDIVU`, `IMODU`, `IEQ`, `ILT`, `ISELECT`.
 - The static layout verifier with honest coverage reporting.
 - The reference interpreter over `F32`/`F64`, `I64`, `U8`, bool masks,
@@ -46,14 +46,15 @@ What works today:
 - Differential parity:
 
 ```text
-88/88 op cases          scripts/parity_ops.py
+88/88 op cases (original 86)  scripts/parity_ops.py
+4 extension gates       tests/int_geometry.rs
 32/32 emitter cases     scripts/parity_emit.py
 flagship + xf_block     scripts/parity_programs.py
 CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          73/73
+workspace tests          189/189
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms

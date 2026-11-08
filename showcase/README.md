@@ -14,7 +14,7 @@ The full certificate/schema story is in the trust-spine appendix
 | **DOOM** | <img src="doom/title.png" width="420" alt="DOOM title screen running on the Rust RV32IM core"> |
 | **Analog filter** | <img src="analog_filter/edge_panel.png" width="520" alt="Target / Laplace / RC / best Perona-Malik panel"> |
 
-## The eight exhibits (+ runtime, pending exhibit number)
+## The ten exhibits
 
 ### 1. Language tour
 
@@ -100,8 +100,7 @@ cargo run --release --bin jotnar-demo-protocol
 Proves: same program + same input bytes = same output bytes regardless of
 placement or completion order.
 Does not prove: multi-stage pipelines or the `served` backend.
-TCP transport for this protocol is in `showcase/runtime/` (pending
-exhibit number; the integrator assigns it).
+TCP transport for this protocol is exhibit 10, in `showcase/runtime/`.
 
 ### 7. DOOM on RV32IM
 
@@ -135,7 +134,28 @@ Proves: the best synthetic PM gain is about 4% relative for about 10× the
 Laplace cost; on the real hole it is worse.
 Does not prove: analog hardware speed or that a local PDE replaces geometry.
 
-### Runtime (pending exhibit number): interpreter + model-blind node
+### 9. Certified harness tuning (`jotnar-agent`)
+
+A bounded proposer edits a harness of composable families and steps; the exact
+interpreter gate is the only judge. The demo composes two independent fixes,
+retains the incumbent, checks a held-out split, and audits a separate hard set.
+The backend showcase applies the same loop to a real integer-IR optimizer
+pipeline and verifies C and non-FPU parity.
+
+```sh
+cargo run -q -p jotnar-agent -- demo --out runs/demo
+cargo run -q -p jotnar-agent -- backend-showcase --out runs/backend-showcase
+```
+
+Proves: composition under an exact gate; retention and held-out
+non-regression; per-case certificates; a bit-exact backend pipeline with C and
+non-FPU parity (train ops 27 -> 20, weighted 58 -> 35; held-out ops 13 -> 11,
+weighted 33 -> 23; 0 regressions).
+Does not prove: open-ended self-improvement, universal equivalence, or hardware
+performance. Read the full claim in
+[`agent/README.md`](agent/README.md).
+
+### 10. Interpreter + model-blind node
 
 Warm execution without compiling: `jotnar-repl` assembles once locally,
 `jotnar-node` serves the same deterministic boundary over TCP, and

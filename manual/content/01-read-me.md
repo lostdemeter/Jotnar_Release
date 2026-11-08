@@ -61,8 +61,8 @@ The output is `[13, 26, 39, 52]`. If you got that, the rest of the book is elabo
 This is **issue 01**, a first rough draft. Some chapters describe behavior that is gated by parity scripts but not yet exposed in the CLI. Some commands are stable; some are scaffolding. Where the manual and the assembler disagree, the assembler wins. Where the assembler and the oracle disagree, the parity harness wins. Where the harness and reality disagree, file a bug.
 :::
 
-::: note [STATUS AT THIS DRAFT / 2026-11-06]
-The Rust workspace is green at **61/61 tests**. The self-contained trust-spine example verifies **PASS**. The real DOOM certificate verifies **PASS on this host**, and correctly prints **BLOCKED** when its local `/tmp` artifacts are absent. The manual's witness script passes **4/4** listings. The trust spine has its own appendix now: **Appendix A**.
+::: note [STATUS AT THIS DRAFT / 2026-11-08]
+The Rust workspace is green at **189/189 tests**. The self-contained trust-spine example verifies **PASS**. The real DOOM certificate verifies **PASS on this host**, and correctly prints **BLOCKED** when its local `/tmp` artifacts are absent. The manual's witness script passes **4/4** listings. The trust spine has its own appendix now: **Appendix A**.
 :::
 
 ## Conventions

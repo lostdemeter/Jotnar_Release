@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use ndarray::{ArrayD, IxDyn};
 use serde_json::{json, Value as Json};
 
 use crate::asm;

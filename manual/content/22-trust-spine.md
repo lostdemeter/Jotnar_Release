@@ -207,8 +207,8 @@ cargo run -p jotnar-lab -- bench doom \
   --certificate certificates/doom/native-gpu-migration.json
 ```
 
-::: note [STATUS AT THIS DRAFT / 2026-11-06]
-Workspace tests: **61/61**. Self-contained example certificate: **PASS**. DOOM certificate: **PASS on this host**, and **BLOCKED** when the local artifacts are absent. Manual witness: **4/4** listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.
+::: note [STATUS AT THIS DRAFT / 2026-11-08]
+Workspace tests: **189/189**. Self-contained example certificate: **PASS**. DOOM certificate: **PASS on this host**, and **BLOCKED** when the local artifacts are absent. Manual witness: **4/4** listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.
 :::
 
 ## What the harness must not do

@@ -59,6 +59,19 @@ pub fn resolve(pat: &str, actual: &str, bindings: &mut HashMap<String, String>) 
         }
         return Ok(if derived { format!("{got}^T") } else { got });
     }
+    // `KIND:*` is the documented "kind matches, geometry any" pattern (e.g.
+    // `I:*` is an integer stream of any shape). Only a bare `*` is a fully
+    // unconstrained wildcard.
+    if let (Some((pk, pg)), Some((ak, _ag))) = (pat.split_once(':'), actual.split_once(':')) {
+        if pg == "*" {
+            if pk != ak {
+                return Err(Error::asm(format!(
+                    "layout kind mismatch: want {pat}, got {actual}"
+                )));
+            }
+            return Ok(actual.to_string());
+        }
+    }
     if pat != actual {
         return Err(Error::asm(format!(
             "layout mismatch: want {pat}, got {actual}"

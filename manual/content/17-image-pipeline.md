@@ -44,7 +44,7 @@ The figure is a visual check, not a witness. The witness is the comparison in `s
 ## What it does not prove
 
 - **Hardware speed.** The CUDA backend is correctness-first. A correctness run is not a performance result.
-- **Every opcode on every backend.** The image listing is a selected 43-op path, not the full 86-mnemonic register.
+- **Every opcode on every backend.** The image listing is a selected 43-op path, not the full 90-mnemonic register.
 - **Pixel identity across every platform.** Floats can differ in the last ulp; the comparison classes are explicit.
 - **That the image is what you meant.** The gate checks the lowering against the reference, not the artistic intent.
 

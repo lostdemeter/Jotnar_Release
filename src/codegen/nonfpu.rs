@@ -32,6 +32,8 @@ const INTEGER_MN: &[&str] = &[
     "ISUB",
     "IMUL",
     "IMAD",
+    "IMATMUL",
+    "IREDUCE_SUM",
     "IDIV",
     "IMOD",
     "IDIVU",
@@ -55,6 +57,8 @@ const INTEGER_MN: &[&str] = &[
     "IVARINT",
     "F2I",
     "I2F",
+    "T2I",
+    "IGET",
     "MUL",
     "ADD",
     "SUB",
@@ -88,6 +92,7 @@ const FX_MN: &[&str] = &[
     "ARGMAX",
     "SILU",
     "GT",
+    "T2I",
 ];
 
 const SM_MN: &[&str] = &["TSHIFT", "SOFTMAX_WIDE", "SOFTMAX"];
@@ -408,6 +413,10 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
             l.push('\n');
             l.push_str(NF_SILU_HELPERS);
         }
+        if has("T2I") {
+            l.push_str(&bake_vec("NF_T2I", lattice::t2i_lut(), 8));
+            l.push('\n');
+        }
     }
     l.push('\n');
     Ok(l)
@@ -423,7 +432,7 @@ fn flat_u8(a: &ndarray::ArrayD<u8>) -> Vec<i64> {
     a.iter().map(|v| *v as i64).collect()
 }
 
-fn tplane(ctx: &Ctx, stream: &str, comp: &str, idx: &str) -> String {
+fn tplane(_ctx: &Ctx, stream: &str, comp: &str, idx: &str) -> String {
     format!("{stream}_{comp}[{idx}]")
 }
 
@@ -436,6 +445,30 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Opt
     }
     if mn == "F2I" || mn == "I2F" {
         return Some(ieee_pattern(mn, outs, args, ctx));
+    }
+    if mn == "IGET" {
+        let x = args[0].as_str();
+        let o = outs[0].as_str();
+        let idx: i64 = match args[1].parse() {
+            Ok(v) => v,
+            Err(_) => return Some(Err(Error::asm("IGET idx must be an integer literal"))),
+        };
+        let elems = match ctx.elems(x) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        if idx < 0 || idx as usize >= elems {
+            return Some(Err(Error::asm(format!(
+                "IGET: index {idx} out of range {elems}"
+            ))));
+        }
+        return Some(Ok((
+            fill(
+                "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",
+                &[("o", o.into()), ("x", x.into()), ("idx", idx.to_string())],
+            ),
+            None,
+        )));
     }
     // No float streams on this target.
     for a in args {
@@ -713,6 +746,24 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i) {
                         ("az", tplane(ctx, a, "z", "f_i")),
                         ("co", co.to_string()),
                     ],
+                ),
+                None,
+            ))
+        }
+        "T2I" => {
+            let x = args[0].as_str();
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = T2I({x}) phi-ladder -> int64, exact baked table */
+for (int64_t t_i = 0; t_i < {co}; ++t_i) {
+  if ({x}_z[t_i]) { {o}[t_i] = 0; continue; }
+  int32_t _e = {x}_e[t_i];
+  if (_e < 0 || _e > 65535) return 31;
+  int64_t _v = NF_T2I[_e];
+  {o}[t_i] = ({x}_s[t_i] == 0) ? 0 : (({x}_s[t_i] < 0) ? -_v : _v);
+}"#,
+                    &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
                 ),
                 None,
             ))

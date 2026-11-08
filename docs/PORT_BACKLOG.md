@@ -20,7 +20,7 @@ Guiding rules:
 
 Done:
 
-- 86-mnemonic registry, parser/expander/assembler/verifier, interpreter,
+- 90-mnemonic registry, parser/expander/assembler/verifier, interpreter,
   `REPEAT`/`BREAK`, `repeat()`.
 - C, non-FPU, and CUDA code generators (correctness-first).
 - `phi-core` crate: lattice, triples, exact helpers, numpy-style substrate
@@ -40,7 +40,7 @@ Open:
 ## 1. Jotnar-LAN / language core
 
 - [x] `asm.py`: IMPORT, DEF/CALL, REPEAT/BREAK, parse, assemble, verify
-- [x] `asm_ops.py`: all 86 opcodes and signatures
+- [x] `asm_ops.py`: all 90 opcodes and signatures
 - [x] `run()` / `repeat()` reference interpreter
 - [ ] `builder.py`: programmatic listing construction
 - [ ] `debugger.py`: breakpoints, watch, step, lesion

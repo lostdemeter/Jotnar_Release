@@ -5,9 +5,9 @@ A zine-style manual for **Jotnar**, the geometric assembly language implemented 
 to HTML by a small Rust press, paginated by Paged.js, and printed to PDF by
 Chromium through the DevTools Protocol.
 
-The first draft is **99 pages**, landscape 840 × 660 pt, built around a two-page
+The first draft is **101 pages**, landscape 840 × 660 pt, built around a two-page
 spread rhythm: a red cover, a black masthead, a contents page, six part dividers,
-a full register of all 86 mnemonics, eight showcase exhibits, and a trust-spine
+a full register of all 90 mnemonics, ten showcase exhibits, and a trust-spine
 appendix that records what each claim proves and does not prove.
 
 ## Build
@@ -46,7 +46,7 @@ Flags:
 ```text
 book.toml                 metadata, parts, chapter order, themes
 content/*.md              one Markdown file per chapter, with frontmatter
-data/ops.tsv              the 86-mnemonic register (name, arity, sig, family, note)
+data/ops.tsv              the 90-mnemonic register (name, arity, sig, family, note)
 press/src/main.rs         Markdown -> HTML, directives, syntax highlighting, TOC
 press/print_pdf.py        CDP driver: wait for fonts + Paged.js, then print
 press/vendor/             Paged.js 0.4.3 (vendored)

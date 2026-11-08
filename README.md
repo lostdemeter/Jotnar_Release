@@ -33,7 +33,7 @@ behind the claims.</p>
 &nbsp;·&nbsp;
 <a href="manual/">source</a>
 </p>
-<p><em>99 pages. 86 mnemonics. One fail-loud rule: if the assembler has to
+<p><em>101 pages. 90 mnemonics. One fail-loud rule: if the assembler has to
 guess, the program is already wrong.</em></p>
 </td>
 </tr>
@@ -131,7 +131,7 @@ cargo run -p jotnar-lab -- verify certificates/example/certificate.json
 
 [The loop](docs/LOOP.md) · [Certificate schema](docs/appendix/TRUST_SPINE.md) · [Harness](crates/jotnar-lab/)
 
-## The eight exhibits
+## The ten exhibits
 
 Each one is a different angle on the same stack. The full visual index is
 [`showcase/README.md`](showcase/README.md).
@@ -146,6 +146,8 @@ Each one is a different angle on the same stack. The full visual index is
 | [Protocol](showcase/protocol/) | same bytes under order and placement changes |
 | [DOOM](showcase/doom/) | native frame exact; checkpoint frame 2 exact vs GPU |
 | [Analog filter](showcase/analog_filter/) | quality and cost, including the negative real-hole limit |
+| [Certified agent](showcase/agent/) | exact-gate harness composition; bit-exact backend pipeline with C/non-FPU parity |
+| [Interpreter + node](showcase/runtime/) | warm execution; same bytes over framed TCP |
 
 ## Start here
 
@@ -165,24 +167,26 @@ Each one is a different angle on the same stack. The full visual index is
 The front door is deliberately short. The actual parts are here:
 
 - assembler, macro expansion, layouts: [`src/asm.rs`](src/asm.rs), [`src/layout.rs`](src/layout.rs)
-- the 86-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
+- the 90-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
 - code generators: [`src/codegen/`](src/codegen/)
 - structural Verilog: [`src/verilog.rs`](src/verilog.rs)
 - RV32IM and DOOM: [`src/rv32.rs`](src/rv32.rs)
 - in-process node protocol: [`src/protocol.rs`](src/protocol.rs)
 - certificates and verification: [`crates/jotnar-lab`](crates/jotnar-lab)
+- autonomous listing circuit and experience loop: [`crates/jotnar-agent`](crates/jotnar-agent)
 - language reference and field notes: [`manual/`](manual/)
 
 ## Receipts, not promises
 
 ```text
-86 mnemonics
-88/88 op parity cases
+90 mnemonics
+88/88 Python-oracle cases (original 86)
+4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
 32/32 emitter cases
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
-73/73 workspace tests
+189/189 workspace tests
 ```
 
 These are gates, not a leaderboard. The details and commands are in

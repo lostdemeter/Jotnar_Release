@@ -62,7 +62,7 @@ The RC field in the analog work is **Jotnar-SIM**, not **Jotnar-ANA**. The board
 
 Because geometry is the part of the problem that does not change when the machine does. A depth map is still a depth map on a CPU, a GPU, a piece of FPGA fabric, or a simulated analog field. A layout like `T:HW` is a promise about shape and kind that survives lowering. An exact integer add is exact on every target. A stream is a name for a value that does not care where it lives.
 
-The language is small on purpose. There are 86 mnemonics. The registry is the authority. Every mnemonic has an arity, a layout signature, and a reference implementation. If a target cannot lower a mnemonic, it says so. If a shape rule fails, the runtime says so. If an emitter has no pattern, it returns `NoPattern`, loudly.
+The language is small on purpose. There are 90 mnemonics. The registry is the authority. Every mnemonic has an arity, a layout signature, and a reference implementation. If a target cannot lower a mnemonic, it says so. If a shape rule fails, the runtime says so. If an emitter has no pattern, it returns `NoPattern`, loudly.
 
 ::: warning [THE WITNESS RULE]
 The board is a witness, not a proof. Byte-identity against an oracle is strong evidence that the lowering preserved the plan. It is not a theorem that the plan computes what you meant. That part is still your job.

@@ -6,11 +6,9 @@
 
 use std::collections::HashMap;
 
+use super::infer::{CKind, StreamInfo};
 use crate::error::{Error, Result};
-use crate::ir::{BoundInstr, BoundProgram, Config};
-use crate::payload::Feeds;
-
-use super::infer::{infer_shapes, CKind, StreamInfo};
+use crate::ir::Config;
 
 pub struct RopeCtx {
     pub p: usize,
@@ -622,6 +620,51 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
                 ))
             }
         }
+        "IMATMUL" => {
+            let (a, b, o) = (args[0].as_str(), args[1].as_str(), outs[0].as_str());
+            let (m, k, n) = (
+                ctx.rows(a)?,
+                ctx.width(a, "IMATMUL left")?,
+                ctx.width(b, "IMATMUL right")?,
+            );
+            Ok((
+                fill(
+                    r#"/* {o} = IMATMUL({a}, {b}) exact 64-bit wrap, [{m}x{k}] * [{k}x{n}] */
+for (int64_t i_i = 0; i_i < {m}; ++i_i) {
+  for (int64_t j_i = 0; j_i < {n}; ++j_i) {
+    int64_t _acc = 0;
+    for (int64_t k_i = 0; k_i < {k}; ++k_i)
+      _acc = (int64_t)((uint64_t)_acc + (uint64_t)((int64_t)((uint64_t){a}[i_i * {k} + k_i] * (uint64_t){b}[k_i * {n} + j_i])));
+    {o}[i_i * {n} + j_i] = _acc;
+  }
+}"#,
+                    &[
+                        ("o", o.into()),
+                        ("a", a.into()),
+                        ("b", b.into()),
+                        ("m", m.to_string()),
+                        ("k", k.to_string()),
+                        ("n", n.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "IREDUCE_SUM" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let n = ctx.elems(x)?;
+            Ok((
+                fill(
+                    r#"/* {o} = IREDUCE_SUM({x}) exact 64-bit wrap over {n} elements */
+{ int64_t _acc = 0;
+  for (int64_t e_i = 0; e_i < {n}; ++e_i)
+    _acc = (int64_t)((uint64_t)_acc + (uint64_t){x}[e_i]);
+  {o}[0] = _acc; }"#,
+                    &[("o", o.into()), ("x", x.into()), ("n", n.to_string())],
+                ),
+                None,
+            ))
+        }
         "IXOR" | "IAND" | "IOR" => {
             let (a, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;
@@ -744,6 +787,44 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
                         ("op", op.into()),
                         ("co", co.to_string()),
                     ],
+                ),
+                None,
+            ))
+        }
+        "T2I" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = T2I({x}) phi-ladder -> int64, round half away from zero */
+for (int64_t t_i = 0; t_i < {co}; ++t_i) {
+  double _v = 0.0;
+  if (!{x}_z[t_i]) {
+    if ({x}_e[t_i] < 0 || {x}_e[t_i] > 65535) return 31;
+    if ({x}_s[t_i] != 0)
+      _v = ({x}_s[t_i] < 0 ? -1.0 : 1.0)
+         * pow(1.618033988749895, ((double){x}_e[t_i] - 32768.0) / 512.0);
+  }
+  {o}[t_i] = (int64_t)(_v >= 0.0 ? _v + 0.5 : _v - 0.5);
+}"#,
+                    &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
+                ),
+                None,
+            ))
+        }
+        "IGET" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let idx = int_lit(&args[1], "IGET idx")?;
+            let elems = ctx.elems(x)?;
+            if idx < 0 || idx as usize >= elems {
+                return Err(Error::asm(format!(
+                    "IGET: index {idx} out of range {elems}"
+                )));
+            }
+            Ok((
+                fill(
+                    "/* {o} = IGET({x}, {idx}) exact */\n{o}[0] = {x}[{idx}];",
+                    &[("o", o.into()), ("x", x.into()), ("idx", idx.to_string())],
                 ),
                 None,
             ))
