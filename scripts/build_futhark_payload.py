@@ -7,7 +7,7 @@ streams. It is deliberately a build step, not runtime host logic.
 
 Usage:
   python3 scripts/build_futhark_payload.py \
-    --artifact /home/balrog/Documents/OpenCode/futhark_language/ga_rules.json \
+    --artifact "$HOME/Documents/OpenCode/futhark_language/ga_rules.json" \
     --out showcase/futhark/payload
 
 For a small test fixture:
@@ -222,7 +222,10 @@ def build(artifact: Path, out: Path, limit: int | None, contractions: bool) -> N
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--artifact", default="/home/balrog/Documents/OpenCode/futhark_language/ga_rules.json")
+    ap.add_argument(
+        "--artifact",
+        default=str(Path.home() / "Documents" / "OpenCode" / "futhark_language" / "ga_rules.json"),
+    )
     ap.add_argument("--out", default="showcase/futhark/payload")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-contractions", action="store_true")

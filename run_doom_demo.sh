@@ -10,8 +10,8 @@ if [[ -d "$HOME/.cargo/bin" ]]; then
   PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-JOTNAR_ROOT="${JOTNAR_ROOT:-/home/balrog/Documents/OpenCode/jotnar-main}"
-WAD="${DOOM_WAD:-/home/balrog/Documents/OpenCode/jotnar-assets/doom1.wad}"
+JOTNAR_ROOT="${JOTNAR_ROOT:-$HOME/Documents/OpenCode/jotnar-main}"
+WAD="${DOOM_WAD:-$HOME/Documents/OpenCode/jotnar-assets/doom1.wad}"
 IMAGE="${DOOM_IMAGE:-$JOTNAR_ROOT/programs/doom/build/doom.bin}"
 OUT="${DOOM_DEMO_OUT:-$ROOT/demo_out/doom}"
 REFERENCE="$ROOT/showcase/doom/title.png"

@@ -17,8 +17,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-JOTNAR = Path(os.environ.get("JOTNAR_ROOT", "/home/balrog/Documents/OpenCode/jotnar-main"))
-WAD = Path(os.environ.get("DOOM_WAD", "/home/balrog/Documents/OpenCode/jotnar-assets/doom1.wad"))
+JOTNAR = Path(
+    os.environ.get(
+        "JOTNAR_ROOT", str(Path.home() / "Documents" / "OpenCode" / "jotnar-main")
+    )
+)
+WAD = Path(
+    os.environ.get(
+        "DOOM_WAD",
+        str(Path.home() / "Documents" / "OpenCode" / "jotnar-assets" / "doom1.wad"),
+    )
+)
 IMAGE = JOTNAR / "programs" / "doom" / "build" / "doom.bin"
 NATIVE_C = JOTNAR / "programs" / "rv32_native.c"
 WORK = Path(os.environ.get("DOOM_PARITY_WORK", "/tmp/opencode/doom_parity"))

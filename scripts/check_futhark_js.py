@@ -20,8 +20,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import futhark_reference as R  # noqa: E402
 import parity_futhark as P  # noqa: E402
 
-ARTIFACT = Path("/home/balrog/Documents/OpenCode/futhark_language/ga_rules.json")
-JS_DIR = Path("/home/balrog/Documents/OpenCode/futhark_language")
+ARTIFACT = Path.home() / "Documents" / "OpenCode" / "futhark_language" / "ga_rules.json"
+JS_DIR = Path.home() / "Documents" / "OpenCode" / "futhark_language"
 WORK = Path("/tmp/opencode/futhark_js")
 
 

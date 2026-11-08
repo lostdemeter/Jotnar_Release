@@ -19,7 +19,7 @@ streams. Build them from the trained Futhark artifact:
 
 ```sh
 python3 scripts/build_futhark_payload.py \
-  --artifact /home/balrog/Documents/OpenCode/futhark_language/ga_rules.json \
+  --artifact "$HOME/Documents/OpenCode/futhark_language/ga_rules.json" \
   --no-contractions \
   --out showcase/futhark/payload
 ```

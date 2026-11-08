@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import futhark_reference as R  # noqa: E402
 
-ARTIFACT = Path("/home/balrog/Documents/OpenCode/futhark_language/ga_rules.json")
+ARTIFACT = Path.home() / "Documents" / "OpenCode" / "futhark_language" / "ga_rules.json"
 PAYLOAD = Path("/tmp/opencode/futhark_nc")
 EXE = ROOT / "target" / "release" / "jotnar-demo-futhark"
 

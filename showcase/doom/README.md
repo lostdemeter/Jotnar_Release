@@ -46,8 +46,8 @@ Assets are external to this repo:
 
 ```sh
 cargo run --release --bin jotnar-demo-doom -- \
-  --image /home/balrog/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin \
-  --wad   /home/balrog/Documents/OpenCode/jotnar-assets/doom1.wad \
+  --image "$HOME/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin" \
+  --wad   "$HOME/Documents/OpenCode/jotnar-assets/doom1.wad" \
   --frames 1 \
   --out /tmp/opencode/doom_rust/frame1 \
   --compare /tmp/opencode/doom_demo/frame1.fb

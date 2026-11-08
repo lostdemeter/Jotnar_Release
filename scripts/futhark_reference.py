@@ -265,7 +265,11 @@ def rune_codepoints() -> dict[str, list[int]]:
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("artifact", nargs="?", default="/home/balrog/Documents/OpenCode/futhark_language/ga_rules.json")
+    ap.add_argument(
+        "artifact",
+        nargs="?",
+        default=str(Path.home() / "Documents" / "OpenCode" / "futhark_language" / "ga_rules.json"),
+    )
     ap.add_argument("words", nargs="*", default=["the", "quick", "brown", "fox", "make", "global", "qwerty"])
     args = ap.parse_args()
     t = Translator(json.loads(Path(args.artifact).read_text()))
