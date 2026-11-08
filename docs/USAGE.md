@@ -133,7 +133,7 @@ cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payloa
 
 cargo run --release --bin jotnar-bench -- --jobs 2000
 cargo run --release --bin jotnar-bench -- --workload vec --n 16384 --jobs 100
-cargo run --release --bin jotnar-bench -- --workload u8 --n 128 --jobs 100
+cargo run --release --bin jotnar-bench -- --workload u8 --side 128 --jobs 100
 cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 ```
 

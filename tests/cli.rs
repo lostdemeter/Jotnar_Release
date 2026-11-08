@@ -162,6 +162,36 @@ fn ctl_missing_value_is_usage_error_not_panic() {
     assert!(!stderr.contains("panicked"), "panicked: {}", stderr);
 }
 
+#[test]
+fn ctl_backend_without_value_fails_before_connecting() {
+    let bin = env!("CARGO_BIN_EXE_jotnar-ctl");
+    // No server is running on this address; the flag validation must
+    // fire before the client even attempts to connect.
+    let out = Command::new(bin)
+        .args([
+            "--addr",
+            "127.0.0.1:1",
+            "program",
+            "tile",
+            "showcase/language/matmul2.asm",
+            "--backend",
+        ])
+        .output()
+        .expect("ctl backend missing value");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--backend needs a value"),
+        "got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("cannot connect"),
+        "connected before validating: {}",
+        stderr
+    );
+}
+
 fn node_roundtrip(addr: &str, frame: &[u8]) -> (Json, Vec<u8>) {
     let mut stream = TcpStream::connect(addr).unwrap();
     // Node serves one client at a time; each call opens a fresh connection.
