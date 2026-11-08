@@ -354,12 +354,24 @@ fn t2i_full_lattice_exponent_domain_matches_c_and_nonfpu() {
     let n = e.len();
     let triple = Triple::from_vecs(&[n], vec![1; n], e, vec![0; n]).unwrap();
     let want: Vec<i64> = lattice::t2i_lut().to_vec();
+    let neg = Triple::from_vecs(
+        &[n],
+        vec![-1; n],
+        (0..lattice::NLVL).map(|v| v as i32).collect(),
+        vec![0; n],
+    )
+    .unwrap();
     let dir = temp_dir("t2i-full-domain");
     for (target, name) in [(Target::C, "c"), (Target::NonFpu, "nonfpu")] {
         let got = run_t2i(target, &dir, name, &triple).expect("full-domain t2i");
         assert_eq!(got.len(), want.len(), "{name}: output length");
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
             assert_eq!(a, b, "{name}: T2I mismatch at exponent {i}");
+        }
+        let neg_name = format!("{name}-negative");
+        let got = run_t2i(target, &dir, &neg_name, &neg).expect("full-domain negative t2i");
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(a, &-*b, "{name}: negative T2I mismatch at exponent {i}");
         }
     }
 }
