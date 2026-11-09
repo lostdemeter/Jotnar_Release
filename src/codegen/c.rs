@@ -1053,6 +1053,76 @@ for (int64_t r_i = 0; r_i < {o}_N; ++r_i) {
                 ))
             }
         }
+        "DECONV2D" => {
+            let (x, w, b, o) = (
+                args[0].as_str(),
+                args[1].as_str(),
+                args[2].as_str(),
+                outs[0].as_str(),
+            );
+            if ctx.s(x)?.kind != CKind::F {
+                return Err(Error::unimplemented("C DECONV2D needs F"));
+            }
+            let xsh = ctx.s(x)?.shape.clone();
+            let wsh = ctx.s(w)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented(
+                    "C DECONV2D needs HWC + (Cout,kh,kw,Cin)",
+                ));
+            }
+            let (h, ww, cin) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let (cout, kh, kw) = (wsh[0].unwrap(), wsh[1].unwrap(), wsh[2].unwrap());
+            let stride = int_lit(&args[3], "DECONV2D stride")?;
+            let pad = int_lit(&args[4], "DECONV2D pad")?;
+            let ho = (h as i64 - 1) * stride - 2 * pad + kh as i64;
+            let wo = (ww as i64 - 1) * stride - 2 * pad + kw as i64;
+            if ho <= 0 || wo <= 0 || stride <= 0 || pad < 0 {
+                return Err(Error::asm("C DECONV2D bad geometry"));
+            }
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = DECONV2D({x}) {cout}ch {kh}x{kw} s{stride} p{pad} */
+memset({o}, 0, {co} * sizeof(double));
+for (int64_t ch = 0; ch < {cout}; ++ch) {
+  for (int64_t iy = 0; iy < {h}; ++iy)
+    for (int64_t ix = 0; ix < {w}; ++ix)
+      for (int64_t ky = 0; ky < {kh}; ++ky) {
+        int64_t oy = iy * {stride} - {pad} + ky;
+        if (oy < 0 || oy >= {ho}) continue;
+        for (int64_t kx = 0; kx < {kw}; ++kx) {
+          int64_t ox = ix * {stride} - {pad} + kx;
+          if (ox < 0 || ox >= {wo}) continue;
+          for (int64_t ci = 0; ci < {cin}; ++ci)
+            {o}[(oy * {wo} + ox) * {cout} + ch] +=
+              {x}[(iy * {w} + ix) * {cin} + ci]
+              * {w}[((ch * {kh} + ky) * {kw} + kx) * {cin} + ci];
+        }
+      }
+  for (int64_t i = 0; i < {ho} * {wo}; ++i)
+    {o}[i * {cout} + ch] += {b}[ch];
+}"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("h", h.to_string()),
+                        ("w", ww.to_string()),
+                        ("cin", cin.to_string()),
+                        ("cout", cout.to_string()),
+                        ("kh", kh.to_string()),
+                        ("kw", kw.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("stride", stride.to_string()),
+                        ("pad", pad.to_string()),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "CONV2D" => {
             let (x, w, b, o) = (
                 args[0].as_str(),

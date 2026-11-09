@@ -426,6 +426,13 @@ fn build_registry() -> Registry {
         Some(op_conv2d),
     );
     add(
+        "DECONV2D",
+        5,
+        1,
+        sig(&["*", "*", "*", "F:SCALAR", "F:SCALAR"], &["*"]),
+        Some(op_deconv2d),
+    );
+    add(
         "RESIZE2D",
         4,
         1,

@@ -59,6 +59,35 @@ fn layernorm_rows(x: &[f64], w: &[f64], b: &[f64], rows: usize, cols: usize, eps
     o
 }
 #[allow(clippy::too_many_arguments)]
+fn deconv2d_hwc(x: &[f64], wt: &[f64], b: &[f64], h: usize, w: usize, cin: usize,
+                cout: usize, kh: usize, kw: usize, ho: usize, wo: usize,
+                stride: i64, pad: i64) -> Vec<f64> {
+    let mut o = vec![0f64; ho * wo * cout];
+    for ch in 0..cout {
+        for iy in 0..h {
+            for ix in 0..w {
+                for ky in 0..kh {
+                    let oy = iy as i64 * stride - pad + ky as i64;
+                    if oy < 0 || oy >= ho as i64 { continue; }
+                    for kx in 0..kw {
+                        let ox = ix as i64 * stride - pad + kx as i64;
+                        if ox < 0 || ox >= wo as i64 { continue; }
+                        for ci in 0..cin {
+                            o[(oy as usize * wo + ox as usize) * cout + ch] +=
+                                x[(iy * w + ix) * cin + ci]
+                                * wt[((ch * kh + ky) * kw + kx) * cin + ci];
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..ho * wo {
+            o[i * cout + ch] += b[ch];
+        }
+    }
+    o
+}
+#[allow(clippy::too_many_arguments)]
 fn conv2d_hwc(x: &[f64], wt: &[f64], b: &[f64], h: usize, w: usize, cin: usize,
               cout: usize, kh: usize, kw: usize, ho: usize, wo: usize,
               stride: i64, pad: i64) -> Vec<f64> {
@@ -546,6 +575,35 @@ fn pattern_rust(
                 .ok_or_else(|| Error::asm("Rust LAYERNORM needs CONFIG eps_ln"))?;
             Ok(format!(
                 "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, {eps:?});"
+            ))
+        }
+        "DECONV2D" => {
+            let (x, wt, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let xsh = get(x)?.shape.clone();
+            let wsh = get(wt)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented("Rust DECONV2D needs HWC + 4D weight"));
+            }
+            let (Some(h), Some(ww), Some(cin)) = (xsh[0], xsh[1], xsh[2]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in DECONV2D input",
+                ));
+            };
+            let (Some(cout), Some(kh), Some(kw)) = (wsh[0], wsh[1], wsh[2]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in DECONV2D weight",
+                ));
+            };
+            let stride: i64 = args[3]
+                .parse()
+                .map_err(|_| Error::asm("Rust DECONV2D: bad stride literal"))?;
+            let pad: i64 = args[4]
+                .parse()
+                .map_err(|_| Error::asm("Rust DECONV2D: bad pad literal"))?;
+            let ho = ((h as i64 - 1) * stride - 2 * pad + kh as i64) as usize;
+            let wo = ((ww as i64 - 1) * stride - 2 * pad + kw as i64) as usize;
+            Ok(format!(
+                "{o} = deconv2d_hwc(&{x}, &{wt}, &{b}, {h}, {ww}, {cin}, {cout}, {kh}, {kw}, {ho}, {wo}, {stride}, {pad});"
             ))
         }
         "CONV2D" => {
