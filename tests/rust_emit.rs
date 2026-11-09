@@ -583,6 +583,58 @@ fn conv2d_matches_interpreter() {
 }
 
 #[test]
+fn deconv2d_matches_interpreter() {
+    // Transposed conv with stride and bias (the neck's reassemble resize).
+    let listing = "IN X AS F:HWC\nIN W AS F:CONV\nIN B AS F:SEQ\nOUT = DECONV2D(X, W, B, 2, 1)\n";
+    let xs: Vec<f64> = (0..3 * 4 * 2).map(|i| (i as f64 * 0.29).cos()).collect();
+    let ws: Vec<f64> = (0..3 * 3 * 3 * 2)
+        .map(|i| (i as f64 * 0.17).sin() * 0.4)
+        .collect();
+    let bs = [0.05, -0.1, 0.2];
+    let f = feeds(&[
+        ("X", fvalue(&[3, 4, 2], &xs)),
+        ("W", fvalue(&[3, 3, 3, 2], &ws)),
+        ("B", fvalue(&[3], &bs)),
+    ]);
+    let want = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interp");
+    let want = match want.get("OUT").unwrap() {
+        Value::F64(a) => a.iter().copied().collect::<Vec<f64>>(),
+        other => panic!("expected F64, got {other:?}"),
+    };
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile deconv2d");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "deconv2d", Target::Rust).expect("build");
+    let write = |n: &str, v: &[f64]| {
+        let p = dir.path().join(n);
+        let mut b = Vec::new();
+        for x in v {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let x = write("x.f64", &xs);
+    let w = write("w.f64", &ws);
+    let b = write("b.f64", &bs);
+    let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([&x, &w, &b, &out])
+        .status()
+        .unwrap()
+        .success());
+    let got: Vec<f64> = fs::read(&out)
+        .unwrap()
+        .chunks(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got.len(), want.len());
+    assert_eq!(got.len(), 5 * 7 * 3);
+    for (g, w) in got.iter().zip(want.iter()) {
+        assert!((g - w).abs() < 1e-12, "deconv2d {got:?} vs {want:?}");
+    }
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
