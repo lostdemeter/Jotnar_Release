@@ -434,6 +434,13 @@ fn pattern_rust(
                 ))
             }
         }
+        "RELU" => {
+            let a = args[0].as_str();
+            let n = elems(a)?;
+            Ok(format!(
+                "for i in 0..{n} {{ {o}[i] = if {a}[i] > 0.0 {{ {a}[i] }} else {{ 0.0 }}; }}"
+            ))
+        }
         "GELU" => {
             let a = args[0].as_str();
             let n = elems(a)?;

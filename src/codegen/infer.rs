@@ -1037,12 +1037,15 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, x.clone());
             }
-            "GELU" => {
+            "GELU" | "RELU" => {
                 // Shape-preserving elementwise activation. The interpreter
-                // is the triple path; the Rust target lowers F (erf form).
+                // is the triple path; the Rust target lowers F.
                 let x = get(&streams, a(0))?;
                 if !matches!(x.kind, CKind::F | CKind::T) {
-                    return Err(Error::unimplemented(format!("{where_}: GELU needs F/T")));
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: {} needs F/T",
+                        ins.mn
+                    )));
                 }
                 streams.insert(o, x.clone());
             }

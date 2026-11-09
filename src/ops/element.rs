@@ -206,6 +206,22 @@ pub fn op_square(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     )?)])
 }
 
+pub fn op_relu(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("RELU: missing input"))?
+        .stream("RELU", "x")?;
+    match v {
+        Value::F64(a) => Ok(vec![Value::F64(a.mapv(|x| x.max(0.0)))]),
+        Value::F32(a) => Ok(vec![Value::F32(a.mapv(|x| x.max(0.0)))]),
+        Value::Triple(t) => {
+            let (_, m_cov) = scales(config);
+            Ok(vec![Value::Triple(relu_trip(t, m_cov)?)])
+        }
+        _ => Err(Error::runtime("RELU: needs F/T")),
+    }
+}
+
 pub fn op_sqrt(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let arg = args
         .first()
