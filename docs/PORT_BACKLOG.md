@@ -20,7 +20,7 @@ Guiding rules:
 
 Done:
 
-- 90-mnemonic registry, parser/expander/assembler/verifier, interpreter,
+- 94-mnemonic registry, parser/expander/assembler/verifier, interpreter,
   `REPEAT`/`BREAK`, `repeat()`.
 - C, non-FPU, and CUDA code generators (correctness-first).
 - `phi-core` crate: lattice, triples, exact helpers, numpy-style substrate
@@ -40,7 +40,7 @@ Open:
 ## 1. Jotnar-LAN / language core
 
 - [x] `asm.py`: IMPORT, DEF/CALL, REPEAT/BREAK, parse, assemble, verify
-- [x] `asm_ops.py`: all 90 opcodes and signatures
+- [x] `asm_ops.py`: all 94 opcodes and signatures
 - [x] `run()` / `repeat()` reference interpreter
 - [ ] `builder.py`: programmatic listing construction
 - [ ] `debugger.py`: breakpoints, watch, step, lesion
@@ -280,4 +280,4 @@ After those:
 
 ## Rust target
 
-`--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. Next slices: DECONV/INTERP/GATHER, then the geometric DAV2 listing.
+`--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. DPT float path: `CONV2D`/`DECONV2D`/`RESIZE2D`/`RELU` landed. Legacy `DECONV`/`INTERP`/`GATHER` still fail loud.

@@ -45,6 +45,7 @@ RMSNORM	2	1	$X, $W -> $X	linalg	RMSNorm over the last axis with a weight vector.
 LAYERNORM	3	1	$X, $W, $W -> $X	linalg	LayerNorm over the last axis (2D input).
 SILU	1	1	$A -> $A	linalg	SiLU activation: x * sigmoid(x).
 GELU	1	1	$A -> $A	linalg	GELU activation through frozen LUTs.
+RELU	1	1	$A -> $A	linalg	Rectified linear unit: max(x, 0).
 SCAN	3	1	$X, $X, $X -> $X	linalg	Recurrence step: h * abar + bx.
 ROTARY	2	1	$X, * -> $X	linalg	Rotary embedding over triple pairs by position.
 ROPE	4	1	$A, *, F:SCALAR, F:SCALAR -> $A	linalg	Float RoPE over (rows, heads * head_dim).
@@ -74,6 +75,9 @@ POOLAVG	1	1	* -> *	move	Global average pool over H,W; returns (C).
 DECONV	4	1	*, *, F:SCALAR, F:SCALAR -> *	move	Transposed convolution with stride and padding.
 INTERP	3	1	*, F:SCALAR, F:SCALAR -> *	move	Bilinear resize by dyadic scales.
 CONV	2	1	*, * -> *	move	2D convolution with an explicit kernel.
+CONV2D	5	1	*, *, *, F:SCALAR, F:SCALAR -> *	move	Multi-channel HWC convolution with stride, padding, and bias.
+DECONV2D	5	1	*, *, *, F:SCALAR, F:SCALAR -> *	move	Multi-channel HWC transposed convolution with stride, padding, and bias.
+RESIZE2D	4	1	*, F:SCALAR, F:SCALAR, F:SCALAR -> *	move	Bilinear resize to an explicit size with an align_corners flag.
 IWINDOW	3	1	I:*, *, F:SCALAR -> I:*	bytes	Slice a 1D integer/byte stream [start, start+len).
 ICRC32	1	1	I:* -> I:*	bytes	CRC-32 (IEEE) over a byte stream.
 ICRC32C	2	1	I:*, I:* -> I:*	bytes	CRC-32C with an explicit seed.
