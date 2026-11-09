@@ -1,5 +1,5 @@
 ---
-title: "Emitters: C, non-FPU, CUDA, Verilog"
+title: "Emitters: C, non-FPU, CUDA, Rust, Verilog"
 number: "13"
 kicker: FIELD NOTE / THE MACHINE
 lede: The same bound graph can become portable C, integer-only C, a GPU kernel, a piece of hardware, or a 32-bit machine. The lowering is where the promises are tested.
@@ -13,12 +13,13 @@ An emitter consumes the bound program and produces a target artifact. It does no
 | Target | Flag | What it emits | What it refuses |
 |---|---|---|---|
 | **C** | `--target c` (default) | Portable C99, float/transformer path plus exact moves. | Dynamic shapes it cannot bound. |
+| **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar ops + MATMUL/GELU/SOFTMAX/LAYERNORM. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice). |
 | **non-FPU** | `--target nonfpu` | Integer-only C, baked lattice tables, fixed-point math, no `float`/`double`/libm. | Any float path; a `float_trap` gate catches leaks. |
 | **CUDA** | `--target cuda` | FP32 correctness-first kernels, one launch per op. | Missing toolkit or unsupported op. |
 | **Verilog** | `jotnar-verilog` | Structural hardware for the supported integer subset. | Multi-lane arithmetic that would cross lanes; reassignment. |
 | **RV32IM** | `jotnar-demo-doom` | A 32-bit machine model running a flat image. | Anything outside the RV32IM model. |
 
-The first three are selected by `jotnar build --target`. Verilog has its own binary because it needs a configuration file (widths, state, memories). The RV32IM path is a separate runner because it needs a compiled image and a WAD.
+The first four are selected by `jotnar build --target`. Verilog has its own binary because it needs a configuration file (widths, state, memories). The RV32IM path is a separate runner because it needs a compiled image and a WAD.
 
 ## C
 
@@ -79,6 +80,23 @@ The CUDA gates compare units within 1e-4 of numpy, bigram argmax bit-exactly, an
 ::: warning [NOT A SPEED CLAIM]
 One launch per op is a correctness strategy, not a performance strategy. A tuned kernel pass is a separate project. If you benchmark this target and call it slow, you are right, and you have missed the point.
 :::
+
+## Rust
+
+The Rust target emits a single-file, std-only Rust program (`rustc`, edition
+2021). Arithmetic is preserved: integer ops keep checked-division guards
+(exit 30 on zero / `i64::MIN / -1`), scalar operands broadcast explicitly,
+and the artefact interface mirrors the C target (raw little-endian f64/i64
+argv files). **T (triple) streams are refused loudly with the file contract
+intact** — a triple may never silently become an f64 matmul. The parity
+gate is `scripts/parity_rust.py`.
+
+```sh
+jotnar emit-rust showcase/language/saxpy.asm \
+  --payload /tmp/saxpy.json --outputs OUT --out /tmp/saxpy.rs
+jotnar build showcase/language/saxpy.asm \
+  --payload /tmp/saxpy.json --outputs OUT --target rust --workdir /tmp/rs
+```
 
 ## Verilog
 

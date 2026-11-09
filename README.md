@@ -7,7 +7,7 @@ of instructions that mutates a machine. You name typed streams, connect them
 into a graph, and ask a machine to realize that graph.
 
 The same graph can run in the reference interpreter, lower to portable C99,
-lower to integer-only C, lower to CUDA, become structural Verilog, or drive an
+lower to integer-only C, lower to CUDA, emit Rust, become structural Verilog, or drive an
 RV32IM machine.
 
 That sounds like portability. The deeper idea is **trust**. A program is a
@@ -51,7 +51,7 @@ the move.
   travel with values. The listing order is for the reader; the dataflow is the
   program.
 - **Keep the meaning across targets.** The same listing runs on C, integer-only
-  C, CUDA, Verilog, and an RV32IM machine. Integer and triple paths are compared
+  C, CUDA, Rust, Verilog, and an RV32IM machine. Integer and triple paths are compared
   exactly; float paths carry an explicit agreement class.
 - **Gate the claim.** Every realization has an independent check, a scope, and
   a certificate. “Same bytes” is a stronger promise than “looks right.”
@@ -131,7 +131,7 @@ cargo run -p jotnar-lab -- verify certificates/example/certificate.json
 
 [The loop](docs/LOOP.md) · [Certificate schema](docs/appendix/TRUST_SPINE.md) · [Harness](crates/jotnar-lab/)
 
-## The ten exhibits
+## The nine exhibits
 
 Each one is a different angle on the same stack. The full visual index is
 [`showcase/README.md`](showcase/README.md).
@@ -147,7 +147,6 @@ Each one is a different angle on the same stack. The full visual index is
 | [DOOM](showcase/doom/) | native frame exact; checkpoint frame 2 exact vs GPU |
 | [Analog filter](showcase/analog_filter/) | quality and cost, including the negative real-hole limit |
 | [Certified agent](showcase/agent/) | exact-gate harness composition; bit-exact backend pipeline with C/non-FPU parity |
-| [Interpreter + node](showcase/runtime/) | warm execution; same bytes over framed TCP |
 
 ## Start here
 
@@ -182,11 +181,11 @@ The front door is deliberately short. The actual parts are here:
 90 mnemonics
 88/88 Python-oracle cases (original 86)
 4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
-32/32 emitter cases
+32/32 emitter cases + 9/9 Rust parity (scripts/parity_rust.py)
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
-190/190 workspace tests
+61/61 workspace tests
 ```
 
 These are gates, not a leaderboard. The details and commands are in
@@ -197,8 +196,8 @@ These are gates, not a leaderboard. The details and commands are in
 - not a general tensor framework
 - not a GPU performance claim: the CUDA backend is correctness-first
 - not physical analog hardware: the analog work is Jotnar-SIM
-- not finished: the device emitter, CUDA fleet kernel, serve mode
-  (`live=` resident loops), and several phi-core modules are still on the bench
+- not finished: the device emitter, CUDA fleet kernel, TCP serving, and
+  several phi-core modules are still on the bench
 
 The edges are still sharp. That is part of the point.
 

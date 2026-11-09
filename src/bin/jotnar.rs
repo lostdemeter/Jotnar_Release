@@ -13,7 +13,7 @@ fn usage() -> &'static str {
        jotnar verify <file.asm> [--stdlib DIR] [--json]\n\
        jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--stdlib DIR]\n\
        jotnar emit-c <file.asm> --payload FILE --outputs a,b [--out FILE.c] [--stdlib DIR]\n\
-       jotnar emit-rust <file.asm> --payload FILE --outputs a,b [--out FILE.rs] [--stdlib DIR]\n\
+       jotnar emit-rust <file.asm> --payload FILE --outputs a,b [--out FILE.rs] [--stdlib DIR] (needs rustc)\n\
        jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR]\n\
        jotnar repeat <file.asm> --payload FILE [--grow a,b] [--out FILE] [--stdlib DIR]\n\
        jotnar ops\n"
@@ -233,12 +233,13 @@ fn real_main() -> Result<(), String> {
             }
         }
         "emit-c" | "emit-rust" => {
+            let cmd = args.cmd.clone();
             let payload_path = args
                 .payload
-                .ok_or_else(|| format!("emit-c: --payload is required\n\n{}", usage()))?;
+                .ok_or_else(|| format!("{cmd}: --payload is required\n\n{}", usage()))?;
             let outputs = args
                 .outputs
-                .ok_or_else(|| format!("emit-c: --outputs is required\n\n{}", usage()))?;
+                .ok_or_else(|| format!("{cmd}: --outputs is required\n\n{}", usage()))?;
             let payload = payload::read_payload(&payload_path).map_err(|e| e.to_string())?;
             let target = if args.cmd == "emit-rust" {
                 Target::Rust

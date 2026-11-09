@@ -1,20 +1,25 @@
 //! Rust code emission (Target::Rust).
 //!
 //! Emits a self-contained Rust program (std only) implementing the
-//! listing's graph with `Vec<f64>`/`Vec<i64>` streams. T (triple)
-//! inputs are decoded to f64 at load (`lattice::decode` formula),
-//! mirroring the geometric decode in `dav2_reverse/geo_lut.py`.
+//! listing's graph with `Vec<f64>`/`Vec<i64>` streams. Contract:
+//! `IN`/ `OUT` payload kinds accepted are exactly the raw binary
+//! conventions of the C target — F streams as little-endian `f64`,
+//! I streams as little-endian `i64` (payload F32/F64 and I64/U8/Bool
+//! all lower to those two, as in `infer_shapes`). **T (triple)
+//! streams are refused**: the emitter may change the schedule, not the
+//! arithmetic; silently decoding a triple to f64 would change it.
 //! Unsupported ops fail loud — there is no silent fallback, exactly
 //! like the C backend.
 
 use std::collections::HashMap;
 
 use super::infer::{infer_shapes, CKind, StreamInfo};
-use crate::asm::{self, AsmOptions};
-use crate::error::{Error, Result};
-use crate::ir::BoundProgram;
-use crate::payload::Feeds;
 use super::{Artifact, CompileOptions};
+use crate::asm::{self};
+use crate::error::{Error, Result};
+use crate::ir::BoundProgram as _BoundProgram;
+use crate::layout::is_literal;
+use crate::payload::Feeds;
 
 const HELPERS: &str = r#"
 // ---- generated Rust helpers (std only) ----
@@ -65,7 +70,7 @@ fn matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     }
     o
 }
-fn phi_decode(s: &[i8], e: &[i32], z: &[u8]) -> Vec<f64> {
+fn _phi_decode_unused(s: &[i8], e: &[i32], z: &[u8]) -> Vec<f64> {
     // value = sign * PHI^((exp - 32768)/512), zero masked
     const PHI: f64 = 1.618033988749895;
     let mut out = Vec::with_capacity(s.len());
@@ -79,35 +84,58 @@ fn phi_decode(s: &[i8], e: &[i32], z: &[u8]) -> Vec<f64> {
 pub(crate) fn sanitize_rust(name: &str) -> String {
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if out
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         out = format!("_{out}");
     }
-    // Rust keywords need raw identifiers
+    // Raw identifiers are not allowed for self/Self/super/crate.
+    if matches!(out.as_str(), "self" | "Self" | "super" | "crate") {
+        return format!("_{out}");
+    }
     match out.as_str() {
         "fn" | "let" | "mut" | "type" | "impl" | "struct" | "enum" | "match" | "if" | "else"
-        | "for" | "while" | "loop" | "return" | "break" | "continue" | "crate" | "mod" | "pub"
-        | "use" | "where" | "as" | "in" | "dyn" | "async" | "await" | "move" | "ref" | "self" | "Self"
-        | "super" | "true" | "false" | "unsafe" | "extern" | "static" | "const" | "trait" | "virtual"
-        | "yield" | "try" | "box" => format!("r#{{out}}"),
+        | "for" | "while" | "loop" | "return" | "break" | "continue" | "mod" | "pub" | "use"
+        | "where" | "as" | "in" | "dyn" | "async" | "await" | "move" | "ref" | "true" | "false"
+        | "unsafe" | "extern" | "static" | "const" | "trait" | "yield" | "try" | "box" => {
+            format!("r#{out}")
+        }
         _ => out,
     }
 }
 
 pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<Artifact> {
     if opts.outputs.is_empty() {
-        return Err(Error::asm("compile_program needs outputs=[...] (OUT streams)"));
+        return Err(Error::asm(
+            "compile_program needs outputs=[...] (OUT streams)",
+        ));
+    }
+    // F/I subset: refuse any T input up front (before shape inference
+    // re-labels it), so the refusal is typed and not masked.
+    for (name, v) in &sample {
+        if matches!(v, crate::value::Value::Triple(_)) {
+            return Err(Error::unimplemented(format!(
+                "Rust backend: T (triple) stream '{name}' not supported (F/I subset only)"
+            )));
+        }
     }
     let mut bound = asm::assemble(text, &opts.asm)?;
     let mut sample = sample;
     let mut outputs = opts.outputs.clone();
-    // Rust identifiers: reuse C sanitizer logic by calling the crate
-    // helper through a local remap (kept separate so C names never leak).
-    let mut streams_pre = infer_shapes(&bound, &sample)?;
-    let _ = &mut streams_pre;
-    // sanitize inputs/outs/args/sample keys
-    let mut known: std::collections::HashSet<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
+    // Sanitize identifiers (kept separate so C names never leak).
+    let mut known: std::collections::HashSet<String> =
+        bound.inputs.iter().map(|d| d.name.clone()).collect();
     for ins in &bound.instrs {
         known.extend(ins.outs.iter().cloned());
     }
@@ -150,6 +178,14 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     sample = next;
 
     let streams = infer_shapes(&bound, &sample)?;
+    // Contract: Rust is an F/I subset. Refuse any T stream loudly.
+    for (name, s) in &streams {
+        if s.kind == CKind::T {
+            return Err(Error::unimplemented(format!(
+                "Rust backend: T (triple) stream '{name}' not supported (F/I subset only)"
+            )));
+        }
+    }
     for o in &outputs {
         if !streams.contains_key(o) {
             return Err(Error::asm(format!(
@@ -164,44 +200,14 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     parts.push("use std::env;".to_string());
     parts.push(HELPERS.to_string());
 
-    // Declarations + load
-    let mut decls = Vec::new();
-    for n in &in_names {
-        let s = streams.get(n).unwrap();
-        match s.kind {
-            CKind::F => decls.push(format!("    let {n}: Vec<f64> = {{ let raw = std::fs::read(&args[ai]).unwrap(); let mut v = Vec::with_capacity(raw.len()/8); for c in raw.chunks_exact(8) {{ v.push(f64::from_le_bytes([c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7]])); }} v }};")),
-            CKind::I => decls.push(format!("    let {n}: Vec<i64> = {{ let raw = std::fs::read(&args[ai]).unwrap(); let mut v = Vec::with_capacity(raw.len()/8); for c in raw.chunks_exact(8) {{ v.push(i64::from_le_bytes([c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7]])); }} v }};")),
-            CKind::T => {
-                // expects 3 consecutive argv files: s, e, z
-                decls.push(format!("    let {n}: Vec<f64> = {{ let rs = std::fs::read(&args[ai]).unwrap(); let rg = std::fs::read(&args[ai+1]).unwrap(); let rz = std::fs::read(&args[ai+2]).unwrap(); let s: Vec<i8> = rs.iter().copied().collect(); let e: Vec<i32> = rg.chunks_exact(4).map(|c| i32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect(); let z: Vec<u8> = rz.clone(); phi_decode(&s, &e, &z) }};"))
-            }
-        }
-    }
-    // Intermediates/outputs allocated as zero vecs lazily at use sites
-    // via pattern calls; allocate outputs here as well.
-    for o in &outputs {
-        if in_names.contains(o) {
-            continue;
-        }
-        let s = streams.get(o).unwrap();
-        let cnt = s.elems().unwrap_or(0);
-        match s.kind {
-            CKind::F => decls.push(format!("    let mut {o}: Vec<f64> = vec![0.0; {cnt}];")),
-            CKind::I => decls.push(format!("    let mut {o}: Vec<i64> = vec![0; {cnt}];")),
-            CKind::T => decls.push(format!("    let mut {o}: Vec<f64> = vec![0.0; {cnt}]; // T stored as f64 in rust emitter")),
-        }
-    }
+    // Load body: reads raw argv files (F as f64, I as i64), mirroring
+    // the C backend's file convention.
+    let mut parts: Vec<String> = Vec::new();
+    parts.push("// generated by jotnar emit-rust (Target::Rust)".to_string());
+    parts.push("use std::env;".to_string());
+    parts.push(HELPERS.to_string());
     parts.push("fn main() {".to_string());
     parts.push("    let args: Vec<String> = env::args().collect();".to_string());
-    parts.push("    let mut ai = 1usize;".to_string());
-    // emit decls with ai advance
-    for n in &in_names {
-        let s = streams.get(n).unwrap();
-        let need = if s.kind == CKind::T { 3 } else { 1 };
-        // inject load body then advance ai (already inline via args[ai] placeholder above)
-        // Rebuild properly below.
-        let _ = need;
-    }
     // Build main body properly
     let mut body: Vec<String> = Vec::new();
     let mut ai = 1usize;
@@ -209,16 +215,21 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         let s = streams.get(n).unwrap();
         match s.kind {
             CKind::F => {
-                body.push(format!("    let {n}: Vec<f64> = read_f64_file(&args[{ai}]);"));
+                body.push(format!(
+                    "    let {n}: Vec<f64> = read_f64_file(&args[{ai}]);"
+                ));
                 ai += 1;
             }
             CKind::I => {
-                body.push(format!("    let {n}: Vec<i64> = read_i64_file(&args[{ai}]);"));
+                body.push(format!(
+                    "    let {n}: Vec<i64> = read_i64_file(&args[{ai}]);"
+                ));
                 ai += 1;
             }
             CKind::T => {
-                body.push(format!("    let {n}: Vec<f64> = phi_decode_file(&args[{ai}], &args[{ai}+1], &args[{ai}+2]);"));
-                ai += 3;
+                return Err(Error::unimplemented(format!(
+                    "Rust backend: T (triple) stream '{n}' not supported (F/I subset only)"
+                )));
             }
         }
     }
@@ -250,13 +261,19 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         for x in &inter {
             let s = streams.get(x).unwrap();
             let cnt = s.elems().unwrap_or(0);
+            if s.kind == CKind::T {
+                return Err(Error::unimplemented(format!(
+                    "Rust backend: T (triple) stream '{x}' not supported (F/I subset only)"
+                )));
+            }
             match s.kind {
-                CKind::F | CKind::T => {
+                CKind::F => {
                     body.push(format!("    let mut {x}: Vec<f64> = vec![0.0; {cnt}];"));
                 }
                 CKind::I => {
                     body.push(format!("    let mut {x}: Vec<i64> = vec![0; {cnt}];"));
                 }
+                CKind::T => unreachable!(),
             }
         }
     }
@@ -266,12 +283,18 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         match ins.mn.as_str() {
             "__REPEAT__" | "__END__" | "__BREAK__" => {
                 return Err(Error::unimplemented(format!(
-                    "Rust backend {} not yet (fail loud)", ins.mn
+                    "Rust backend {} not yet (fail loud)",
+                    ins.mn
                 )))
             }
             _ => {
                 let stmt = pattern_rust(&ins.mn, &ins.outs, &ins.args, &streams)?;
-                body.push(format!("    /* L{}: {} */\n    {}", ins.line, ins.mn, stmt.trim()));
+                body.push(format!(
+                    "    /* L{}: {} */\n    {}",
+                    ins.line,
+                    ins.mn,
+                    stmt.trim()
+                ));
             }
         }
     }
@@ -301,8 +324,6 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         full.push_str(p);
         full.push('\n');
     }
-    // remove duplicated decl artifacts if present (empty)
-    let _ = decls;
 
     Ok(Artifact {
         source: full,
@@ -323,13 +344,13 @@ fn read_i64_file(p: &str) -> Vec<i64> {
     let raw = std::fs::read(p).expect("read input");
     raw.chunks_exact(8).map(|c| i64::from_le_bytes([c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7]])).collect()
 }
-fn phi_decode_file(ps: &str, pe: &str, pz: &str) -> Vec<f64> {
+fn _phi_decode_file_unused(ps: &str, pe: &str, pz: &str) -> Vec<f64> {
     let rs = std::fs::read(ps).expect("read s");
     let rg = std::fs::read(pe).expect("read e");
     let rz = std::fs::read(pz).expect("read z");
     let s: Vec<i8> = rs.iter().map(|&b| b as i8).collect();
     let e: Vec<i32> = rg.chunks_exact(4).map(|c| i32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect();
-    phi_decode(&s, &e, &rz)
+    _phi_decode_unused(&s, &e, &rz)
 }
 fn write_f64_file(p: &str, v: &[f64]) {
     let mut buf = Vec::with_capacity(v.len()*8);
@@ -343,34 +364,94 @@ fn write_i64_file(p: &str, v: &[i64]) {
 }
 "#;
 
-fn pattern_rust(mn: &str, outs: &[String], args: &[String], streams: &HashMap<String, StreamInfo>) -> Result<String> {
+fn scalar_or_index(kind: &str, name: &str, idx: &str) -> Result<String> {
+    if is_literal(name) {
+        if kind == "I" {
+            Ok(format!("{name}i64"))
+        } else {
+            Ok(name.to_string())
+        }
+    } else {
+        // stream handled by caller via indexed expression; this helper is
+        // only for the right operand position (kept for clarity).
+        Ok(format!("{name}[{idx}]"))
+    }
+}
+
+fn pattern_rust(
+    mn: &str,
+    outs: &[String],
+    args: &[String],
+    streams: &HashMap<String, StreamInfo>,
+) -> Result<String> {
     let o = outs[0].as_str();
-    let get = |n: &str| streams.get(n).ok_or_else(|| Error::asm(format!("Rust backend: unknown stream '{n}'")));
+    let get = |n: &str| {
+        streams
+            .get(n)
+            .ok_or_else(|| Error::asm(format!("Rust backend: unknown stream '{n}'")))
+    };
     let elems = |n: &str| -> Result<usize> {
-        get(n)?.elems().ok_or_else(|| Error::unimplemented(format!("Rust backend: dynamic shape in {n}")))
+        get(n)?
+            .elems()
+            .ok_or_else(|| Error::unimplemented(format!("Rust backend: dynamic shape in {n}")))
     };
     match mn {
         "ADD" | "SUB" | "MUL" | "DIV" => {
             let (a, b) = (args[0].as_str(), args[1].as_str());
-            let n = elems(a)?;
-            let op = match mn { "ADD" => "+", "SUB" => "-", "MUL" => "*", _ => "/" };
-            Ok(format!("for i in 0..{n} {{ {o}[i] = {a}[i] {op} {b}[i]; }}"))
+            let n = if is_literal(a) { elems(b)? } else { elems(a)? };
+            let aexpr = if is_literal(a) {
+                a.to_string()
+            } else {
+                format!("{a}[i]")
+            };
+            let op = match mn {
+                "ADD" => "+",
+                "SUB" => "-",
+                "MUL" => "*",
+                _ => "/",
+            };
+            let bexpr = scalar_or_index("F", b, "i")?;
+            Ok(format!(
+                "for i in 0..{n} {{ {o}[i] = {aexpr} {op} {bexpr}; }}"
+            ))
         }
         "IADD" | "ISUB" | "IMUL" | "IDIV" => {
             let (a, b) = (args[0].as_str(), args[1].as_str());
-            let n = elems(a)?;
-            let op = match mn { "IADD" => "+", "ISUB" => "-", "IMUL" => "*", _ => "/" };
-            Ok(format!("for i in 0..{n} {{ {o}[i] = {a}[i] {op} {b}[i]; }}"))
+            let n = if is_literal(a) { elems(b)? } else { elems(a)? };
+            let aexpr = if is_literal(a) {
+                format!("{a}i64")
+            } else {
+                format!("{a}[i]")
+            };
+            let bexpr = scalar_or_index("I", b, "i")?;
+            if mn == "IDIV" {
+                return Ok(format!(
+                    "for i in 0..{n} {{ let bv = {bexpr}; if bv == 0 || ({aexpr} == i64::MIN && bv == -1) {{ std::process::exit(30); }} {o}[i] = {aexpr} / bv; }}"
+                ));
+            }
+            let op = match mn {
+                "IADD" => "+",
+                "ISUB" => "-",
+                _ => "*",
+            };
+            Ok(format!(
+                "for i in 0..{n} {{ {o}[i] = {aexpr} {op} {bexpr}; }}"
+            ))
         }
         "MATMUL" | "BATCH_MATMUL" => {
             let (a, b) = (args[0].as_str(), args[1].as_str());
             let ash = get(a)?.shape.clone();
             let bsh = get(b)?.shape.clone();
             if ash.len() == 2 {
-                let (m, k, n) = (ash[0].unwrap(), ash[1].unwrap(), bsh[1].unwrap());
+                let (m, k, n) = match (ash[0], ash[1], bsh[1]) {
+                    (Some(m), Some(k), Some(n)) => (m, k, n),
+                    _ => return Err(Error::unimplemented("Rust backend: dynamic dim in MATMUL")),
+                };
                 Ok(format!("{o} = matmul(&{a}, &{b}, {m}, {k}, {n});"))
             } else {
-                Err(Error::unimplemented("Rust backend BATCH_MATMUL (3D) not yet"))
+                Err(Error::unimplemented(
+                    "Rust backend BATCH_MATMUL (3D) not yet",
+                ))
             }
         }
         "GELU" => {
@@ -389,7 +470,10 @@ fn pattern_rust(mn: &str, outs: &[String], args: &[String], streams: &HashMap<St
             if sh.len() != 2 {
                 return Err(Error::unimplemented("Rust SOFTMAX needs 2D"));
             }
-            let (rows, cols) = (sh[0].unwrap(), sh[1].unwrap());
+            let (rows, cols) = match (sh[0], sh[1]) {
+                (Some(r), Some(c)) => (r, c),
+                _ => return Err(Error::unimplemented("Rust backend: dynamic dim in SOFTMAX")),
+            };
             Ok(format!("{o} = softmax_rows(&{a}, {rows}, {cols});"))
         }
         "LAYERNORM" => {
@@ -399,19 +483,40 @@ fn pattern_rust(mn: &str, outs: &[String], args: &[String], streams: &HashMap<St
             if sh.len() != 2 {
                 return Err(Error::unimplemented("Rust LAYERNORM needs 2D"));
             }
-            let (rows, cols) = (sh[0].unwrap(), sh[1].unwrap());
-            Ok(format!("{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, 1e-6);"))
+            let (rows, cols) = match (sh[0], sh[1]) {
+                (Some(r), Some(c)) => (r, c),
+                _ => {
+                    return Err(Error::unimplemented(
+                        "Rust backend: dynamic dim in LAYERNORM",
+                    ))
+                }
+            };
+            Ok(format!(
+                "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, 1e-6);"
+            ))
         }
-        "CONV" => Err(Error::unimplemented("Rust backend CONV not yet (next slice)")),
-        "DECONV" => Err(Error::unimplemented("Rust backend DECONV not yet (next slice)")),
-        "INTERP" => Err(Error::unimplemented("Rust backend INTERP not yet (next slice)")),
-        "GATHER" => Err(Error::unimplemented("Rust backend GATHER not yet (next slice)")),
+        "CONV" => Err(Error::unimplemented(
+            "Rust backend CONV not yet (next slice)",
+        )),
+        "DECONV" => Err(Error::unimplemented(
+            "Rust backend DECONV not yet (next slice)",
+        )),
+        "INTERP" => Err(Error::unimplemented(
+            "Rust backend INTERP not yet (next slice)",
+        )),
+        "GATHER" => Err(Error::unimplemented(
+            "Rust backend GATHER not yet (next slice)",
+        )),
         "RESHAPE2" | "RESHAPE3" => {
             let a = args[0].as_str();
             let n = elems(a)?;
             Ok(format!("{o} = {a}[..{n}].to_vec();"))
         }
-        "GT" | "CLIP" | "POOLAVG" | "SQRT" | "SQRT" | "SQUARE" => Err(Error::unimplemented(format!("Rust backend {mn} not yet"))),
-        other => Err(Error::unimplemented(format!("Rust backend {other} not yet (fail loud)"))),
+        "GT" | "CLIP" | "POOLAVG" | "SQRT" | "SQUARE" => {
+            Err(Error::unimplemented(format!("Rust backend {mn} not yet")))
+        }
+        other => Err(Error::unimplemented(format!(
+            "Rust backend {other} not yet (fail loud)"
+        ))),
     }
 }

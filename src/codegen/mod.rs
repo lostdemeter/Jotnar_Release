@@ -537,7 +537,7 @@ fn build_rust(source: &str, workdir: &Path, name: &str) -> Result<PathBuf> {
     std::fs::write(&src, source)?;
     let out = std::process::Command::new("rustc")
         .arg(&src)
-        .args(["-O", "-o"])
+        .args(["--edition", "2021", "-O", "-o"])
         .arg(&exe)
         .output()?;
     if !out.status.success() {

@@ -812,6 +812,7 @@ fn target_name(target: Target) -> &'static str {
         Target::C => "c",
         Target::NonFpu => "nonfpu",
         Target::Cuda => "cuda",
+        Target::Rust => "rust",
     }
 }
 
