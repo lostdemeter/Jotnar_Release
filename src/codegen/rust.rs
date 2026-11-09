@@ -58,6 +58,33 @@ fn layernorm_rows(x: &[f64], w: &[f64], b: &[f64], rows: usize, cols: usize, eps
     }
     o
 }
+#[allow(clippy::too_many_arguments)]
+fn conv2d_hwc(x: &[f64], wt: &[f64], b: &[f64], h: usize, w: usize, cin: usize,
+              cout: usize, kh: usize, kw: usize, ho: usize, wo: usize,
+              stride: i64, pad: i64) -> Vec<f64> {
+    let mut o = vec![0f64; ho * wo * cout];
+    for co in 0..cout {
+        for oy in 0..ho {
+            for ox in 0..wo {
+                let mut acc = b[co];
+                for ky in 0..kh {
+                    let iy = oy as i64 * stride + ky as i64 - pad;
+                    if iy < 0 || iy >= h as i64 { continue; }
+                    for kx in 0..kw {
+                        let ix = ox as i64 * stride + kx as i64 - pad;
+                        if ix < 0 || ix >= w as i64 { continue; }
+                        for ci in 0..cin {
+                            acc += x[(iy as usize * w + ix as usize) * cin + ci]
+                                 * wt[((co * kh + ky) * kw + kx) * cin + ci];
+                        }
+                    }
+                }
+                o[(oy * wo + ox) * cout + co] = acc;
+            }
+        }
+    }
+    o
+}
 fn resize2d_hwc(x: &[f64], h: usize, w: usize, c: usize, ho: usize, wo: usize, align: bool) -> Vec<f64> {
     let mut o = vec![0f64; ho * wo * c];
     for oy in 0..ho {
@@ -519,6 +546,35 @@ fn pattern_rust(
                 .ok_or_else(|| Error::asm("Rust LAYERNORM needs CONFIG eps_ln"))?;
             Ok(format!(
                 "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, {eps:?});"
+            ))
+        }
+        "CONV2D" => {
+            let (x, wt, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let xsh = get(x)?.shape.clone();
+            let wsh = get(wt)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented("Rust CONV2D needs HWC + 4D weight"));
+            }
+            let (Some(h), Some(ww), Some(cin)) = (xsh[0], xsh[1], xsh[2]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV2D input",
+                ));
+            };
+            let (Some(cout), Some(kh), Some(kw)) = (wsh[0], wsh[1], wsh[2]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV2D weight",
+                ));
+            };
+            let stride: i64 = args[3]
+                .parse()
+                .map_err(|_| Error::asm("Rust CONV2D: bad stride literal"))?;
+            let pad: i64 = args[4]
+                .parse()
+                .map_err(|_| Error::asm("Rust CONV2D: bad pad literal"))?;
+            let ho = ((h as i64 + 2 * pad - kh as i64) / stride + 1) as usize;
+            let wo = ((ww as i64 + 2 * pad - kw as i64) / stride + 1) as usize;
+            Ok(format!(
+                "{o} = conv2d_hwc(&{x}, &{wt}, &{b}, {h}, {ww}, {cin}, {cout}, {kh}, {kw}, {ho}, {wo}, {stride}, {pad});"
             ))
         }
         "RESIZE2D" => {

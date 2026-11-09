@@ -535,6 +535,57 @@ fn resize2d_matches_interpreter() {
 }
 
 #[test]
+fn conv2d_matches_interpreter() {
+    // Multi-channel, stride 2, pad 1 (the neck's re3.down geometry).
+    let listing = "IN X AS F:HWC\nIN W AS F:CONV\nIN B AS F:SEQ\nOUT = CONV2D(X, W, B, 2, 1)\n";
+    let xs: Vec<f64> = (0..4 * 5 * 2).map(|i| (i as f64 * 0.37).sin()).collect();
+    let ws: Vec<f64> = (0..3 * 3 * 3 * 2)
+        .map(|i| (i as f64 * 0.11).cos() * 0.5)
+        .collect();
+    let bs = [0.1, -0.2, 0.3];
+    let f = feeds(&[
+        ("X", fvalue(&[4, 5, 2], &xs)),
+        ("W", fvalue(&[3, 3, 3, 2], &ws)),
+        ("B", fvalue(&[3], &bs)),
+    ]);
+    let want = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interp");
+    let want = match want.get("OUT").unwrap() {
+        Value::F64(a) => a.iter().copied().collect::<Vec<f64>>(),
+        other => panic!("expected F64, got {other:?}"),
+    };
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile conv2d");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "conv2d", Target::Rust).expect("build");
+    let write = |n: &str, v: &[f64]| {
+        let p = dir.path().join(n);
+        let mut b = Vec::new();
+        for x in v {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let x = write("x.f64", &xs);
+    let w = write("w.f64", &ws);
+    let b = write("b.f64", &bs);
+    let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([&x, &w, &b, &out])
+        .status()
+        .unwrap()
+        .success());
+    let got: Vec<f64> = fs::read(&out)
+        .unwrap()
+        .chunks(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want.iter()) {
+        assert!((g - w).abs() < 1e-12, "conv2d {got:?} vs {want:?}");
+    }
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
