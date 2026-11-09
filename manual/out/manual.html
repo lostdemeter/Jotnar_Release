@@ -2134,7 +2134,7 @@ layouts resolved: 53/59 (0 error(s))
 <h2>The targets</h2>
 <table><thead><tr><th>Target</th><th>Flag</th><th>What it emits</th><th>What it refuses</th></tr></thead><tbody>
 <tr><td><strong>C</strong></td><td><code>--target c</code> (default)</td><td>Portable C99, float/transformer path plus exact moves.</td><td>Dynamic shapes it cannot bound.</td></tr>
-<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/SOFTMAX. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice).</td></tr>
+<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice).</td></tr>
 <tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm.</td><td>Any float path; a <code>float_trap</code> gate catches leaks.</td></tr>
 <tr><td><strong>CUDA</strong></td><td><code>--target cuda</code></td><td>FP32 correctness-first kernels, one launch per op.</td><td>Missing toolkit or unsupported op.</td></tr>
 <tr><td><strong>Verilog</strong></td><td><code>jotnar-verilog</code></td><td>Structural hardware for the supported integer subset.</td><td>Multi-lane arithmetic that would cross lanes; reassignment.</td></tr>
