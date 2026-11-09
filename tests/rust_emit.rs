@@ -382,6 +382,45 @@ fn transpose_and_concat_match_c() {
 }
 
 #[test]
+fn gelu_matches_exact_erf() {
+    // HF DINOv2 uses exact (erf) GELU; the emitted Rust uses the A&S
+    // approximation (|err| < 1.5e-7), so compare at 1e-6.
+    let listing = "IN A AS F:HW\nOUT = GELU(A)\n";
+    let xs = [-2.0, -0.5, 0.0, 0.5, 2.0];
+    let want = [
+        -0.04550026389635842,
+        -0.15426876936299344,
+        0.0,
+        0.34573123063700656,
+        1.9544997361036416,
+    ];
+    let f = feeds(&[("A", fvalue(&[1, 5], &xs))]);
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile gelu");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "gelu", Target::Rust).expect("build gelu");
+    let p = dir.path().join("a.f64");
+    let mut b = Vec::new();
+    for x in xs {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    fs::write(&p, b).unwrap();
+    let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([p.to_string_lossy().as_ref(), &out])
+        .status()
+        .unwrap()
+        .success());
+    let got: Vec<f64> = fs::read(&out)
+        .unwrap()
+        .chunks(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    for (g, w) in got.iter().zip(want.iter()) {
+        assert!((g - w).abs() < 1e-6, "gelu {got:?} vs {want:?}");
+    }
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
