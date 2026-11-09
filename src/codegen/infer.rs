@@ -535,6 +535,24 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 shape.extend_from_slice(&x.shape[2..]);
                 streams.insert(o, StreamInfo::f(shape));
             }
+            "RESIZE2D" => {
+                let x = get(&streams, a(0))?;
+                let ho = int_lit(a(1), &format!("{where_} ho"))?;
+                let wo = int_lit(a(2), &format!("{where_} wo"))?;
+                let align = int_lit(a(3), &format!("{where_} align"))?;
+                if x.kind != CKind::F || x.shape.len() != 3 || ho <= 0 || wo <= 0 {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: RESIZE2D needs F HWC + positive sizes"
+                    )));
+                }
+                if align != 0 && align != 1 {
+                    return Err(Error::asm(format!("{where_}: RESIZE2D align must be 0/1")));
+                }
+                streams.insert(
+                    o,
+                    StreamInfo::f(vec![Some(ho as usize), Some(wo as usize), x.shape[2]]),
+                );
+            }
             "CONV" => {
                 let x = get(&streams, a(0))?;
                 let k = get(&streams, a(1))?;

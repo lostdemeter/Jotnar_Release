@@ -497,6 +497,44 @@ OUT = LAYERNORM(X, W, B)
 }
 
 #[test]
+fn resize2d_matches_interpreter() {
+    for align in [0, 1] {
+        let listing = format!("IN X AS F:HWC\nOUT = RESIZE2D(X, 5, 7, {align})\n");
+        let xs: Vec<f64> = (0..3 * 4 * 2).map(|i| i as f64 * 0.25 - 1.0).collect();
+        let f = feeds(&[("X", fvalue(&[3, 4, 2], &xs))]);
+        let want = jotnar::run_text(&listing, &AsmOptions::new("."), &f).expect("interp");
+        let want = match want.get("OUT").unwrap() {
+            Value::F64(a) => a.iter().copied().collect::<Vec<f64>>(),
+            other => panic!("expected F64, got {other:?}"),
+        };
+        let art = compile_program(&listing, &opts(&["OUT"]), f).expect("compile resize");
+        let dir = tempfile::tempdir().unwrap();
+        let exe = build(&art.source, dir.path(), "resize", Target::Rust).expect("build");
+        let p = dir.path().join("x.f64");
+        let mut b = Vec::new();
+        for x in &xs {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+        assert!(Command::new(&exe)
+            .args([p.to_string_lossy().as_ref(), &out])
+            .status()
+            .unwrap()
+            .success());
+        let got: Vec<f64> = fs::read(&out)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert!((g - w).abs() < 1e-12, "align={align} {got:?} vs {want:?}");
+        }
+    }
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
