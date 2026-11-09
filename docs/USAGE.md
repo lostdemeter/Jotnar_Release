@@ -47,9 +47,9 @@ What works today:
 - The lattice substrate (`encode`/`decode`/fixed-point/LUTs) matching the
   Python formulas.
 - Four code generators: C99, integer-only C with a float trap, CUDA, and Rust
-  (std-only; scalar-right, MATMUL, SOFTMAX over F/I; GELU/LAYERNORM implemented
-  but not yet gated);
-  T refused, CONV/DECONV/INTERP/GATHER fail loud until the next slice).
+  (std-only; scalar-right, MATMUL, GELU, SOFTMAX, CONV, TRANSPOSE, CONCAT
+  over F/I; LAYERNORM implemented but not yet gated);
+  T refused, DECONV/INTERP/GATHER fail loud until the next slice).
 - Differential parity:
 
 ```text
@@ -61,7 +61,7 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          198/198
+workspace tests          201/201
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms

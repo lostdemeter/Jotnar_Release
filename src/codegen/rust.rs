@@ -473,9 +473,44 @@ fn pattern_rust(
                 "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, 1e-6);"
             ))
         }
-        "CONV" => Err(Error::unimplemented(
-            "Rust backend CONV not yet (next slice)",
-        )),
+        "CONV" => {
+            // C parity: same-size, single-channel, edge-replicate,
+            // odd kernel. `infer_shapes` has already validated the
+            // geometry, so unwrap the static dims here.
+            let (x, k) = (args[0].as_str(), args[1].as_str());
+            let xsh = get(x)?.shape.clone();
+            let ksh = get(k)?.shape.clone();
+            let (Some(h), Some(w)) = (xsh[0], xsh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV input",
+                ));
+            };
+            let (Some(kh), Some(kw)) = (ksh[0], ksh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV kernel",
+                ));
+            };
+            let (rh, rw) = (kh / 2, kw / 2);
+            Ok(format!(
+                "for oy in 0..{h} {{\n\
+                 \x20 for ox in 0..{w} {{\n\
+                 \x20   let mut acc = 0.0f64;\n\
+                 \x20   for ky in 0..{kh} {{\n\
+                 \x20     let iy0 = oy as i64 + ky as i64 - {rh};\n\
+                 \x20     let iy = if iy0 < 0 {{ 0usize }} else if iy0 >= {h} as i64 {{ {} }} else {{ iy0 as usize }};\n\
+                 \x20     for kx in 0..{kw} {{\n\
+                 \x20       let ix0 = ox as i64 + kx as i64 - {rw};\n\
+                 \x20       let ix = if ix0 < 0 {{ 0usize }} else if ix0 >= {w} as i64 {{ {} }} else {{ ix0 as usize }};\n\
+                 \x20       acc += {x}[iy * {w} + ix] * {k}[ky * {kw} + kx];\n\
+                 \x20     }}\n\
+                 \x20   }}\n\
+                 \x20   {o}[oy * {w} + ox] = acc;\n\
+                 \x20 }}\n\
+                 }}",
+                h - 1,
+                w - 1,
+            ))
+        }
         "DECONV" => Err(Error::unimplemented(
             "Rust backend DECONV not yet (next slice)",
         )),
@@ -485,6 +520,38 @@ fn pattern_rust(
         "GATHER" => Err(Error::unimplemented(
             "Rust backend GATHER not yet (next slice)",
         )),
+        "TRANSPOSE" => {
+            let x = args[0].as_str();
+            let sh = get(x)?.shape.clone();
+            if sh.len() != 2 {
+                return Err(Error::unimplemented("Rust TRANSPOSE needs 2D"));
+            }
+            let (Some(r), Some(c)) = (sh[0], sh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in TRANSPOSE",
+                ));
+            };
+            Ok(format!(
+                "for t_i in 0..{r} {{ for t_j in 0..{c} {{ {o}[t_j * {r} + t_i] = {x}[t_i * {c} + t_j]; }} }}"
+            ))
+        }
+        "CONCAT" => {
+            // v0.2 contract: 2D, axis 1, same-kind, same rows, baked widths.
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            let ash = get(a)?.shape.clone();
+            let bsh = get(b)?.shape.clone();
+            let (Some(rows), Some(da), Some(db)) = (ash[0], ash[1], bsh[1]) else {
+                return Err(Error::unimplemented("Rust backend: dynamic dim in CONCAT"));
+            };
+            Ok(format!(
+                "for n_i in 0..{rows} {{\n\
+                 \x20 for n_j in 0..{da} {{ {o}[n_i * {} + n_j] = {a}[n_i * {da} + n_j]; }}\n\
+                 \x20 for n_j in 0..{db} {{ {o}[n_i * {} + {da} + n_j] = {b}[n_i * {db} + n_j]; }}\n\
+                 }}",
+                da + db,
+                da + db,
+            ))
+        }
         "RESHAPE2" | "RESHAPE3" => {
             let a = args[0].as_str();
             let n = elems(a)?;

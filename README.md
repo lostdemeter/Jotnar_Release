@@ -183,11 +183,11 @@ The front door is deliberately short. The actual parts are here:
 88/88 Python-oracle cases (original 86)
 4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
 32/32 emitter cases
-15/15 Rust parity (scripts/parity_rust.py)
+18/18 Rust parity (scripts/parity_rust.py)
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
-198/198 workspace tests
+201/201 workspace tests
 ```
 
 These are gates, not a leaderboard. The details and commands are in

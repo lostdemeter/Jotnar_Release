@@ -1037,6 +1037,15 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, x.clone());
             }
+            "GELU" => {
+                // Shape-preserving elementwise activation. The interpreter
+                // is the triple path; the Rust target lowers F (erf form).
+                let x = get(&streams, a(0))?;
+                if !matches!(x.kind, CKind::F | CKind::T) {
+                    return Err(Error::unimplemented(format!("{where_}: GELU needs F/T")));
+                }
+                streams.insert(o, x.clone());
+            }
             "SOFTMAX" => {
                 let x = get(&streams, a(0))?;
                 if !matches!(x.kind, CKind::F | CKind::T) || x.shape.len() != 2 {
