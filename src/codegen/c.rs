@@ -1053,6 +1053,63 @@ for (int64_t r_i = 0; r_i < {o}_N; ++r_i) {
                 ))
             }
         }
+        "RESIZE2D" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            if ctx.s(x)?.kind != CKind::F {
+                return Err(Error::unimplemented("C RESIZE2D needs F"));
+            }
+            let sh = ctx.s(x)?.shape.clone();
+            if sh.len() != 3 {
+                return Err(Error::unimplemented("C RESIZE2D needs HWC"));
+            }
+            let (h, w, c) = (sh[0].unwrap(), sh[1].unwrap(), sh[2].unwrap());
+            let ho = int_lit(&args[1], "RESIZE2D ho")? as usize;
+            let wo = int_lit(&args[2], "RESIZE2D wo")? as usize;
+            let align = int_lit(&args[3], "RESIZE2D align")?;
+            if ho == 0 || wo == 0 || (align != 0 && align != 1) {
+                return Err(Error::asm("C RESIZE2D bad size/align"));
+            }
+            Ok((
+                fill(
+                    r#"/* {o} = RESIZE2D({x}) {h}x{w}->{ho}x{wo} align={align} */
+for (int64_t oy = 0; oy < {ho}; ++oy) {
+  double sy = {align} ? ({ho} > 1 ? (double)oy * {h1} / {ho1} : 0.0)
+                      : ((double)oy + 0.5) * {h} / {ho} - 0.5;
+  sy = sy < 0 ? 0 : (sy > {h1} ? {h1} : sy);
+  int64_t y0 = (int64_t)floor(sy); double wy = sy - y0;
+  int64_t y1 = y0 + 1 >= {h} ? {h} - 1 : y0 + 1;
+  for (int64_t ox = 0; ox < {wo}; ++ox) {
+    double sx = {align} ? ({wo} > 1 ? (double)ox * {w1} / {wo1} : 0.0)
+                        : ((double)ox + 0.5) * {w} / {wo} - 0.5;
+    sx = sx < 0 ? 0 : (sx > {w1} ? {w1} : sx);
+    int64_t x0 = (int64_t)floor(sx); double wx = sx - x0;
+    int64_t x1 = x0 + 1 >= {w} ? {w} - 1 : x0 + 1;
+    for (int64_t cc = 0; cc < {c}; ++cc)
+      {o}[(oy * {wo} + ox) * {c} + cc] =
+        (1 - wy) * (1 - wx) * {x}[(y0 * {w} + x0) * {c} + cc]
+        + (1 - wy) * wx * {x}[(y0 * {w} + x1) * {c} + cc]
+        + wy * (1 - wx) * {x}[(y1 * {w} + x0) * {c} + cc]
+        + wy * wx * {x}[(y1 * {w} + x1) * {c} + cc];
+  }
+}"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("h", h.to_string()),
+                        ("w", w.to_string()),
+                        ("c", c.to_string()),
+                        ("h1", (h - 1).to_string()),
+                        ("w1", (w - 1).to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("ho1", (ho as f64 - 1.0).to_string()),
+                        ("wo1", (wo as f64 - 1.0).to_string()),
+                        ("align", align.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "CONV" => {
             let (x, k, o) = (args[0].as_str(), args[1].as_str(), outs[0].as_str());
             let xsh = ctx.s(x)?.shape.clone();

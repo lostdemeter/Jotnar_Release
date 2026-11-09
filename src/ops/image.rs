@@ -281,6 +281,69 @@ pub fn op_gauss(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::Triple(conv_trip(a, &k, m_acc, m_cov)?)])
 }
 
+pub fn op_resize2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = arg_f64_array(args, 0, "RESIZE2D")?;
+    let ho = arg_i64(args, 1, "RESIZE2D", "ho")?;
+    let wo = arg_i64(args, 2, "RESIZE2D", "wo")?;
+    let align = arg_i64(args, 3, "RESIZE2D", "align")?;
+    if ho <= 0 || wo <= 0 || (align != 0 && align != 1) {
+        return Err(Error::runtime("RESIZE2D: bad size/align"));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let sh = x.shape();
+    if sh.len() != 3 {
+        return Err(Error::runtime(format!(
+            "RESIZE2D: expected HWC, got {:?}",
+            sh
+        )));
+    }
+    let (h, w, c) = (sh[0], sh[1], sh[2]);
+    let xf = flat(&x);
+    let ac = align != 0;
+    let mut out = vec![0f64; ho * wo * c];
+    for oy in 0..ho {
+        let sy = if ac {
+            if ho > 1 {
+                oy as f64 * (h as f64 - 1.0) / (ho as f64 - 1.0)
+            } else {
+                0.0
+            }
+        } else {
+            (oy as f64 + 0.5) * h as f64 / ho as f64 - 0.5
+        }
+        .clamp(0.0, h as f64 - 1.0);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(h - 1);
+        let wy = sy - y0 as f64;
+        for ox in 0..wo {
+            let sx = if ac {
+                if wo > 1 {
+                    ox as f64 * (w as f64 - 1.0) / (wo as f64 - 1.0)
+                } else {
+                    0.0
+                }
+            } else {
+                (ox as f64 + 0.5) * w as f64 / wo as f64 - 0.5
+            }
+            .clamp(0.0, w as f64 - 1.0);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(w - 1);
+            let wx = sx - x0 as f64;
+            for cc in 0..c {
+                let v00 = xf[(y0 * w + x0) * c + cc];
+                let v01 = xf[(y0 * w + x1) * c + cc];
+                let v10 = xf[(y1 * w + x0) * c + cc];
+                let v11 = xf[(y1 * w + x1) * c + cc];
+                out[(oy * wo + ox) * c + cc] = (1.0 - wy) * (1.0 - wx) * v00
+                    + (1.0 - wy) * wx * v01
+                    + wy * (1.0 - wx) * v10
+                    + wy * wx * v11;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[ho, wo, c], out)?)])
+}
+
 pub fn op_conv(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     let t = arg_triple(args, 0, "CONV")?;
     let k = arg_f64_array(args, 1, "CONV")?;

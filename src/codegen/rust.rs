@@ -58,6 +58,42 @@ fn layernorm_rows(x: &[f64], w: &[f64], b: &[f64], rows: usize, cols: usize, eps
     }
     o
 }
+fn resize2d_hwc(x: &[f64], h: usize, w: usize, c: usize, ho: usize, wo: usize, align: bool) -> Vec<f64> {
+    let mut o = vec![0f64; ho * wo * c];
+    for oy in 0..ho {
+        let sy = if align {
+            if ho > 1 { oy as f64 * (h as f64 - 1.0) / (ho as f64 - 1.0) } else { 0.0 }
+        } else {
+            (oy as f64 + 0.5) * h as f64 / ho as f64 - 0.5
+        };
+        let sy = sy.clamp(0.0, h as f64 - 1.0);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(h - 1);
+        let wy = sy - y0 as f64;
+        for ox in 0..wo {
+            let sx = if align {
+                if wo > 1 { ox as f64 * (w as f64 - 1.0) / (wo as f64 - 1.0) } else { 0.0 }
+            } else {
+                (ox as f64 + 0.5) * w as f64 / wo as f64 - 0.5
+            };
+            let sx = sx.clamp(0.0, w as f64 - 1.0);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(w - 1);
+            let wx = sx - x0 as f64;
+            for cc in 0..c {
+                let v00 = x[(y0 * w + x0) * c + cc];
+                let v01 = x[(y0 * w + x1) * c + cc];
+                let v10 = x[(y1 * w + x0) * c + cc];
+                let v11 = x[(y1 * w + x1) * c + cc];
+                o[(oy * wo + ox) * c + cc] = (1.0 - wy) * (1.0 - wx) * v00
+                    + (1.0 - wy) * wx * v01
+                    + wy * (1.0 - wx) * v10
+                    + wy * wx * v11;
+            }
+        }
+    }
+    o
+}
 fn matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut o = vec![0f64; m * n];
     for i in 0..m {
@@ -483,6 +519,31 @@ fn pattern_rust(
                 .ok_or_else(|| Error::asm("Rust LAYERNORM needs CONFIG eps_ln"))?;
             Ok(format!(
                 "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, {eps:?});"
+            ))
+        }
+        "RESIZE2D" => {
+            let x = args[0].as_str();
+            let sh = get(x)?.shape.clone();
+            if sh.len() != 3 {
+                return Err(Error::unimplemented("Rust RESIZE2D needs HWC"));
+            }
+            let (Some(h), Some(w), Some(c)) = (sh[0], sh[1], sh[2]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in RESIZE2D",
+                ));
+            };
+            let ho: usize = args[1]
+                .parse()
+                .map_err(|_| Error::asm("Rust RESIZE2D: bad ho literal"))?;
+            let wo: usize = args[2]
+                .parse()
+                .map_err(|_| Error::asm("Rust RESIZE2D: bad wo literal"))?;
+            let align: i64 = args[3]
+                .parse()
+                .map_err(|_| Error::asm("Rust RESIZE2D: bad align literal"))?;
+            Ok(format!(
+                "{o} = resize2d_hwc(&{x}, {h}, {w}, {c}, {ho}, {wo}, {});",
+                align != 0
             ))
         }
         "CONV" => {

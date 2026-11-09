@@ -418,6 +418,13 @@ fn build_registry() -> Registry {
         Some(op_interp),
     );
     add("CONV", 2, 1, sig(&["*", "*"], &["*"]), Some(op_conv));
+    add(
+        "RESIZE2D",
+        4,
+        1,
+        sig(&["*", "F:SCALAR", "F:SCALAR", "F:SCALAR"], &["*"]),
+        Some(op_resize2d),
+    );
 
     // --- byte-index family ---
     add(
