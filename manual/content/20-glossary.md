@@ -48,7 +48,7 @@ columns: 2
 | **proof** | A witness plus an independent gate plus a declared contract. |
 | **proposal** | The candidate produced by a proposer, with provenance. |
 | **refusal** | A typed statement that the process could not produce a proposal. A refusal is a result. |
-| **registry** | The authoritative table of 90 mnemonics, arities, and signatures. |
+| **registry** | The authoritative table of 94 mnemonics, arities, and signatures. |
 | **shape** | The dimensions of a stream, e.g. `[4]`, `[H,W]`, `[H,W,C]`. |
 | **signature** | A layout pattern per input and output, with `$VAR`, `*`, and literals. |
 | **space** | The declared sample space, reference or bound, and provenance. Part of the contract. |

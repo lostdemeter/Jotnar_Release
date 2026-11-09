@@ -39,7 +39,7 @@ What works today:
 
 - `IMPORT` / `DEF` / `CALL` textual macro expansion with per-call-site
   namespacing, `REPEAT` / `BREAK`, `CONFIG`, layouts, `STATE`, `RANGE`.
-- Registry binding for **all 90 mnemonics**, including `SADD`, `IMAX`,
+- Registry binding for **all 94 mnemonics**, including `SADD`, `IMAX`,
   `ISAR`, `IDIVU`, `IMODU`, `IEQ`, `ILT`, `ISELECT`.
 - The static layout verifier with honest coverage reporting.
 - The reference interpreter over `F32`/`F64`, `I64`, `U8`, bool masks,
@@ -47,7 +47,7 @@ What works today:
 - The lattice substrate (`encode`/`decode`/fixed-point/LUTs) matching the
   Python formulas.
 - Four code generators: C99, integer-only C with a float trap, CUDA, and Rust
-  (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV/TRANSPOSE/CONCAT
+  (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT
   over F/I; LAYERNORM eps comes from CONFIG eps_ln);
   T refused, DECONV/INTERP/GATHER fail loud until the next slice).
 - Differential parity:

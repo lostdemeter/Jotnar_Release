@@ -6,7 +6,7 @@ lede: The book is a build artifact. Here is the pipeline, the source, and the re
 columns: 1
 ---
 
-This manual is built from Markdown files by a small Rust program called **jotnar-press**. The press reads `book.toml`, renders each chapter, generates the cover, masthead, table of contents, part dividers, and the 90-mnemonic register, then hands the HTML to Paged.js and Chromium for pagination and PDF output.
+This manual is built from Markdown files by a small Rust program called **jotnar-press**. The press reads `book.toml`, renders each chapter, generates the cover, masthead, table of contents, part dividers, and the 94-mnemonic register, then hands the HTML to Paged.js and Chromium for pagination and PDF output.
 
 ```text
 content/*.md
@@ -25,7 +25,7 @@ The whole thing is deliberately inspectable. There is no layout engine to learn,
 |---|---|
 | `book.toml` | Book metadata, part order, chapter order, themes. |
 | `content/*.md` | One Markdown file per chapter, with a small frontmatter block. |
-| `data/ops.tsv` | The 90-mnemonic register: name, arity, signature, family, one-line contract. |
+| `data/ops.tsv` | The 94-mnemonic register: name, arity, signature, family, one-line contract. |
 | `press/src/main.rs` | The press: frontmatter, directives, syntax highlighting, HTML, PDF. |
 | `press/vendor/paged.polyfill.js` | Paged.js 0.4.3, vendored so the build is offline. |
 | `theme/book.css` | The zine theme: page boxes, type, color, code, tables, cover. |

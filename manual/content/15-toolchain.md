@@ -78,7 +78,7 @@ The parity harness is one kind of witness. The trust spine in Appendix A general
 :::
 
 ::: note [OPS]
-`jotnar ops` is the quickest way to answer “does this mnemonic exist?” It prints all 90 names, their arity, and a marker when a target has no reference pattern. If a name is missing, the assembler will reject it. There is no aliasing and no case-insensitive fallback.
+`jotnar ops` is the quickest way to answer “does this mnemonic exist?” It prints all 94 names, their arity, and a marker when a target has no reference pattern. If a name is missing, the assembler will reject it. There is no aliasing and no case-insensitive fallback.
 :::
 
 ## The parity harness

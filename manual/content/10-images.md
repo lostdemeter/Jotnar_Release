@@ -35,8 +35,11 @@ Every arrow is a stream. Every stage can be inspected, replaced, or run on a dif
 | `GAUSS` | `$A, F:SCALAR, F:SCALAR -> $A` | Gaussian blur with radius and sigma. |
 | `ISO_BLUR` | `T:HW -> T:HW` | Fixed 5×5 Gaussian (radius 2, sigma 1). |
 | `CONV` | `*, * -> *` | 2D convolution with an explicit kernel. |
+| `CONV2D` | `*, *, *, F:SCALAR, F:SCALAR -> *` | Multi-channel HWC convolution with stride, padding, and bias. |
 | `DECONV` | `*, *, F:SCALAR, F:SCALAR -> *` | Transposed convolution with stride and padding. |
+| `DECONV2D` | `*, *, *, F:SCALAR, F:SCALAR -> *` | Multi-channel HWC transposed convolution with stride, padding, and bias. |
 | `INTERP` | `*, F:SCALAR, F:SCALAR -> *` | Bilinear resize by dyadic scales. |
+| `RESIZE2D` | `*, F:SCALAR, F:SCALAR, F:SCALAR -> *` | Bilinear resize to an explicit size with an align_corners flag. |
 | `POOLAVG` | `* -> *` | Global average pool over H,W; returns `(C)`. |
 | `PRELU` | `$A, $A -> $A` | PReLU with scalar or per-channel slope. |
 
