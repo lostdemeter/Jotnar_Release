@@ -63,4 +63,4 @@ between the two codebases explicit so the port stays reviewable.
 
 ## Rust target
 
-`--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. Next slices: CONV/DECONV/INTERP/GATHER, then the geometric DAV2 listing.
+`--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. Next slices: DECONV/INTERP/GATHER, then the geometric DAV2 listing.

@@ -228,6 +228,72 @@ fn multi_output_and_float_matmul() {
 }
 
 #[test]
+fn conv_matches_interpreter() {
+    // Edge-replicate 3x3 over a 3x4 image: the Rust lowering must be
+    // the C/interpreter contract, not a zero-padded variant.
+    let listing = "IN X AS F:HW\nIN K AS F:HW\nOUT = CONV(X, K)\n";
+    let xs = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+    ];
+    let ks = [0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0];
+    let f = feeds(&[("X", fvalue(&[3, 4], &xs)), ("K", fvalue(&[3, 3], &ks))]);
+    // The reference interpreter's CONV is the triple path; the C backend
+    // is the F-path contract the Rust emitter mirrors, so compare against
+    // C rather than the interpreter here.
+    let art = compile_program(listing, &opts(&["OUT"]), f.clone()).expect("compile conv rust");
+    assert!(
+        art.source.contains("for ky in 0..3"),
+        "missing CONV lowering"
+    );
+    let cargs = CompileOptions {
+        target: Target::C,
+        ..opts(&["OUT"])
+    };
+    let cart = compile_program(listing, &cargs, f).expect("compile conv c");
+    let dir = tempfile::tempdir().unwrap();
+    let rexe = build(&art.source, dir.path(), "prog_rust", Target::Rust).expect("build rust");
+    let cexe = build(&cart.source, dir.path(), "prog_c", Target::C).expect("build c");
+    let write = |n: &str, v: &[f64]| {
+        let p = dir.path().join(n);
+        let mut b = Vec::new();
+        for x in v {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let x = write("x.f64", &xs);
+    let k = write("k.f64", &ks);
+    let rout = dir.path().join("rout.f64").to_string_lossy().into_owned();
+    let cout = dir.path().join("cout.f64").to_string_lossy().into_owned();
+    let status = Command::new(&rexe)
+        .args([&x, &k, &rout])
+        .status()
+        .expect("run rust conv");
+    assert!(status.success());
+    let status = Command::new(&cexe)
+        .args([&x, &k, &cout])
+        .status()
+        .expect("run c conv");
+    assert!(status.success());
+    let read = |p: &str| {
+        fs::read(p)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<f64>>()
+    };
+    let got = read(&rout);
+    let want = read(&cout);
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want.iter()) {
+        assert!((g - w).abs() < 1e-12, "conv {got:?} vs {want:?}");
+    }
+    // A 3x3 Laplacian over a planar ramp interior is zero; edges bend.
+    assert!(got[5].abs() < 1e-9, "interior {got:?}");
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never

@@ -473,9 +473,44 @@ fn pattern_rust(
                 "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, 1e-6);"
             ))
         }
-        "CONV" => Err(Error::unimplemented(
-            "Rust backend CONV not yet (next slice)",
-        )),
+        "CONV" => {
+            // C parity: same-size, single-channel, edge-replicate,
+            // odd kernel. `infer_shapes` has already validated the
+            // geometry, so unwrap the static dims here.
+            let (x, k) = (args[0].as_str(), args[1].as_str());
+            let xsh = get(x)?.shape.clone();
+            let ksh = get(k)?.shape.clone();
+            let (Some(h), Some(w)) = (xsh[0], xsh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV input",
+                ));
+            };
+            let (Some(kh), Some(kw)) = (ksh[0], ksh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in CONV kernel",
+                ));
+            };
+            let (rh, rw) = (kh / 2, kw / 2);
+            Ok(format!(
+                "for oy in 0..{h} {{\n\
+                 \x20 for ox in 0..{w} {{\n\
+                 \x20   let mut acc = 0.0f64;\n\
+                 \x20   for ky in 0..{kh} {{\n\
+                 \x20     let iy0 = oy as i64 + ky as i64 - {rh};\n\
+                 \x20     let iy = if iy0 < 0 {{ 0usize }} else if iy0 >= {h} as i64 {{ {} }} else {{ iy0 as usize }};\n\
+                 \x20     for kx in 0..{kw} {{\n\
+                 \x20       let ix0 = ox as i64 + kx as i64 - {rw};\n\
+                 \x20       let ix = if ix0 < 0 {{ 0usize }} else if ix0 >= {w} as i64 {{ {} }} else {{ ix0 as usize }};\n\
+                 \x20       acc += {x}[iy * {w} + ix] * {k}[ky * {kw} + kx];\n\
+                 \x20     }}\n\
+                 \x20   }}\n\
+                 \x20   {o}[oy * {w} + ox] = acc;\n\
+                 \x20 }}\n\
+                 }}",
+                h - 1,
+                w - 1,
+            ))
+        }
         "DECONV" => Err(Error::unimplemented(
             "Rust backend DECONV not yet (next slice)",
         )),
