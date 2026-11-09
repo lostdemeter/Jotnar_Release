@@ -1623,6 +1623,22 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
                 None,
             ))
         }
+        "RELU" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            if ctx.s(x)?.kind != CKind::F {
+                return Err(Error::unimplemented("C RELU needs F"));
+            }
+            let co = ctx.elems(o)?;
+            Ok((
+                fill(
+                    r#"/* {o} = RELU({x}) */
+for (int64_t e_i = 0; e_i < {co}; ++e_i)
+  {o}[e_i] = {x}[e_i] > 0.0 ? {x}[e_i] : 0.0;"#,
+                    &[("o", o.into()), ("x", x.into()), ("co", co.to_string())],
+                ),
+                None,
+            ))
+        }
         "SILU" => {
             let (x, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;

@@ -74,6 +74,8 @@ CASES = [
      {"X": {"kind": "F64", "shape": [2, 3], "data": [1, 2, 3, 10, 20, 30]},
       "W": {"kind": "F64", "shape": [3], "data": [1, 0.5, 2]},
       "B": {"kind": "F64", "shape": [3], "data": [0.1, -0.2, 0.3]}}, ["OUT"], True, 1e-9),
+    ("f_relu", "IN A AS F:HW\nOUT = RELU(A)\n",
+     {"A": {"kind": "F64", "shape": [2, 3], "data": [-1.0, 0.0, 2.0, -0.5, 3.0, -4.0]}}, ["OUT"], True, 0),
     ("t_refusal", "IN A AS T:HW\nOUT = IADD(A, A)\n",
      {"A": {"kind": "T", "shape": [2], "s": [1, 1], "e": [32768, 32768], "z": [0, 0]}}, ["OUT"], False, 0),
     ("t_output_refusal", "IN A AS T:HW\nIN B AS T:HW\nOUT = MATMUL(A, B)\n",

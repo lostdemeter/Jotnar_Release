@@ -261,6 +261,7 @@ fn build_registry() -> Registry {
     );
     add("SILU", 1, 1, sig(&["$A"], &["$A"]), Some(op_silu));
     add("GELU", 1, 1, sig(&["$A"], &["$A"]), Some(op_gelu));
+    add("RELU", 1, 1, sig(&["$A"], &["$A"]), Some(op_relu));
     add(
         "SCAN",
         3,
