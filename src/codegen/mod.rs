@@ -5,6 +5,7 @@ pub mod c;
 pub mod cuda;
 pub mod infer;
 pub mod nonfpu;
+pub mod rust;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub enum Target {
     C,
     NonFpu,
     Cuda,
+    Rust,
 }
 
 impl Target {
@@ -32,8 +34,9 @@ impl Target {
             "c" => Ok(Target::C),
             "nonfpu" => Ok(Target::NonFpu),
             "cuda" => Ok(Target::Cuda),
+            "rust" => Ok(Target::Rust),
             other => Err(Error::unimplemented(format!(
-                "no '{other}' backend yet (have: c, nonfpu, cuda)"
+                "no '{other}' backend yet (have: c, nonfpu, cuda, rust)"
             ))),
         }
     }
@@ -250,6 +253,9 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     }
     if opts.target == Target::Cuda {
         return cuda::compile_cuda(text, opts, sample);
+    }
+    if opts.target == Target::Rust {
+        return rust::compile_rust(text, opts, sample);
     }
     let nonfpu = opts.target == Target::NonFpu;
     let mut bound = asm::assemble(text, &opts.asm)?;
@@ -487,10 +493,13 @@ fn lattice_from_vec(shape: &[usize], v: Vec<f64>) -> Result<crate::value::Triple
     Ok(crate::lattice::encode(&arr))
 }
 
-/// Compile emitted C to an executable.
+/// Compile emitted source to an executable.
 pub fn build(source: &str, workdir: &Path, name: &str, target: Target) -> Result<PathBuf> {
     if target == Target::Cuda {
         return cuda::build_cu(source, workdir, name);
+    }
+    if target == Target::Rust {
+        return build_rust(source, workdir, name);
     }
     std::fs::create_dir_all(workdir)?;
     let src = workdir.join(format!("{name}.c"));
@@ -515,6 +524,25 @@ pub fn build(source: &str, workdir: &Path, name: &str, target: Target) -> Result
     if !out.status.success() {
         return Err(Error::asm(format!(
             "C build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(exe)
+}
+
+fn build_rust(source: &str, workdir: &Path, name: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(workdir)?;
+    let src = workdir.join(format!("{name}.rs"));
+    let exe = workdir.join(name);
+    std::fs::write(&src, source)?;
+    let out = std::process::Command::new("rustc")
+        .arg(&src)
+        .args(["-O", "-o"])
+        .arg(&exe)
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::asm(format!(
+            "Rust build failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         )));
     }
