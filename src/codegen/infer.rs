@@ -535,6 +535,49 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 shape.extend_from_slice(&x.shape[2..]);
                 streams.insert(o, StreamInfo::f(shape));
             }
+            "CONV2D" => {
+                let x = get(&streams, a(0))?;
+                let w = get(&streams, a(1))?;
+                let b = get(&streams, a(2))?;
+                let stride = int_lit(a(3), &format!("{where_} stride"))?;
+                let pad = int_lit(a(4), &format!("{where_} pad"))?;
+                if x.kind != CKind::F
+                    || w.kind != CKind::F
+                    || b.kind != CKind::F
+                    || x.shape.len() != 3
+                    || w.shape.len() != 4
+                    || b.shape.len() != 1
+                {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: CONV2D needs F x(H,W,C)+w(Cout,kh,kw,C)+b(Cout)"
+                    )));
+                }
+                let (Some(h), Some(ww), Some(cin)) = (x.shape[0], x.shape[1], x.shape[2]) else {
+                    return Err(Error::asm(format!("{where_}: CONV2D needs static HWC")));
+                };
+                let (Some(cout), Some(kh), Some(kw), Some(wcin)) =
+                    (w.shape[0], w.shape[1], w.shape[2], w.shape[3])
+                else {
+                    return Err(Error::asm(format!("{where_}: CONV2D needs static weights")));
+                };
+                if wcin != cin || b.shape[0] != Some(cout) {
+                    return Err(Error::asm(format!(
+                        "{where_}: CONV2D channel/bias mismatch"
+                    )));
+                }
+                if stride <= 0 || pad < 0 {
+                    return Err(Error::asm(format!("{where_}: CONV2D bad stride/pad")));
+                }
+                let ho = (h as i64 + 2 * pad - kh as i64) / stride + 1;
+                let wo = (ww as i64 + 2 * pad - kw as i64) / stride + 1;
+                if ho <= 0 || wo <= 0 {
+                    return Err(Error::asm(format!("{where_}: CONV2D bad output size")));
+                }
+                streams.insert(
+                    o,
+                    StreamInfo::f(vec![Some(ho as usize), Some(wo as usize), Some(cout)]),
+                );
+            }
             "RESIZE2D" => {
                 let x = get(&streams, a(0))?;
                 let ho = int_lit(a(1), &format!("{where_} ho"))?;

@@ -281,6 +281,64 @@ pub fn op_gauss(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::Triple(conv_trip(a, &k, m_acc, m_cov)?)])
 }
 
+pub fn op_conv2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = arg_f64_array(args, 0, "CONV2D")?;
+    let w = arg_f64_array(args, 1, "CONV2D")?;
+    let b = arg_f64_array(args, 2, "CONV2D")?;
+    let stride = arg_i64(args, 3, "CONV2D", "stride")?;
+    let pad = arg_i64(args, 4, "CONV2D", "pad")?;
+    if stride <= 0 || pad < 0 {
+        return Err(Error::runtime("CONV2D: stride must be > 0, pad >= 0"));
+    }
+    let sh = x.shape();
+    let wsh = w.shape();
+    if sh.len() != 3 || wsh.len() != 4 {
+        return Err(Error::runtime(format!(
+            "CONV2D: expected (H,W,Cin) and (Cout,kh,kw,Cin), got {sh:?} / {wsh:?}"
+        )));
+    }
+    let (h, ww, cin) = (sh[0], sh[1], sh[2]);
+    let (cout, kh, kw, wcin) = (wsh[0], wsh[1], wsh[2], wsh[3]);
+    if wcin != cin || b.len() != cout {
+        return Err(Error::runtime("CONV2D: channel/bias mismatch"));
+    }
+    let ho = (h as i64 + 2 * pad - kh as i64) / stride + 1;
+    let wo = (ww as i64 + 2 * pad - kw as i64) / stride + 1;
+    if ho <= 0 || wo <= 0 {
+        return Err(Error::runtime(format!("CONV2D: bad output size {ho}x{wo}")));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let xf = flat(&x);
+    let wf = flat(&w);
+    let bf = flat(&b);
+    let mut out = vec![0f64; ho * wo * cout];
+    for co in 0..cout {
+        for oy in 0..ho {
+            for ox in 0..wo {
+                let mut acc = bf[co];
+                for ky in 0..kh {
+                    let iy = oy as i64 * stride + ky as i64 - pad;
+                    if iy < 0 || iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw {
+                        let ix = ox as i64 * stride + kx as i64 - pad;
+                        if ix < 0 || ix >= ww as i64 {
+                            continue;
+                        }
+                        for ci in 0..cin {
+                            acc += xf[((iy as usize) * ww + ix as usize) * cin + ci]
+                                * wf[((co * kh + ky) * kw + kx) * cin + ci];
+                        }
+                    }
+                }
+                out[(oy * wo + ox) * cout + co] = acc;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[ho, wo, cout], out)?)])
+}
+
 pub fn op_resize2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let x = arg_f64_array(args, 0, "RESIZE2D")?;
     let ho = arg_i64(args, 1, "RESIZE2D", "ho")?;

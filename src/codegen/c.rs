@@ -1053,6 +1053,73 @@ for (int64_t r_i = 0; r_i < {o}_N; ++r_i) {
                 ))
             }
         }
+        "CONV2D" => {
+            let (x, w, b, o) = (
+                args[0].as_str(),
+                args[1].as_str(),
+                args[2].as_str(),
+                outs[0].as_str(),
+            );
+            let kind = ctx.s(x)?.kind;
+            if kind != CKind::F {
+                return Err(Error::unimplemented("C CONV2D needs F"));
+            }
+            let xsh = ctx.s(x)?.shape.clone();
+            let wsh = ctx.s(w)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented(
+                    "C CONV2D needs HWC + (Cout,kh,kw,Cin)",
+                ));
+            }
+            let (h, ww, cin) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let (cout, kh, kw) = (wsh[0].unwrap(), wsh[1].unwrap(), wsh[2].unwrap());
+            let stride = int_lit(&args[3], "CONV2D stride")?;
+            let pad = int_lit(&args[4], "CONV2D pad")?;
+            let ho = (h as i64 + 2 * pad - kh as i64) / stride + 1;
+            let wo = (ww as i64 + 2 * pad - kw as i64) / stride + 1;
+            if ho <= 0 || wo <= 0 || stride <= 0 || pad < 0 {
+                return Err(Error::asm("C CONV2D bad geometry"));
+            }
+            Ok((
+                fill(
+                    r#"/* {o} = CONV2D({x}) {cout}ch {kh}x{kw} s{stride} p{pad} */
+for (int64_t co = 0; co < {cout}; ++co)
+  for (int64_t oy = 0; oy < {ho}; ++oy)
+    for (int64_t ox = 0; ox < {wo}; ++ox) {
+      double acc = {b}[co];
+      for (int64_t ky = 0; ky < {kh}; ++ky) {
+        int64_t iy = oy * {stride} + ky - {pad};
+        if (iy < 0 || iy >= {h}) continue;
+        for (int64_t kx = 0; kx < {kw}; ++kx) {
+          int64_t ix = ox * {stride} + kx - {pad};
+          if (ix < 0 || ix >= {w}) continue;
+          for (int64_t ci = 0; ci < {cin}; ++ci)
+            acc += {x}[(iy * {w} + ix) * {cin} + ci]
+                 * {w}[((co * {kh} + ky) * {kw} + kx) * {cin} + ci];
+        }
+      }
+      {o}[(oy * {wo} + ox) * {cout} + co] = acc;
+    }"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("h", h.to_string()),
+                        ("w", ww.to_string()),
+                        ("cin", cin.to_string()),
+                        ("cout", cout.to_string()),
+                        ("kh", kh.to_string()),
+                        ("kw", kw.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("stride", stride.to_string()),
+                        ("pad", pad.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "RESIZE2D" => {
             let (x, o) = (args[0].as_str(), outs[0].as_str());
             if ctx.s(x)?.kind != CKind::F {
