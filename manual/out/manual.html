@@ -2134,7 +2134,7 @@ layouts resolved: 53/59 (0 error(s))
 <h2>The targets</h2>
 <table><thead><tr><th>Target</th><th>Flag</th><th>What it emits</th><th>What it refuses</th></tr></thead><tbody>
 <tr><td><strong>C</strong></td><td><code>--target c</code> (default)</td><td>Portable C99, float/transformer path plus exact moves.</td><td>Dynamic shapes it cannot bound.</td></tr>
-<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/SOFTMAX. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice).</td></tr>
+<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/SOFTMAX. GELU/LAYERNORM are implemented but not yet gated. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice).</td></tr>
 <tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm.</td><td>Any float path; a <code>float_trap</code> gate catches leaks.</td></tr>
 <tr><td><strong>CUDA</strong></td><td><code>--target cuda</code></td><td>FP32 correctness-first kernels, one launch per op.</td><td>Missing toolkit or unsupported op.</td></tr>
 <tr><td><strong>Verilog</strong></td><td><code>jotnar-verilog</code></td><td>Structural hardware for the supported integer subset.</td><td>Multi-lane arithmetic that would cross lanes; reassignment.</td></tr>
@@ -2183,7 +2183,9 @@ silent fallback.</p>
 with a typed error), and the artefact interface mirrors the C target (raw
 little-endian f64/i64 argv files). <strong>T (triple) streams are refused loudly
 with the file contract intact</strong> — a triple may never silently become an f64
-matmul. The parity gate is <code>scripts/parity_rust.py</code>.</p>
+matmul. The parity gate is <code>scripts/parity_rust.py</code>. The current gate covers scalar-right
+integer/float ops, <code>MATMUL</code>, and <code>SOFTMAX</code>; <code>GELU</code> and <code>LAYERNORM</code> are
+implemented but not yet gated, so treat them as next-slice.</p>
 <pre><code class="language-sh">jotnar emit-rust showcase/language/saxpy.asm \
   --payload /tmp/saxpy.json --outputs OUT --out /tmp/saxpy.rs
 jotnar build showcase/language/saxpy.asm \

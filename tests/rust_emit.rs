@@ -34,11 +34,6 @@ fn write_i64(dir: &std::path::Path, name: &str, v: i64) -> String {
     fs::write(&p, v.to_le_bytes()).unwrap();
     p.to_string_lossy().into_owned()
 }
-fn write_f64(dir: &std::path::Path, name: &str, v: f64) -> String {
-    let p = dir.join(name);
-    fs::write(&p, v.to_le_bytes()).unwrap();
-    p.to_string_lossy().into_owned()
-}
 fn read_i64(p: &str) -> i64 {
     i64::from_le_bytes(fs::read(p).unwrap()[..8].try_into().unwrap())
 }
@@ -219,8 +214,10 @@ fn multi_output_and_float_matmul() {
     assert!(status.success());
     let raw = fs::read(&out).unwrap();
     let vals: Vec<f64> = raw
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect();
     for (g, w) in vals.iter().zip([19.0, 22.0, 43.0, 50.0]) {
         assert!((g - w).abs() < 1e-9, "matmul {vals:?}");
