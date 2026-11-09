@@ -60,7 +60,6 @@ CASES = [
     ("f_div", "IN A AS F:HW\nIN B AS F:HW\nOUT = DIV(A, B)\n",
      {"A": {"kind": "F64", "shape": [1, 3], "data": [10.0, 20.0, 30.0]},
       "B": {"kind": "F64", "shape": [1, 3], "data": [2.0, 5.0, 3.0]}}, ["OUT"], True, 1e-9),
-
     ("f_softmax", "IN A AS F:HW\nOUT = SOFTMAX(A)\n",
      {"A": {"kind": "F64", "shape": [1, 3], "data": [1.0, 2.0, 3.0]}}, ["OUT"], True, 1e-6),
         ("t_refusal", "IN A AS T:HW\nOUT = IADD(A, A)\n",
