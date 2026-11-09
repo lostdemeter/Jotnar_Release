@@ -47,7 +47,8 @@ What works today:
 - The lattice substrate (`encode`/`decode`/fixed-point/LUTs) matching the
   Python formulas.
 - Four code generators: C99, integer-only C with a float trap, CUDA, and Rust
-  (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV over F/I);
+  (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV/TRANSPOSE/CONCAT
+  over F/I; LAYERNORM eps comes from CONFIG eps_ln);
   T refused, DECONV/INTERP/GATHER fail loud until the next slice).
 - Differential parity:
 

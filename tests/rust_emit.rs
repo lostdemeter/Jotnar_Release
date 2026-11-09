@@ -421,6 +421,82 @@ fn gelu_matches_exact_erf() {
 }
 
 #[test]
+fn layernorm_eps_comes_from_config() {
+    // The C target reads CONFIG eps_ln; the Rust target must do the same
+    // instead of hardcoding a value. Compare against C and refuse a
+    // listing that omits the key.
+    let listing = "\
+CONFIG eps_ln 1e-6
+IN X AS F:HW
+IN W AS F:HW
+IN B AS F:HW
+OUT = LAYERNORM(X, W, B)
+";
+    let f = feeds(&[
+        ("X", fvalue(&[2, 3], &[1.0, 2.0, 3.0, 10.0, 20.0, 30.0])),
+        ("W", fvalue(&[3], &[1.0, 0.5, 2.0])),
+        ("B", fvalue(&[3], &[0.1, -0.2, 0.3])),
+    ]);
+    let art = compile_program(listing, &opts(&["OUT"]), f.clone()).expect("compile ln");
+    assert!(art.source.contains("1e-6"), "eps not read from config");
+    let cart = compile_program(
+        listing,
+        &CompileOptions {
+            target: Target::C,
+            ..opts(&["OUT"])
+        },
+        f,
+    )
+    .expect("compile ln c");
+    let dir = tempfile::tempdir().unwrap();
+    let rexe = build(&art.source, dir.path(), "lnr", Target::Rust).expect("build ln");
+    let cexe = build(&cart.source, dir.path(), "lnc", Target::C).expect("build ln c");
+    let write = |n: &str, v: &[f64]| {
+        let p = dir.path().join(n);
+        let mut b = Vec::new();
+        for x in v {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let x = write("x.f64", &[1.0, 2.0, 3.0, 10.0, 20.0, 30.0]);
+    let w = write("w.f64", &[1.0, 0.5, 2.0]);
+    let b = write("b.f64", &[0.1, -0.2, 0.3]);
+    let ro = dir.path().join("ro.f64").to_string_lossy().into_owned();
+    let co = dir.path().join("co.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&rexe)
+        .args([&x, &w, &b, &ro])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(&cexe)
+        .args([&x, &w, &b, &co])
+        .status()
+        .unwrap()
+        .success());
+    let read = |p: &str| {
+        fs::read(p)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<f64>>()
+    };
+    assert_eq!(read(&ro), read(&co));
+
+    let no_cfg = "IN X AS F:HW\nIN W AS F:HW\nIN B AS F:HW\nOUT = LAYERNORM(X, W, B)\n";
+    let f = feeds(&[
+        ("X", fvalue(&[2, 3], &[1.0, 2.0, 3.0, 10.0, 20.0, 30.0])),
+        ("W", fvalue(&[3], &[1.0, 0.5, 2.0])),
+        ("B", fvalue(&[3], &[0.1, -0.2, 0.3])),
+    ]);
+    let err = compile_program(no_cfg, &opts(&["OUT"]), f)
+        .err()
+        .expect("missing eps_ln must refuse");
+    assert!(err.to_string().contains("eps_ln"), "{err}");
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never

@@ -13,7 +13,7 @@ An emitter consumes the bound program and produces a target artifact. It does no
 | Target | Flag | What it emits | What it refuses |
 |---|---|---|---|
 | **C** | `--target c` (default) | Portable C99, float/transformer path plus exact moves. | Dynamic shapes it cannot bound. |
-| **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice). |
+| **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/CONV/TRANSPOSE/CONCAT. LAYERNORM eps follows `CONFIG eps_ln`. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice). |
 | **non-FPU** | `--target nonfpu` | Integer-only C, baked lattice tables, fixed-point math, no `float`/`double`/libm. | Any float path; a `float_trap` gate catches leaks. |
 | **CUDA** | `--target cuda` | FP32 correctness-first kernels, one launch per op. | Missing toolkit or unsupported op. |
 | **Verilog** | `jotnar-verilog` | Structural hardware for the supported integer subset. | Multi-lane arithmetic that would cross lanes; reassignment. |

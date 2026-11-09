@@ -17,6 +17,7 @@ use super::infer::{infer_shapes, CKind, StreamInfo};
 use super::{Artifact, CompileOptions};
 use crate::asm::{self};
 use crate::error::{Error, Result};
+use crate::ir::Config;
 use crate::layout::is_literal;
 use crate::payload::Feeds;
 
@@ -274,7 +275,7 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
                 )))
             }
             _ => {
-                let stmt = pattern_rust(&ins.mn, &ins.outs, &ins.args, &streams)?;
+                let stmt = pattern_rust(&ins.mn, &ins.outs, &ins.args, &streams, &bound.config)?;
                 body.push(format!(
                     "    /* L{}: {} */\n    {}",
                     ins.line,
@@ -361,6 +362,7 @@ fn pattern_rust(
     outs: &[String],
     args: &[String],
     streams: &HashMap<String, StreamInfo>,
+    config: &Config,
 ) -> Result<String> {
     let o = outs[0].as_str();
     let get = |n: &str| {
@@ -469,8 +471,11 @@ fn pattern_rust(
                     ))
                 }
             };
+            let eps = config
+                .get_f64("eps_ln")
+                .ok_or_else(|| Error::asm("Rust LAYERNORM needs CONFIG eps_ln"))?;
             Ok(format!(
-                "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, 1e-6);"
+                "{o} = layernorm_rows(&{x}, &{w}, &{b}, {rows}, {cols}, {eps:?});"
             ))
         }
         "CONV" => {
@@ -582,6 +587,7 @@ mod tests {
             &["OUT".to_string()],
             &["A".to_string(), "B".to_string()],
             &streams,
+            &Config::default(),
         );
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("dynamic dim"));
