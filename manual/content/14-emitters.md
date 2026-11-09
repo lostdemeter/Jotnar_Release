@@ -13,7 +13,7 @@ An emitter consumes the bound program and produces a target artifact. It does no
 | Target | Flag | What it emits | What it refuses |
 |---|---|---|---|
 | **C** | `--target c` (default) | Portable C99, float/transformer path plus exact moves. | Dynamic shapes it cannot bound. |
-| **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar ops + MATMUL/GELU/SOFTMAX/LAYERNORM. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice). |
+| **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice). |
 | **non-FPU** | `--target nonfpu` | Integer-only C, baked lattice tables, fixed-point math, no `float`/`double`/libm. | Any float path; a `float_trap` gate catches leaks. |
 | **CUDA** | `--target cuda` | FP32 correctness-first kernels, one launch per op. | Missing toolkit or unsupported op. |
 | **Verilog** | `jotnar-verilog` | Structural hardware for the supported integer subset. | Multi-lane arithmetic that would cross lanes; reassignment. |
@@ -84,12 +84,13 @@ One launch per op is a correctness strategy, not a performance strategy. A tuned
 ## Rust
 
 The Rust target emits a single-file, std-only Rust program (`rustc`, edition
-2021). Arithmetic is preserved: integer ops keep checked-division guards
-(exit 30 on zero / `i64::MIN / -1`), scalar operands broadcast explicitly,
-and the artefact interface mirrors the C target (raw little-endian f64/i64
-argv files). **T (triple) streams are refused loudly with the file contract
-intact** — a triple may never silently become an f64 matmul. The parity
-gate is `scripts/parity_rust.py`.
+2021). Integer ops keep checked-division guards (exit 30 on zero /
+`i64::MIN / -1`), scalar operands are supported on the right-hand side
+(literal RHS, matching the upstream infer contract — scalar-left is refused
+with a typed error), and the artefact interface mirrors the C target (raw
+little-endian f64/i64 argv files). **T (triple) streams are refused loudly
+with the file contract intact** — a triple may never silently become an f64
+matmul. The parity gate is `scripts/parity_rust.py`.
 
 ```sh
 jotnar emit-rust showcase/language/saxpy.asm \

@@ -1256,7 +1256,7 @@ cargo build --release
 </tbody></table>
 <p><code>run_doom_demo.sh</code> is <strong>playable by default</strong>. <code>--frames N</code> is the headless path. If the external image or WAD is absent, the script falls back to the checked-in reference title and does not pretend the live run happened.</p>
 <aside class="warning span-all"><div class="aside-title">DRAFT NOTICE</div><p>This is <strong>issue 01</strong>, a first rough draft. Some chapters describe behavior that is gated by parity scripts but not yet exposed in the CLI. Some commands are stable; some are scaffolding. Where the manual and the assembler disagree, the assembler wins. Where the assembler and the oracle disagree, the parity harness wins. Where the harness and reality disagree, file a bug.</p>
-</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-06</div><p>The Rust workspace is green at <strong>61/61 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
+</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>197/197 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
 </aside><h2>Conventions</h2>
 <table><thead><tr><th>Convention</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>UPPERCASE</code></td><td>A mnemonic, directive, or keyword.</td></tr>
@@ -2134,7 +2134,7 @@ layouts resolved: 53/59 (0 error(s))
 <h2>The targets</h2>
 <table><thead><tr><th>Target</th><th>Flag</th><th>What it emits</th><th>What it refuses</th></tr></thead><tbody>
 <tr><td><strong>C</strong></td><td><code>--target c</code> (default)</td><td>Portable C99, float/transformer path plus exact moves.</td><td>Dynamic shapes it cannot bound.</td></tr>
-<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar ops + MATMUL/GELU/SOFTMAX/LAYERNORM. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice).</td></tr>
+<tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); CONV/DECONV/INTERP/GATHER (next slice).</td></tr>
 <tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm.</td><td>Any float path; a <code>float_trap</code> gate catches leaks.</td></tr>
 <tr><td><strong>CUDA</strong></td><td><code>--target cuda</code></td><td>FP32 correctness-first kernels, one launch per op.</td><td>Missing toolkit or unsupported op.</td></tr>
 <tr><td><strong>Verilog</strong></td><td><code>jotnar-verilog</code></td><td>Structural hardware for the supported integer subset.</td><td>Multi-lane arithmetic that would cross lanes; reassignment.</td></tr>
@@ -2177,12 +2177,13 @@ silent fallback.</p>
 <aside class="warning span-all"><div class="aside-title">NOT A SPEED CLAIM</div><p>One launch per op is a correctness strategy, not a performance strategy. A tuned kernel pass is a separate project. If you benchmark this target and call it slow, you are right, and you have missed the point.</p>
 </aside><h2>Rust</h2>
 <p>The Rust target emits a single-file, std-only Rust program (<code>rustc</code>, edition
-2021). Arithmetic is preserved: integer ops keep checked-division guards
-(exit 30 on zero / <code>i64::MIN / -1</code>), scalar operands broadcast explicitly,
-and the artefact interface mirrors the C target (raw little-endian f64/i64
-argv files). <strong>T (triple) streams are refused loudly with the file contract
-intact</strong> — a triple may never silently become an f64 matmul. The parity
-gate is <code>scripts/parity_rust.py</code>.</p>
+2021). Integer ops keep checked-division guards (exit 30 on zero /
+<code>i64::MIN / -1</code>), scalar operands are supported on the right-hand side
+(literal RHS, matching the upstream infer contract — scalar-left is refused
+with a typed error), and the artefact interface mirrors the C target (raw
+little-endian f64/i64 argv files). <strong>T (triple) streams are refused loudly
+with the file contract intact</strong> — a triple may never silently become an f64
+matmul. The parity gate is <code>scripts/parity_rust.py</code>.</p>
 <pre><code class="language-sh">jotnar emit-rust showcase/language/saxpy.asm \
   --payload /tmp/saxpy.json --outputs OUT --out /tmp/saxpy.rs
 jotnar build showcase/language/saxpy.asm \
@@ -2572,7 +2573,7 @@ layouts resolved: 53/59 (0 error(s))
   </div>
   <p class="chapter-lede">Four exhibits that are deliberately different: a real game, a word-level inference unit, a model-blind fleet, and an honest analog filter.</p>
 </header>
-<div class="chapter-body cols-2"><p><span class="dropcap">A</span> language is only as convincing as the things people build with it. The full index has nine exhibits; Part IV is a <strong>selected set of four</strong>: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18), and the certified agent/backend-tuning exhibit lives in <code>showcase/agent/</code>. These four stories are not benchmarks. They are stories about the same stack under different pressures.</p>
+<div class="chapter-body cols-2"><p><span class="dropcap">A</span> language is only as convincing as the things people build with it. The full index has ten exhibits; Part IV is a <strong>selected set of four</strong>: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18), the certified agent/backend-tuning exhibit lives in <code>showcase/agent/</code>, and the interpreter/model-blind node exhibit lives in <code>showcase/runtime/</code>. These four stories are not benchmarks. They are stories about the same stack under different pressures.</p>
 <h2>DOOM on the RV32IM core</h2>
 <p>A real compiled program on a real machine model. <code>doomgeneric</code> is built with Zig clang/lld for <code>riscv32-freestanding -mcpu=generic_rv32+m</code>, producing an 847,112-byte flat image. The Rust core implements RV32I + M, the CSR/trap surface, and the MMIO the game needs: WAD, framebuffer, clock, frame counter, key ring, UART/CLINT.</p>
 <pre><code class="language-text">frame 1: 24,502,445 instructions, pc=0x00048860
@@ -2782,7 +2783,7 @@ cargo run -p jotnar-lab -- bench doom \
   --runner target/release/jotnar-demo-doom --runs 3 \
   --certificate certificates/doom/native-gpu-migration.json
 </code></pre>
-<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-06</div><p>Workspace tests: <strong>61/61</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
+<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>197/197</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
 </aside><h2>What the harness must not do</h2>
 <ul>
 <li>It must not call a blocked run a pass.</li>

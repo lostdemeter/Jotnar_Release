@@ -171,7 +171,7 @@ fn t_streams_refused_loudly() {
 }
 
 #[test]
-fn multi_output_and_float_matmul_softmax_layernorm() {
+fn multi_output_and_float_matmul() {
     // Multi-output: two I outputs
     let listing = "IN A AS I\nIN B AS I\nO1 = IADD(A, B)\nO2 = ISUB(A, B)\n";
     let f = feeds(&[("A", value(10)), ("B", value(3))]);

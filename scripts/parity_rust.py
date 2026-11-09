@@ -48,8 +48,27 @@ CASES = [
     ("f_matmul_2x2", "IN A AS F:HW\nIN B AS F:HW\nOUT = MATMUL(A, B)\n",
      {"A": {"kind": "F64", "shape": [2, 2], "data": [1, 2, 3, 4]},
       "B": {"kind": "F64", "shape": [2, 2], "data": [5, 6, 7, 8]}}, ["OUT"], True, 1e-9),
-    ("t_refusal", "IN A AS T:HW\nOUT = IADD(A, A)\n",
+    ("f_add", "IN A AS F:HW\nIN B AS F:HW\nOUT = ADD(A, B)\n",
+     {"A": {"kind": "F64", "shape": [1, 3], "data": [1.0, 2.0, 3.0]},
+      "B": {"kind": "F64", "shape": [1, 3], "data": [10.0, 20.0, 30.0]}}, ["OUT"], True, 1e-9),
+    ("f_sub", "IN A AS F:HW\nIN B AS F:HW\nOUT = SUB(A, B)\n",
+     {"A": {"kind": "F64", "shape": [1, 3], "data": [11.0, 22.0, 33.0]},
+      "B": {"kind": "F64", "shape": [1, 3], "data": [1.0, 2.0, 3.0]}}, ["OUT"], True, 1e-9),
+    ("f_mul", "IN A AS F:HW\nIN B AS F:HW\nOUT = MUL(A, B)\n",
+     {"A": {"kind": "F64", "shape": [1, 3], "data": [2.0, 3.0, 4.0]},
+      "B": {"kind": "F64", "shape": [1, 3], "data": [10.0, 10.0, 10.0]}}, ["OUT"], True, 1e-9),
+    ("f_div", "IN A AS F:HW\nIN B AS F:HW\nOUT = DIV(A, B)\n",
+     {"A": {"kind": "F64", "shape": [1, 3], "data": [10.0, 20.0, 30.0]},
+      "B": {"kind": "F64", "shape": [1, 3], "data": [2.0, 5.0, 3.0]}}, ["OUT"], True, 1e-9),
+
+    ("f_softmax", "IN A AS F:HW\nOUT = SOFTMAX(A)\n",
+     {"A": {"kind": "F64", "shape": [1, 3], "data": [1.0, 2.0, 3.0]}}, ["OUT"], True, 1e-6),
+        ("t_refusal", "IN A AS T:HW\nOUT = IADD(A, A)\n",
      {"A": {"kind": "T", "shape": [2], "s": [1, 1], "e": [32768, 32768], "z": [0, 0]}}, ["OUT"], False, 0),
+    ("t_output_refusal", "IN A AS T:HW\nIN B AS T:HW\nOUT = MATMUL(A, B)\n",
+     {"A": {"kind": "T", "shape": [2, 2], "s": [1]*4, "e": [32768]*4, "z": [0]*4},
+      "B": {"kind": "T", "shape": [2, 2], "s": [1]*4, "e": [32768]*4, "z": [0]*4}}, ["OUT"], False, 0),
+
 ]
 
 def main():
@@ -165,9 +184,8 @@ def main():
                      "--workdir", str(td / "buildC"), "--name", "progC"],
                     capture_output=True, text=True)
                 if build_c.returncode != 0:
-                    print(f"SKIP {name}: neither interpreter nor C oracle ran")
-                    # Still pass if rust matched expected hard-coded? Mark skip as pass for now.
-                    passed += 1
+                    print(f"FAIL {name}: SKIP — neither interpreter nor C oracle ran; a skipped control is not a pass")
+                    failed += 1
                     continue
                 argv_c = []
                 for n in payload["streams"]:

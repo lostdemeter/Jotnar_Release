@@ -59,3 +59,8 @@ between the two codebases explicit so the port stays reviewable.
 2. Add the reference function (or leave `run: None` to stay loud).
 3. Add a case to `scripts/parity_ops.py`; make it pass against the oracle.
 4. If the op has a shape rule, add it to `runtime::check_shapes`.
+
+
+## Rust target
+
+`--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. Next slices: CONV/DECONV/INTERP/GATHER, then the geometric DAV2 listing.
