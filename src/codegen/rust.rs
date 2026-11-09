@@ -520,6 +520,38 @@ fn pattern_rust(
         "GATHER" => Err(Error::unimplemented(
             "Rust backend GATHER not yet (next slice)",
         )),
+        "TRANSPOSE" => {
+            let x = args[0].as_str();
+            let sh = get(x)?.shape.clone();
+            if sh.len() != 2 {
+                return Err(Error::unimplemented("Rust TRANSPOSE needs 2D"));
+            }
+            let (Some(r), Some(c)) = (sh[0], sh[1]) else {
+                return Err(Error::unimplemented(
+                    "Rust backend: dynamic dim in TRANSPOSE",
+                ));
+            };
+            Ok(format!(
+                "for t_i in 0..{r} {{ for t_j in 0..{c} {{ {o}[t_j * {r} + t_i] = {x}[t_i * {c} + t_j]; }} }}"
+            ))
+        }
+        "CONCAT" => {
+            // v0.2 contract: 2D, axis 1, same-kind, same rows, baked widths.
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            let ash = get(a)?.shape.clone();
+            let bsh = get(b)?.shape.clone();
+            let (Some(rows), Some(da), Some(db)) = (ash[0], ash[1], bsh[1]) else {
+                return Err(Error::unimplemented("Rust backend: dynamic dim in CONCAT"));
+            };
+            Ok(format!(
+                "for n_i in 0..{rows} {{\n\
+                 \x20 for n_j in 0..{da} {{ {o}[n_i * {} + n_j] = {a}[n_i * {da} + n_j]; }}\n\
+                 \x20 for n_j in 0..{db} {{ {o}[n_i * {} + {da} + n_j] = {b}[n_i * {db} + n_j]; }}\n\
+                 }}",
+                da + db,
+                da + db,
+            ))
+        }
         "RESHAPE2" | "RESHAPE3" => {
             let a = args[0].as_str();
             let n = elems(a)?;

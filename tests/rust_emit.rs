@@ -294,6 +294,94 @@ fn conv_matches_interpreter() {
 }
 
 #[test]
+fn transpose_and_concat_match_c() {
+    // The transformer block needs the two shape moves: K^T for scores and
+    // the per-head column concat. Compare Rust against the C contract.
+    let listing = "IN A AS F:HW\nOUT = TRANSPOSE(A)\n";
+    let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let f = feeds(&[("A", fvalue(&[2, 3], &xs))]);
+    let art = compile_program(listing, &opts(&["OUT"]), f.clone()).expect("compile transpose");
+    let cart = compile_program(
+        listing,
+        &CompileOptions {
+            target: Target::C,
+            ..opts(&["OUT"])
+        },
+        f,
+    )
+    .expect("compile transpose c");
+    let dir = tempfile::tempdir().unwrap();
+    let rexe = build(&art.source, dir.path(), "tr", Target::Rust).expect("build transpose");
+    let cexe = build(&cart.source, dir.path(), "tc", Target::C).expect("build transpose c");
+    let write = |n: &str, v: &[f64]| {
+        let p = dir.path().join(n);
+        let mut b = Vec::new();
+        for x in v {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let read = |p: &str| {
+        fs::read(p)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<f64>>()
+    };
+    let a = write("a.f64", &xs);
+    let ro = dir.path().join("ro.f64").to_string_lossy().into_owned();
+    let co = dir.path().join("co.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&rexe)
+        .args([&a, &ro])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(&cexe)
+        .args([&a, &co])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(read(&ro), read(&co));
+    assert_eq!(read(&ro), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+    // CONCAT along columns: [2,2] ++ [2,1].
+    let listing = "IN A AS F:HW\nIN B AS F:HW\nOUT = CONCAT(A, B, 1)\n";
+    let f = feeds(&[
+        ("A", fvalue(&[2, 2], &[1.0, 2.0, 3.0, 4.0])),
+        ("B", fvalue(&[2, 1], &[9.0, 8.0])),
+    ]);
+    let art = compile_program(listing, &opts(&["OUT"]), f.clone()).expect("compile concat");
+    let cart = compile_program(
+        listing,
+        &CompileOptions {
+            target: Target::C,
+            ..opts(&["OUT"])
+        },
+        f,
+    )
+    .expect("compile concat c");
+    let rexe = build(&art.source, dir.path(), "cr", Target::Rust).expect("build concat");
+    let cexe = build(&cart.source, dir.path(), "cc", Target::C).expect("build concat c");
+    let a = write("ca.f64", &[1.0, 2.0, 3.0, 4.0]);
+    let b = write("cb.f64", &[9.0, 8.0]);
+    let ro = dir.path().join("cro.f64").to_string_lossy().into_owned();
+    let co = dir.path().join("cco.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&rexe)
+        .args([&a, &b, &ro])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new(&cexe)
+        .args([&a, &b, &co])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(read(&ro), read(&co));
+    assert_eq!(read(&ro), vec![1.0, 2.0, 9.0, 3.0, 4.0, 8.0]);
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
