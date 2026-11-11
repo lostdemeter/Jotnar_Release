@@ -199,7 +199,7 @@ static int64_t nf_to_fixed(int8_t s, int32_t e, uint8_t z, int m) {
   if (z) return 0;
   int64_t d = (int64_t)m - (int64_t)e;
   if (d < 0) return (int64_t)s * NF_BASE;
-  if (d > 13312) return 0;
+  if (d > NF_FRAC_CAP) return 0;
   return (int64_t)s * NF_FRAC[d];
 }
 static void nf_from_fixed(int64_t q, int m, int8_t *s, int32_t *e, uint8_t *z) {
@@ -217,7 +217,7 @@ static void nf_from_fixed(int64_t q, int m, int8_t *s, int32_t *e, uint8_t *z) {
   int shift = bl - 15;
   uint64_t mant = (shift >= 0) ? ((shift > 0) ? (a >> shift) : a)
                                : (a << (-shift));
-  int t = shift + 14 - 18;
+  int t = shift + 14 - NF_FIXED_F;
   int idx = t + 64;
   if (idx < 0) idx = 0;
   if (idx > 192) idx = 192;
@@ -264,7 +264,7 @@ static int64_t nf_to_fixed_wide(int8_t s, int32_t e, uint8_t z, int m) {
     if (d < -8192) return (int64_t)s * NF_BASE;
     return (int64_t)s * NF_FRACHI[(int)(-d) - 1];
   }
-  if (d > 13312) return 0;
+  if (d > NF_FRAC_CAP) return 0;
   return (int64_t)s * NF_FRAC[d];
 }
 static void nf_softmax_tail(const int64_t *num, int64_t den, int64_t n,
@@ -338,7 +338,7 @@ static void nf_sigmoid(int8_t s, int32_t e, uint8_t z,
   if (x14 < -262144) y14 = 0;
   else if (x14 > 262144) y14 = 16384;
   else y14 = NF_SIG[x14 + 262144];
-  nf_from_fixed(y14 * 16, 32768, os, oe, oz);
+  nf_from_fixed(y14 * (int64_t)(1 << (NF_FIXED_F - 14)), 32768, os, oe, oz);
 }
 static void nf_silu(int8_t s, int32_t e, uint8_t z,
                     int8_t *os, int32_t *oe, uint8_t *oz) {
@@ -362,26 +362,27 @@ static void nf_layernorm_row(const int8_t *xs, const int32_t *xe, const uint8_t 
   }
   __int128 sum = 0;
   for (int64_t j = 0; j < C; ++j) sum += q[j];
-  int64_t mean = (int64_t)(sum / C);
+  int64_t mean = (sum >= 0) ? (int64_t)((sum + C / 2) / C)
+                            : -(int64_t)((-sum + C / 2) / C);
   __int128 ss = 0;
   for (int64_t j = 0; j < C; ++j) {
     int64_t d = q[j] - mean;
     ss += (__int128)d * d;
   }
-  int64_t var = (int64_t)(ss / C) + epsc;
+  int64_t var = (int64_t)((ss + C / 2) / C) + epsc;
   uint64_t is = nf_isqrt((var >= 0) ? (uint64_t)var : 0);
   for (int64_t j = 0; j < C; ++j) {
     int64_t d = q[j] - mean;
     int64_t norm;
     if (is == 0) norm = 0;
     else {
-      __int128 sc = (__int128)d * (int64_t)(1 << 18);
-      norm = (sc >= 0) ? (int64_t)(sc / (int64_t)is)
-                       : -(int64_t)((-sc) / (int64_t)is);
+      __int128 sc = (__int128)d * (int64_t)(1 << NF_FIXED_F);
+      norm = (sc >= 0) ? (int64_t)((sc + (int64_t)is / 2) / (int64_t)is)
+                       : -(int64_t)((-sc + (int64_t)is / 2) / (int64_t)is);
     }
     __int128 aw = (__int128)norm * wq[j];
-    int64_t aq = (aw >= 0) ? (int64_t)(aw / (int64_t)(1 << 18))
-                           : -(int64_t)((-aw) / (int64_t)(1 << 18));
+    int64_t aq = (aw >= 0) ? (int64_t)((aw + (int64_t)(1 << (NF_FIXED_F - 1))) / (int64_t)(1 << NF_FIXED_F))
+                           : -(int64_t)((-aw + (int64_t)(1 << (NF_FIXED_F - 1))) / (int64_t)(1 << NF_FIXED_F));
     int64_t av = aq + bq[j];
     nf_from_fixed(av, m, &os[j], &oe[j], &oz[j]);
   }
@@ -401,7 +402,7 @@ static void nf_gelu(int8_t s, int32_t e, uint8_t z,
   else p14 = NF_GELUP[x14 + NF_GSPAN];
   int64_t prod = x14 * p14;
   int64_t y14 = (prod >= 0) ? (prod / 16384) : -((-prod) / 16384);
-  nf_from_fixed(y14 * 16, 32768, os, oe, oz);
+  nf_from_fixed(y14 * (int64_t)(1 << (NF_FIXED_F - 14)), 32768, os, oe, oz);
 }
 "#;
 
@@ -436,7 +437,9 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
     if mns.iter().any(|m| is_fx(m)) {
         let m_cov = ctx.config.get_i64_or("m_cov", 33280);
         let m_acc = ctx.config.get_i64_or("m_acc", 31344);
-        l.push_str(&bake_vec("NF_FRAC", lattice::l_frac(), 16));
+        let bridge_f = ctx.config.get_i64_or("bridge_f", lattice::FIXED_F);
+        let frac = lattice::l_frac_for(bridge_f);
+        l.push_str(&bake_vec("NF_FRAC", &frac, 16));
         l.push('\n');
         l.push_str(&bake_vec("NF_COARSE", lattice::l_coarse(), 16));
         l.push('\n');
@@ -444,10 +447,12 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         l.push('\n');
         l.push_str(&format!("static const int NF_M = {m_cov};\n"));
         l.push_str(&format!("static const int NF_MACC = {m_acc};\n"));
+        l.push_str(&format!("static const int NF_FIXED_F = {bridge_f};\n"));
         l.push_str(&format!(
-            "static const int64_t NF_BASE = {};\n",
-            lattice::l_frac()[0]
+            "static const int NF_FRAC_CAP = {};\n",
+            frac.len() - 1
         ));
+        l.push_str(&format!("static const int64_t NF_BASE = {};\n", frac[0]));
         l.push_str(NF_BRIDGE_HELPERS);
         if has("SQUARE") {
             let qlo_t = lattice::encode(&ndarray::ArrayD::from_elem(ndarray::IxDyn(&[1]), 0.0f64));
@@ -463,7 +468,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         {
             l.push_str(&bake_vec("NF_EXP", lattice::exp_lut(), 8));
             l.push('\n');
-            l.push_str(&bake_vec("NF_FRACHI", lattice::frac_hi_lut(), 8));
+            l.push_str(&bake_vec("NF_FRACHI", &lattice::frac_hi_for(bridge_f), 8));
             l.push('\n');
             l.push_str(&format!(
                 "static const int64_t NF_EPSC = {}LL;\n",
