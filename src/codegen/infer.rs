@@ -776,6 +776,36 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, StreamInfo::f(vec![Some(1), Some((nh * dh) as usize)]));
             }
+            "RESHAPE2" | "RESHAPE3" => {
+                let x = get(&streams, a(0))?;
+                let n = x.elems().ok_or_else(|| {
+                    Error::unimplemented(format!("{where_}: RESHAPE needs static numel"))
+                })?;
+                let dims: Vec<usize> = if ins.mn == "RESHAPE2" {
+                    vec![
+                        int_lit(a(1), &format!("{where_} d0"))? as usize,
+                        int_lit(a(2), &format!("{where_} d1"))? as usize,
+                    ]
+                } else {
+                    vec![
+                        int_lit(a(1), &format!("{where_} d0"))? as usize,
+                        int_lit(a(2), &format!("{where_} d1"))? as usize,
+                        int_lit(a(3), &format!("{where_} d2"))? as usize,
+                    ]
+                };
+                if dims.iter().product::<usize>() != n {
+                    return Err(Error::asm(format!(
+                        "{where_}: reshape {n} elements into {dims:?}"
+                    )));
+                }
+                streams.insert(
+                    o,
+                    StreamInfo {
+                        kind: x.kind,
+                        shape: dims.into_iter().map(Some).collect(),
+                    },
+                );
+            }
             "SLICE" => {
                 let x = get(&streams, a(0))?;
                 let ax = int_lit(a(1), &format!("{where_} axis"))?;
