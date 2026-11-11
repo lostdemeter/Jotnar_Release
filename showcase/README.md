@@ -173,6 +173,26 @@ boundary with no per-command compile step.
 Does not prove: cross-backend float identity, TLS beyond loopback +
 token, or host-side placement (that lives in the controller).
 
+## Companion showcases
+
+These are application-level showcases from companion repositories. They are
+**not counted among the ten language exhibits**; the language-repo gates for
+their support are the tests in this repository, and the full-depth/performance
+numbers are external, application-reported, and not reproducible from this
+repository alone. The language repository does not certify them.
+
+### T2 non-FPU DAV2 depth
+
+The T2 image ops, the backbone→neck seam, and exact OpenMP support are gated
+here. The composed DAV2 depth model, fidelity cards, and SBS/webcam demo live
+in the companion depth-conversion application. Production default is
+**fast-float** (75.4 fps at 518 px, `non-FPU: NO`, explicitly **WAIVED**);
+exact T2 is an **offline canary** (166 s/frame at 518 px), not the live path.
+
+Image: [`t2-depth/panel.jpg`](t2-depth/panel.jpg). Claim and boundary:
+[`t2-depth/README.md`](t2-depth/README.md). Formal accepted boundary:
+[`t2-depth/CLAIM_BOUNDARY.md`](t2-depth/CLAIM_BOUNDARY.md).
+
 ## Trust spine
 
 The certificate harness lives in [`../crates/jotnar-lab`](../crates/jotnar-lab).
