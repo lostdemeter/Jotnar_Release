@@ -68,6 +68,18 @@ Float `F` paths can differ from numpy in the last ulp on some platforms
 (different SIMD reduction order); triples and integer paths are compared
 bit-exactly.
 
+## T2 phi-float (opt-in)
+
+`CONFIG t2 24` switches a listing to the four-plane T2 value format
+(`s,e,m,z`) on the non-FPU target. It keeps a binary mantissa alongside
+the φ exponent, so arithmetic results are not re-snapped to the K=512
+lattice. It is opt-in: listings without `CONFIG t2` use the frozen T
+path byte-for-byte. T2 lowers `MUL`, `SQUARE`, `ADD`, `SUB`, `MATMUL`,
+`LAYERNORM`, `GELU`, `SOFTMAX`, `SOFTMAX_WIDE`, `TRANSPOSE`, and
+`CONCAT`; other ops refuse loudly. `CONFIG bridge_f <F>` selects the
+fixed-point bridge width (default 18); T2 uses 24. See
+[`docs/T2_PHI_FLOAT.md`](T2_PHI_FLOAT.md).
+
 ## Not ported yet
 
 - `jotnar-main`'s **device** emitter and the CUDA fleet kernel used by the

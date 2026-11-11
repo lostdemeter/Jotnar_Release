@@ -167,6 +167,8 @@ Each one is a different angle on the same stack. The full visual index is
 The front door is deliberately short. The actual parts are here:
 
 - assembler, macro expansion, layouts: [`src/asm.rs`](src/asm.rs), [`src/layout.rs`](src/layout.rs)
+- opt-in T2 φ-float (T + binary mantissa) for non-FPU precision:
+  [`docs/T2_PHI_FLOAT.md`](docs/T2_PHI_FLOAT.md)
 - the 94-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
 - code generators: [`src/codegen/`](src/codegen/)
 - structural Verilog: [`src/verilog.rs`](src/verilog.rs)

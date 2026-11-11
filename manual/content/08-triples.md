@@ -64,6 +64,36 @@ The bridge uses frozen LUTs for the fractional part and a fine LUT for the expon
 Changing `m_acc` or `m_cov` changes the arithmetic. It is not a display setting. If you change the scale, re-run the parity gate. The frozen defaults are part of the reference contract.
 :::
 
+## Opt-in T2: a binary mantissa
+
+The frozen triple is a pure log-φ value: `s · φ^((e−32768)/512)`. For
+some models that re-snap every arithmetic result to the K=512 lattice is
+the precision limit. `T2` adds an explicit binary residual, still
+integer-only:
+
+```text
+v = z ? 0 : s · φ^((e−32768)/512) · (1 + m / 2^M)
+CONFIG t2 24
+```
+
+The four planes are `s` (int8), `e` (int32), `m` (int32 residual), and
+`z` (uint8). Multiplication adds the φ exponents and multiplies the
+mantissas; the `m_a·m_b/2^M` term is the φ-vs-power-of-2 correction.
+Addition aligns to the larger exponent and uses the fixed-point bridge.
+
+T2 is **opt-in**. Listings without `CONFIG t2` emit the frozen T path
+byte-for-byte. On the non-FPU target, T2 currently lowers `MUL`,
+`SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`, `SOFTMAX`,
+`SOFTMAX_WIDE`, `TRANSPOSE`, and `CONCAT`; other ops refuse with a typed
+`Unimplemented` error rather than falling back to float. See
+`docs/T2_PHI_FLOAT.md` for the format, rounding, and gate.
+
+::: warning [OPT-IN, NOT THE DEFAULT]
+T2 changes the datapath. Use it when the lattice-snap precision is the
+bottleneck, and gate it against the frozen T reference. The frozen T
+format remains the default contract.
+:::
+
 ## Arithmetic
 
 | Mnemonic | Signature | Behavior |

@@ -1256,7 +1256,7 @@ cargo build --release
 </tbody></table>
 <p><code>run_doom_demo.sh</code> is <strong>playable by default</strong>. <code>--frames N</code> is the headless path. If the external image or WAD is absent, the script falls back to the checked-in reference title and does not pretend the live run happened.</p>
 <aside class="warning span-all"><div class="aside-title">DRAFT NOTICE</div><p>This is <strong>issue 01</strong>, a first rough draft. Some chapters describe behavior that is gated by parity scripts but not yet exposed in the CLI. Some commands are stable; some are scaffolding. Where the manual and the assembler disagree, the assembler wins. Where the assembler and the oracle disagree, the parity harness wins. Where the harness and reality disagree, file a bug.</p>
-</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>198/198 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
+</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>201/201 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
 </aside><h2>Conventions</h2>
 <table><thead><tr><th>Convention</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>UPPERCASE</code></td><td>A mnemonic, directive, or keyword.</td></tr>
@@ -1771,6 +1771,27 @@ CONFIG m_cov <span class="num">41200</span>
 </code></pre>
 <p>The bridge uses frozen LUTs for the fractional part and a fine LUT for the exponent reconstruction. Rounding is round-half-to-even, matching numpy. The emitters bake the same tables, which is why the non-FPU target can reproduce the triple path without a single <code>float</code> or <code>double</code>.</p>
 <aside class="warning span-all"><div class="aside-title">SCALE IS PART OF THE PROGRAM</div><p>Changing <code>m_acc</code> or <code>m_cov</code> changes the arithmetic. It is not a display setting. If you change the scale, re-run the parity gate. The frozen defaults are part of the reference contract.</p>
+</aside><h2>Opt-in T2: a binary mantissa</h2>
+<p>The frozen triple is a pure log-φ value: <code>s · φ^((e−32768)/512)</code>. For
+some models that re-snap every arithmetic result to the K=512 lattice is
+the precision limit. <code>T2</code> adds an explicit binary residual, still
+integer-only:</p>
+<pre><code class="language-text">v = z ? 0 : s · φ^((e−32768)/512) · (1 + m / 2^M)
+CONFIG t2 24
+</code></pre>
+<p>The four planes are <code>s</code> (int8), <code>e</code> (int32), <code>m</code> (int32 residual), and
+<code>z</code> (uint8). Multiplication adds the φ exponents and multiplies the
+mantissas; the <code>m_a·m_b/2^M</code> term is the φ-vs-power-of-2 correction.
+Addition aligns to the larger exponent and uses the fixed-point bridge.</p>
+<p>T2 is <strong>opt-in</strong>. Listings without <code>CONFIG t2</code> emit the frozen T path
+byte-for-byte. On the non-FPU target, T2 currently lowers <code>MUL</code>,
+<code>SQUARE</code>, <code>ADD</code>, <code>SUB</code>, <code>MATMUL</code>, <code>LAYERNORM</code>, <code>GELU</code>, <code>SOFTMAX</code>,
+<code>SOFTMAX_WIDE</code>, <code>TRANSPOSE</code>, and <code>CONCAT</code>; other ops refuse with a typed
+<code>Unimplemented</code> error rather than falling back to float. See
+<code>docs/T2_PHI_FLOAT.md</code> for the format, rounding, and gate.</p>
+<aside class="warning span-all"><div class="aside-title">OPT-IN, NOT THE DEFAULT</div><p>T2 changes the datapath. Use it when the lattice-snap precision is the
+bottleneck, and gate it against the frozen T reference. The frozen T
+format remains the default contract.</p>
 </aside><h2>Arithmetic</h2>
 <table><thead><tr><th>Mnemonic</th><th>Signature</th><th>Behavior</th></tr></thead><tbody>
 <tr><td><code>ADD</code></td><td><code>$A, $A -&gt; $A</code></td><td>Elementwise add through the fixed-point bridge.</td></tr>
@@ -2138,7 +2159,7 @@ layouts resolved: 53/59 (0 error(s))
 <table><thead><tr><th>Target</th><th>Flag</th><th>What it emits</th><th>What it refuses</th></tr></thead><tbody>
 <tr><td><strong>C</strong></td><td><code>--target c</code> (default)</td><td>Portable C99, float/transformer path plus exact moves.</td><td>Dynamic shapes it cannot bound.</td></tr>
 <tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT. LAYERNORM eps follows <code>CONFIG eps_ln</code>. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice).</td></tr>
-<tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm.</td><td>Any float path; a <code>float_trap</code> gate catches leaks.</td></tr>
+<tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm. Opt-in T2 mantissa lowers <code>MUL</code>/<code>SQUARE</code>/<code>ADD</code>/<code>SUB</code>/<code>MATMUL</code>/<code>LAYERNORM</code>/<code>GELU</code>/<code>SOFTMAX</code>/<code>TRANSPOSE</code>/<code>CONCAT</code>.</td><td>Any float path; a <code>float_trap</code> gate catches leaks. T2 ops outside that set refuse loudly.</td></tr>
 <tr><td><strong>CUDA</strong></td><td><code>--target cuda</code></td><td>FP32 correctness-first kernels, one launch per op.</td><td>Missing toolkit or unsupported op.</td></tr>
 <tr><td><strong>Verilog</strong></td><td><code>jotnar-verilog</code></td><td>Structural hardware for the supported integer subset.</td><td>Multi-lane arithmetic that would cross lanes; reassignment.</td></tr>
 <tr><td><strong>RV32IM</strong></td><td><code>jotnar-demo-doom</code></td><td>A 32-bit machine model running a flat image.</td><td>Anything outside the RV32IM model.</td></tr>
@@ -2786,7 +2807,7 @@ cargo run -p jotnar-lab -- bench doom \
   --runner target/release/jotnar-demo-doom --runs 3 \
   --certificate certificates/doom/native-gpu-migration.json
 </code></pre>
-<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>198/198</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
+<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>201/201</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
 </aside><h2>What the harness must not do</h2>
 <ul>
 <li>It must not call a blocked run a pass.</li>
