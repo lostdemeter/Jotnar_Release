@@ -25,6 +25,8 @@ const INTEGER_MN: &[&str] = &[
     "ARGMAX",
     "TRANSPOSE",
     "SLICE",
+    "RESHAPE2",
+    "RESHAPE3",
     "CONCAT",
     "SELECT",
     "GT",

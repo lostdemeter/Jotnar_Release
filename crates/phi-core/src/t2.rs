@@ -1098,3 +1098,62 @@ pub fn resize2d(
     }
     from_planes(&[ho, wo, c], os, oe, om, oz)
 }
+
+/// T2 exact 2-D slice (axis 0 or 1).
+pub fn slice2d(a: &Triple, axis: usize, lo: usize, hi: usize) -> Result<Triple> {
+    let sh = a.shape();
+    if sh.len() != 2 || axis > 1 || lo > hi || hi > sh[axis] {
+        return Err(Error::runtime("T2 SLICE: bad 2-D bounds"));
+    }
+    let (r, c) = (sh[0], sh[1]);
+    let (orows, ocols) = if axis == 0 {
+        (hi - lo, c)
+    } else {
+        (r, hi - lo)
+    };
+    let (as_, ae, am, az) = planes(a)?;
+    let mut s = Vec::with_capacity(orows * ocols);
+    let mut e = Vec::with_capacity(orows * ocols);
+    let mut m = Vec::with_capacity(orows * ocols);
+    let mut z = Vec::with_capacity(orows * ocols);
+    for i in 0..orows {
+        for j in 0..ocols {
+            let (si, sj) = if axis == 0 { (i + lo, j) } else { (i, j + lo) };
+            let k = si * c + sj;
+            s.push(as_[k]);
+            e.push(ae[k]);
+            m.push(am[k]);
+            z.push(az[k]);
+        }
+    }
+    from_planes(&[orows, ocols], s, e, m, z)
+}
+
+/// T2 exact reshape (flat move) to two or three dimensions.
+pub fn reshape2(a: &Triple, d0: usize, d1: usize) -> Result<Triple> {
+    if d0 * d1 != a.numel() {
+        return Err(Error::runtime("T2 RESHAPE2: element count mismatch"));
+    }
+    let (as_, ae, am, az) = planes(a)?;
+    from_planes(
+        &[d0, d1],
+        as_.to_vec(),
+        ae.to_vec(),
+        am.to_vec(),
+        az.to_vec(),
+    )
+}
+
+pub fn reshape3(a: &Triple, d0: usize, d1: usize, d2: usize) -> Result<Triple> {
+    if d0 * d1 * d2 != a.numel() {
+        return Err(Error::runtime("T2 RESHAPE3: element count mismatch"));
+    }
+    let (as_, ae, am, az) = planes(a)?;
+    from_planes(
+        &[d0, d1, d2],
+        as_.to_vec(),
+        ae.to_vec(),
+        am.to_vec(),
+        az.to_vec(),
+    )
+}

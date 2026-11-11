@@ -130,6 +130,8 @@ The DPT neck/head ops are now T2-capable:
   bilinear weights are integer `Q=2^24`; the four samples are bridged at
   their largest exponent and combined with the integer weights.
 - **RELU** — sign/zero move (negative → zero), exact.
+- **SLICE / RESHAPE2 / RESHAPE3** — exact four-plane moves; used for
+  the backbone→neck seam (drop CLS, tokens → HWC).
 
 Application gate: DPT neck/head vs the float reference:
 
@@ -139,10 +141,18 @@ Application gate: DPT neck/head vs the float reference:
 | head depth | corr 1.000000000, max 1.8e-6 | corr 1.000000000, max 1.4e-5 |
 
 Language gates: `crates/phi-core/tests/t2.rs` (`image_ops_match_f64`) and
-`tests/nonfpu_t2.rs` (`t2_image_ops_match_interpreter`, all four planes
-bit-identical to the interpreter). The application scripts are
-`scripts/dav2_neck_t2.py` and `scripts/dav2_head_t2.py` in the depth
-repo.
+`tests/nonfpu_t2.rs` (`t2_image_ops_match_interpreter`,
+`t2_seam_slice_reshape_match_interpreter`, all four planes bit-identical
+to the interpreter). The application scripts are
+`scripts/dav2_neck_t2.py`, `scripts/dav2_head_t2.py`, and the composed
+`scripts/dav2_depth_t2.py` in the depth repo.
+
+Full T2 depth composition (backbone → seam → neck → head) vs float:
+
+| input | corr | max | mean |
+|---|---|---|---|
+| 112×112 | 0.999956456 | 8.64e-3 | 1.24e-5 |
+| 518×518 | 0.999986716 | 8.98e-3 | 1.10e-5 |
 
 ## Reference semantics and gates
 

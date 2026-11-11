@@ -300,3 +300,49 @@ RL = RELU(R)
         assert_eq!(&got.z, &want.z, "{name} zero");
     }
 }
+
+#[test]
+fn t2_seam_slice_reshape_match_interpreter() {
+    let listing = "\
+CONFIG t2 24
+IN X AS T:HW
+S = SLICE(X, 0, 1, 3)
+OUT = RESHAPE3(S, 2, 2, 2)
+";
+    let xv: Vec<f64> = (0..3 * 4).map(|i| i as f64 * 0.25 - 1.0).collect();
+    let mut f = Feeds::new();
+    f.insert("X".into(), Value::Triple(arr(&[3, 4], &xv)));
+    let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interp");
+    let opts = CompileOptions {
+        target: Target::NonFpu,
+        outputs: vec!["OUT".into()],
+        asm: AsmOptions::new("."),
+        use_fp16: false,
+    };
+    let art = compile_program(listing, &opts, f.clone()).expect("compile seam");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "seam", Target::NonFpu).expect("build");
+    let t = match f.get("X").unwrap() {
+        Value::Triple(t) => t,
+        _ => unreachable!(),
+    };
+    let mut argv = write_planes(dir.path(), "X", t);
+    for comp in ["s", "e", "m", "z"] {
+        argv.push(
+            dir.path()
+                .join(format!("OUT_{comp}.bin"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    assert!(Command::new(&exe).args(&argv).status().unwrap().success());
+    let got = read_planes(dir.path(), "OUT", &[2, 2, 2]);
+    let want = match expected.get("OUT").unwrap() {
+        Value::Triple(t) => t,
+        _ => unreachable!(),
+    };
+    assert_eq!(got.s, want.s);
+    assert_eq!(got.e, want.e);
+    assert_eq!(got.m.as_ref().unwrap(), want.m.as_ref().unwrap());
+    assert_eq!(got.z, want.z);
+}

@@ -124,6 +124,23 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
                 m,
             )?)
         }
+        "SLICE" => {
+            let axis = arg_i64(args, 1, name, "axis")? as usize;
+            let lo = arg_i64(args, 2, name, "lo")? as usize;
+            let hi = arg_i64(args, 3, name, "hi")? as usize;
+            one(phi_core::t2::slice2d(triple(args, 0, name)?, axis, lo, hi)?)
+        }
+        "RESHAPE2" => {
+            let d0 = arg_i64(args, 1, name, "d0")? as usize;
+            let d1 = arg_i64(args, 2, name, "d1")? as usize;
+            one(phi_core::t2::reshape2(triple(args, 0, name)?, d0, d1)?)
+        }
+        "RESHAPE3" => {
+            let d0 = arg_i64(args, 1, name, "d0")? as usize;
+            let d1 = arg_i64(args, 2, name, "d1")? as usize;
+            let d2 = arg_i64(args, 3, name, "d2")? as usize;
+            one(phi_core::t2::reshape3(triple(args, 0, name)?, d0, d1, d2)?)
+        }
         "TRANSPOSE" => one(transpose(triple(args, 0, name)?)?),
         "CONCAT" => one(concat(triple(args, 0, name)?, triple(args, 1, name)?)?),
         other => Err(Error::unimplemented(format!(

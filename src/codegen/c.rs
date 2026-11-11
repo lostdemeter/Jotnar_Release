@@ -1519,6 +1519,35 @@ for (int64_t m_b = 0; m_b < {bb}; ++m_b)
                 None,
             ))
         }
+        "RESHAPE2" | "RESHAPE3" => {
+            let (x, o) = (args[0].as_str(), outs[0].as_str());
+            let co = ctx.elems(o)?;
+            let kind = ctx.s(x)?.kind;
+            match kind {
+                CKind::T => {
+                    let comps: &[&str] = if ctx.t2_m.is_some() {
+                        &["s", "e", "m", "z"]
+                    } else {
+                        &["s", "e", "z"]
+                    };
+                    let mut body = format!("/* {o} = {mn}({x}) triples, exact reshape */\n");
+                    for comp in comps {
+                        body.push_str(&format!(
+                            "memcpy({o}_{comp}, {x}_{comp}, {co} * sizeof({o}_{comp}[0]));\n"
+                        ));
+                    }
+                    Ok((body, None))
+                }
+                CKind::F => Ok((
+                    format!("/* {o} = {mn}({x}) */\nmemcpy({o}, {x}, {co} * sizeof(double));"),
+                    None,
+                )),
+                CKind::I => Ok((
+                    format!("/* {o} = {mn}({x}) */\nmemcpy({o}, {x}, {co} * sizeof(int64_t));"),
+                    None,
+                )),
+            }
+        }
         "SLICE" => {
             let (x, o) = (args[0].as_str(), outs[0].as_str());
             let ax = int_lit(&args[1], "SLICE ax")? as usize;
@@ -1530,10 +1559,15 @@ for (int64_t m_b = 0; m_b < {bb}; ++m_b)
             let co = ctx.elems(o)?;
             match kind {
                 CKind::T => {
+                    let comps: &[&str] = if ctx.t2_m.is_some() {
+                        &["s", "e", "m", "z"]
+                    } else {
+                        &["s", "e", "z"]
+                    };
                     if ax == 1 {
                         let mut body =
                             format!("/* {o} = SLICE({x},1,{lo},{hi}) triples, exact */\n");
-                        for comp in ["s", "e", "z"] {
+                        for comp in comps {
                             body.push_str(&format!(
                                 "for (int64_t s_i = 0; s_i < {o}_N; ++s_i)\n  memcpy(&{o}_{comp}[s_i * {}], &{x}_{comp}[s_i * {in_d} + {lo}], {} * sizeof({o}_{comp}[0]));\n",
                                 hi - lo, hi - lo
@@ -1546,7 +1580,7 @@ for (int64_t m_b = 0; m_b < {bb}; ++m_b)
                         })?;
                         let mut body =
                             format!("/* {o} = SLICE({x},0,{lo},{hi}) triples, exact */\n");
-                        for comp in ["s", "e", "z"] {
+                        for comp in comps {
                             body.push_str(&format!(
                                 "for (int64_t s_i = 0; s_i < {o}_N; ++s_i)\n  memcpy(&{o}_{comp}[s_i * {w1}], &{x}_{comp}[(s_i + {lo}) * {w1}], {w1} * sizeof({o}_{comp}[0]));\n"
                             ));
