@@ -1783,8 +1783,10 @@ CONFIG t2 24
 <code>z</code> (uint8). Multiplication adds the φ exponents and multiplies the
 mantissas; the <code>m_a·m_b/2^M</code> term is the φ-vs-power-of-2 correction.
 Addition aligns to the larger exponent and uses the fixed-point bridge.</p>
-<p>T2 is <strong>opt-in</strong>. Listings without <code>CONFIG t2</code> emit the frozen T path
-byte-for-byte. On the non-FPU target, T2 currently lowers <code>MUL</code>,
+<p>T2 is <strong>opt-in</strong>. <code>CONFIG threads N</code> (1..=256) parallelizes T2 MATMUL
+rows with OpenMP; the per-row accumulation order is unchanged, so the
+result is bit-identical. Listings without <code>CONFIG t2</code> emit the frozen T
+path byte-for-byte. On the non-FPU target, T2 currently lowers <code>MUL</code>,
 <code>SQUARE</code>, <code>ADD</code>, <code>SUB</code>, <code>MATMUL</code>, <code>LAYERNORM</code>, <code>GELU</code>, <code>SOFTMAX</code>,
 <code>SOFTMAX_WIDE</code>, <code>TRANSPOSE</code>, and <code>CONCAT</code>; other ops refuse with a typed
 <code>Unimplemented</code> error rather than falling back to float. The
@@ -2164,7 +2166,7 @@ layouts resolved: 53/59 (0 error(s))
 <table><thead><tr><th>Target</th><th>Flag</th><th>What it emits</th><th>What it refuses</th></tr></thead><tbody>
 <tr><td><strong>C</strong></td><td><code>--target c</code> (default)</td><td>Portable C99, float/transformer path plus exact moves.</td><td>Dynamic shapes it cannot bound.</td></tr>
 <tr><td><strong>Rust</strong></td><td><code>--target rust</code> / <code>emit-rust</code></td><td>Self-contained std-only Rust (<code>Vec&lt;f64&gt;</code>/<code>Vec&lt;i64&gt;</code>); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT. LAYERNORM eps follows <code>CONFIG eps_ln</code>. F/I only (raw f64/i64 LE payload).</td><td>T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice).</td></tr>
-<tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm. Opt-in T2 mantissa lowers <code>MUL</code>/<code>SQUARE</code>/<code>ADD</code>/<code>SUB</code>/<code>MATMUL</code>/<code>LAYERNORM</code>/<code>GELU</code>/<code>SOFTMAX</code>/<code>TRANSPOSE</code>/<code>CONCAT</code>.</td><td>Any float path; a <code>float_trap</code> gate catches leaks. T2 ops outside that set refuse loudly.</td></tr>
+<tr><td><strong>non-FPU</strong></td><td><code>--target nonfpu</code></td><td>Integer-only C, baked lattice tables, fixed-point math, no <code>float</code>/<code>double</code>/libm. Opt-in T2 mantissa lowers <code>MUL</code>/<code>SQUARE</code>/<code>ADD</code>/<code>SUB</code>/<code>MATMUL</code>/<code>LAYERNORM</code>/<code>GELU</code>/<code>SOFTMAX</code>/<code>TRANSPOSE</code>/<code>CONCAT</code>. <code>CONFIG threads N</code> (OpenMP) parallelizes T2 MATMUL rows exactly.</td><td>Any float path; a <code>float_trap</code> gate catches leaks. T2 ops outside that set refuse loudly.</td></tr>
 <tr><td><strong>CUDA</strong></td><td><code>--target cuda</code></td><td>FP32 correctness-first kernels, one launch per op.</td><td>Missing toolkit or unsupported op.</td></tr>
 <tr><td><strong>Verilog</strong></td><td><code>jotnar-verilog</code></td><td>Structural hardware for the supported integer subset.</td><td>Multi-lane arithmetic that would cross lanes; reassignment.</td></tr>
 <tr><td><strong>RV32IM</strong></td><td><code>jotnar-demo-doom</code></td><td>A 32-bit machine model running a flat image.</td><td>Anything outside the RV32IM model.</td></tr>

@@ -14,7 +14,7 @@ An emitter consumes the bound program and produces a target artifact. It does no
 |---|---|---|---|
 | **C** | `--target c` (default) | Portable C99, float/transformer path plus exact moves. | Dynamic shapes it cannot bound. |
 | **Rust** | `--target rust` / `emit-rust` | Self-contained std-only Rust (`Vec<f64>`/`Vec<i64>`); scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT. LAYERNORM eps follows `CONFIG eps_ln`. F/I only (raw f64/i64 LE payload). | T streams (refused, not decoded); DECONV/INTERP/GATHER (next slice). |
-| **non-FPU** | `--target nonfpu` | Integer-only C, baked lattice tables, fixed-point math, no `float`/`double`/libm. Opt-in T2 mantissa lowers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL`/`LAYERNORM`/`GELU`/`SOFTMAX`/`TRANSPOSE`/`CONCAT`. | Any float path; a `float_trap` gate catches leaks. T2 ops outside that set refuse loudly. |
+| **non-FPU** | `--target nonfpu` | Integer-only C, baked lattice tables, fixed-point math, no `float`/`double`/libm. Opt-in T2 mantissa lowers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL`/`LAYERNORM`/`GELU`/`SOFTMAX`/`TRANSPOSE`/`CONCAT`. `CONFIG threads N` (OpenMP) parallelizes T2 MATMUL rows exactly. | Any float path; a `float_trap` gate catches leaks. T2 ops outside that set refuse loudly. |
 | **CUDA** | `--target cuda` | FP32 correctness-first kernels, one launch per op. | Missing toolkit or unsupported op. |
 | **Verilog** | `jotnar-verilog` | Structural hardware for the supported integer subset. | Multi-lane arithmetic that would cross lanes; reassignment. |
 | **RV32IM** | `jotnar-demo-doom` | A 32-bit machine model running a flat image. | Anything outside the RV32IM model. |

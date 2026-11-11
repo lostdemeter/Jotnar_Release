@@ -81,8 +81,10 @@ The four planes are `s` (int8), `e` (int32), `m` (int32 residual), and
 mantissas; the `m_a·m_b/2^M` term is the φ-vs-power-of-2 correction.
 Addition aligns to the larger exponent and uses the fixed-point bridge.
 
-T2 is **opt-in**. Listings without `CONFIG t2` emit the frozen T path
-byte-for-byte. On the non-FPU target, T2 currently lowers `MUL`,
+T2 is **opt-in**. `CONFIG threads N` (1..=256) parallelizes T2 MATMUL
+rows with OpenMP; the per-row accumulation order is unchanged, so the
+result is bit-identical. Listings without `CONFIG t2` emit the frozen T
+path byte-for-byte. On the non-FPU target, T2 currently lowers `MUL`,
 `SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`, `SOFTMAX`,
 `SOFTMAX_WIDE`, `TRANSPOSE`, and `CONCAT`; other ops refuse with a typed
 `Unimplemented` error rather than falling back to float. The

@@ -581,6 +581,10 @@ pub fn build(source: &str, workdir: &Path, name: &str, target: Target) -> Result
     let mut cmd = std::process::Command::new("cc");
     if target == Target::NonFpu {
         cmd.args(["-O2", "-march=native", "-std=c99", "-Wall", "-fwrapv"]);
+        // OpenMP is linked only when the emitted source asks for it.
+        if source.contains("#pragma omp") {
+            cmd.arg("-fopenmp");
+        }
     } else {
         cmd.args(["-O2", "-march=native", "-std=c99", "-Wall"]);
     }

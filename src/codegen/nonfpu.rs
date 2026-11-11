@@ -783,6 +783,12 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         l.push_str(&bins("NF_RS", &rope.sin)?);
     }
     if mns.iter().any(|m| is_fx(m)) {
+        let threads = ctx.config.get_i64_or("threads", 1);
+        if !(1..=256).contains(&threads) {
+            return Err(Error::asm(format!(
+                "CONFIG threads must be 1..=256 (got {threads})"
+            )));
+        }
         let m_cov = ctx.config.get_i64_or("m_cov", 33280);
         let m_acc = ctx.config.get_i64_or("m_acc", 31344);
         let (t2_m, bridge_f) =
@@ -1068,10 +1074,16 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
                 ));
             }
             let (m, k, n) = (ash[0].unwrap(), ash[1].unwrap(), bsh[1].unwrap());
+            let threads = ctx.config.get_i64_or("threads", 1);
+            let pragma = if threads > 1 {
+                format!("#pragma omp parallel for schedule(static) num_threads({threads})\n    ")
+            } else {
+                String::new()
+            };
             Ok((
                 fill(
                     r#"/* {o} = MATMUL({a},{b}) T2 block-floating dot */
-for (int64_t w_i = 0; w_i < {m}; ++w_i)
+{pragma}for (int64_t w_i = 0; w_i < {m}; ++w_i)
   for (int64_t w_j = 0; w_j < {n}; ++w_j) {
     int64_t emax = 0; int any = 0;
     for (int64_t w_k = 0; w_k < {k}; ++w_k) {
@@ -1109,6 +1121,7 @@ for (int64_t w_i = 0; w_i < {m}; ++w_i)
                         ("m", m.to_string()),
                         ("k", k.to_string()),
                         ("n", n.to_string()),
+                        ("pragma", pragma),
                     ],
                 ),
                 None,

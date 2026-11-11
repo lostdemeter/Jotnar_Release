@@ -201,6 +201,25 @@ The C is dominated by baked LUTs (fraction, coarse/fine, exp, erf).
 T2 costs ~2.5× runtime: an extra plane to load/store and a two-pass,
 `__int128`-checked dot product.
 
+## Parallel fast-int (`CONFIG threads`)
+
+`CONFIG threads N` (1..=256) emits an OpenMP `parallel for` over the
+T2 MATMUL output rows. Each output's accumulation order is unchanged, so
+the result is bit-identical to the single-threaded path (gate:
+`threads_preserve_t2_results`). The build links `-fopenmp` only when the
+emitted source actually contains the pragma; the default is `threads 1`.
+
+Measured on the DAV2 application at 518 px:
+
+| profile | layer-0 | 12-block backbone |
+|---|---|---|
+| threads 1 | 0.0389 blocks/s | 310.7 s |
+| threads 16 | 0.407 blocks/s | 29.0 s (10.7×) |
+
+The 12-block T2 output is unchanged (corr 0.999999851, max 7.5e-3), so
+this is a **speed-only** profile: no accuracy waiver. It is the
+`fast-int` production candidate.
+
 ## Migration notes (blocks 1–11, neck, head)
 
 - The listing change is one line: `CONFIG t2 24` (and optionally

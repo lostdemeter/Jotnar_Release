@@ -346,3 +346,68 @@ OUT = RESHAPE3(S, 2, 2, 2)
     assert_eq!(got.m.as_ref().unwrap(), want.m.as_ref().unwrap());
     assert_eq!(got.z, want.z);
 }
+
+#[test]
+fn threads_preserve_t2_results() {
+    let listing =
+        "CONFIG t2 24\nCONFIG threads 4\nIN A AS T:HW\nIN B AS T:HW\nOUT = MATMUL(A, B)\n";
+    let mut f = Feeds::new();
+    f.insert(
+        "A".into(),
+        Value::Triple(arr(&[2, 2], &[0.5, -1.25, 2.0, -0.75])),
+    );
+    f.insert(
+        "B".into(),
+        Value::Triple(arr(&[2, 2], &[1.5, 0.25, -0.5, 2.0])),
+    );
+    let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interpreter");
+    let opts = CompileOptions {
+        target: Target::NonFpu,
+        outputs: vec!["OUT".into()],
+        asm: AsmOptions::new("."),
+        use_fp16: false,
+    };
+    let art = compile_program(listing, &opts, f.clone()).expect("compile threaded t2");
+    assert!(art.source.contains("#pragma omp"), "threads pragma missing");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "nft2t", Target::NonFpu).expect("build threaded");
+    let mut argv: Vec<String> = Vec::new();
+    for name in ["A", "B"] {
+        let t = match f.get(name).unwrap() {
+            Value::Triple(t) => t,
+            _ => unreachable!(),
+        };
+        argv.extend(write_planes(dir.path(), name, t));
+    }
+    for comp in ["s", "e", "m", "z"] {
+        argv.push(
+            dir.path()
+                .join(format!("OUT_{comp}.bin"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    assert!(Command::new(&exe).args(&argv).status().unwrap().success());
+    let got = read_planes(dir.path(), "OUT", &[2, 2]);
+    let want = match expected.get("OUT").unwrap() {
+        Value::Triple(t) => t,
+        _ => unreachable!(),
+    };
+    assert_eq!(got.s, want.s);
+    assert_eq!(got.e, want.e);
+    assert_eq!(got.m.as_ref().unwrap(), want.m.as_ref().unwrap());
+    assert_eq!(got.z, want.z);
+}
+
+#[test]
+fn invalid_threads_is_a_typed_error() {
+    let listing = "CONFIG t2 24\nCONFIG threads 0\nIN A AS T:HW\nOUT = MUL(A, A)\n";
+    let opts = CompileOptions {
+        target: Target::NonFpu,
+        outputs: vec!["OUT".into()],
+        asm: AsmOptions::new("."),
+        use_fp16: false,
+    };
+    let err = compile_program(listing, &opts, single_feed()).expect_err("threads 0 must refuse");
+    assert!(err.to_string().contains("threads"), "{err}");
+}
