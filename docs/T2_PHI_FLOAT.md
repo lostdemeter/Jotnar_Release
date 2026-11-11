@@ -165,6 +165,10 @@ reference fails loud (never silently drops the mantissa). Supported:
 
 ## Layer-0 results (DAV2 block 0, eps 1e-6, M=24, bridge F=24)
 
+These are application-measured numbers from the companion depth
+repository; the language-repo gate is the T2 interpreter/C parity in
+`tests/nonfpu_t2.rs` and `crates/phi-core/tests/t2.rs`.
+
 T2 gate: `corr ≥ 0.9999`, `max|err| ≤ 1e-3`, `mean|err| ≤ 5e-5`.
 
 | input | stage | corr | max abs | mean abs |
