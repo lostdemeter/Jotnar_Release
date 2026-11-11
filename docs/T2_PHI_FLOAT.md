@@ -133,26 +133,18 @@ The DPT neck/head ops are now T2-capable:
 - **SLICE / RESHAPE2 / RESHAPE3** — exact four-plane moves; used for
   the backbone→neck seam (drop CLS, tokens → HWC).
 
-Application gate: DPT neck/head vs the float reference:
-
-| stage | 112 px | 518 px |
-|---|---|---|
-| neck fused0–3 | corr 1.000000000, max ≤5.5e-6 | corr 1.000000000, max ≤8.0e-5 |
-| head depth | corr 1.000000000, max 1.8e-6 | corr 1.000000000, max 1.4e-5 |
-
 Language gates: `crates/phi-core/tests/t2.rs` (`image_ops_match_f64`) and
 `tests/nonfpu_t2.rs` (`t2_image_ops_match_interpreter`,
 `t2_seam_slice_reshape_match_interpreter`, all four planes bit-identical
-to the interpreter). The application scripts are
-`scripts/dav2_neck_t2.py`, `scripts/dav2_head_t2.py`, and the composed
-`scripts/dav2_depth_t2.py` in the depth repo.
+to the interpreter). These are the only depth claims gated by this
+repository.
 
-Full T2 depth composition (backbone → seam → neck → head) vs float:
-
-| input | corr | max | mean |
-|---|---|---|---|
-| 112×112 | 0.999956456 | 8.64e-3 | 1.24e-5 |
-| 518×518 | 0.999986716 | 8.98e-3 | 1.10e-5 |
+The composed DAV2 neck/head/full-depth runs, fidelity cards, and SBS
+demo live in the companion depth-conversion application repository.
+They are **application-level evidence**, not language-repo gates. The
+canonical full-depth numbers are recorded once in the companion
+showcase, not duplicated here; this document stays a language/semantics
+reference.
 
 ## Reference semantics and gates
 
@@ -160,7 +152,8 @@ Full T2 depth composition (backbone → seam → neck → head) vs float:
 T2 stream to `src/ops/t2.rs`, which calls it; an op without a T2
 reference fails loud (never silently drops the mantissa). Supported:
 `MUL`, `SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`,
-`SOFTMAX`, `SOFTMAX_WIDE`, `TRANSPOSE`, `CONCAT`.
+`SOFTMAX`, `SOFTMAX_WIDE`, `TRANSPOSE`, `CONCAT`, `CONV2D`, `DECONV2D`,
+`RESIZE2D`, `RELU`, `SLICE`, `RESHAPE2`, `RESHAPE3`.
 
 - `crates/phi-core/tests/t2.rs`: encode/decode, MUL/ADD/SUB vs f64,
   fixed round-trip, MATMUL vs f64.
@@ -188,7 +181,7 @@ For comparison, the frozen T path is 0.999972 (112 px) / 0.999081
 target. The width-parametric bridge (`CONFIG bridge_f`, default 18) is
 infrastructure used by T2; widening it alone is not a precision format.
 
-## Cost (518 px, gcc -O2, single core)
+## Cost (518 px, gcc -O2, single core; application-measured)
 
 | | T (F=18) | T2 (M=24, F=24) |
 |---|---|---|
@@ -209,7 +202,8 @@ the result is bit-identical to the single-threaded path (gate:
 `threads_preserve_t2_results`). The build links `-fopenmp` only when the
 emitted source actually contains the pragma; the default is `threads 1`.
 
-Measured on the DAV2 application at 518 px:
+Measured on the DAV2 application at 518 px (application-level
+performance, external to this repository):
 
 | profile | layer-0 | 12-block backbone |
 |---|---|---|
@@ -228,15 +222,13 @@ this is a **speed-only** profile: no accuracy waiver. It is the
 - Op coverage is already the layer-0 set. For the rest of the backbone
   only the same ops are needed; port block 1 by rerunning the existing
   per-block listing with the T2 switch and its stage gate.
-- Neck/head need the image ops on T2: `CONV2D`, `DECONV2D`,
-  `RESIZE2D`, `RELU`. They are not implemented for T2 yet and currently
-  fail loud. They should use per-output block-floating accumulators
-  (same as MATMUL) and the T2 `from_fixed` bridge; `RELU` is a sign/zero
-  move.
+- Neck/head image ops are implemented for T2: `CONV2D`, `DECONV2D`,
+  `RESIZE2D`, `RELU`; the backbone→neck seam uses exact `SLICE`,
+  `RESHAPE2`, `RESHAPE3`. The language tests gate all four planes
+  against the interpreter.
 - `BATCH_MATMUL`, `ROTARY`, `ARGMAX`, `RMSNORM`, `SILU`, `T2I`, `GT`,
   `TSHIFT` have no T2 lowering yet and refuse with a typed
-  `Unimplemented` error. So do the image ops `CONV2D`, `DECONV2D`,
-  `RESIZE2D`, and `RELU` (layer 0 does not need them).
+  `Unimplemented` error.
 - T2 emission-vs-interpreter is bit-identical on all four planes
   (`tests/nonfpu_t2.rs`); the frozen T gate is unchanged
   (`tests/nonfpu_t.rs`).

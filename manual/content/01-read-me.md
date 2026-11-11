@@ -62,7 +62,7 @@ This is **issue 01**, a first rough draft. Some chapters describe behavior that 
 :::
 
 ::: note [STATUS AT THIS DRAFT / 2026-11-08]
-The Rust workspace is green at **221/221 tests**. The self-contained trust-spine example verifies **PASS**. The real DOOM certificate verifies **PASS on this host**, and correctly prints **BLOCKED** when its local `/tmp` artifacts are absent. The manual's witness script passes **4/4** listings. The trust spine has its own appendix now: **Appendix A**.
+The Rust workspace is green at **223/223 tests**. The self-contained trust-spine example verifies **PASS**. The real DOOM certificate verifies **PASS on this host**, and correctly prints **BLOCKED** when its local `/tmp` artifacts are absent. The manual's witness script passes **4/4** listings. The trust spine has its own appendix now: **Appendix A**.
 :::
 
 ## Conventions
