@@ -119,6 +119,31 @@ Both `i64::MIN` and `i64::MAX` saturate at the high T2 exponent (the
 representable bridge boundary); this is documented behavior, not a panic.
 The add/matmul/layernorm clamps share that boundary.
 
+## Image ops on T2
+
+The DPT neck/head ops are now T2-capable:
+
+- **CONV2D / DECONV2D** — HWC input, `(Cout,kh,kw,Cin)` weight, bias as an
+  extra term; each output uses the same block-floating accumulator as
+  MATMUL (largest term exponent, mantissa product, one `from_fixed`).
+- **RESIZE2D** — explicit `(ho,wo)`, `align_corners` 0/1; coordinates and
+  bilinear weights are integer `Q=2^24`; the four samples are bridged at
+  their largest exponent and combined with the integer weights.
+- **RELU** — sign/zero move (negative → zero), exact.
+
+Application gate: DPT neck/head vs the float reference:
+
+| stage | 112 px | 518 px |
+|---|---|---|
+| neck fused0–3 | corr 1.000000000, max ≤5.5e-6 | corr 1.000000000, max ≤8.0e-5 |
+| head depth | corr 1.000000000, max 1.8e-6 | corr 1.000000000, max 1.4e-5 |
+
+Language gates: `crates/phi-core/tests/t2.rs` (`image_ops_match_f64`) and
+`tests/nonfpu_t2.rs` (`t2_image_ops_match_interpreter`, all four planes
+bit-identical to the interpreter). The application scripts are
+`scripts/dav2_neck_t2.py` and `scripts/dav2_head_t2.py` in the depth
+repo.
+
 ## Reference semantics and gates
 
 `phi_core::t2` is the integer reference. The interpreter routes any

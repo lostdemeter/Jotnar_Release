@@ -220,3 +220,83 @@ fn invalid_t2_widths_are_typed_errors() {
     let listing = "CONFIG t2 24\nCONFIG bridge_f 18\nIN A AS T:HW\nOUT = MUL(A, A)\n";
     assert!(jotnar::run_text(listing, &AsmOptions::new("."), &single_feed()).is_ok());
 }
+
+#[test]
+fn t2_image_ops_match_interpreter() {
+    let listing = "\
+CONFIG t2 24
+CONFIG bridge_f 24
+IN X AS T:HW
+IN W AS T:HW
+IN B AS T:SEQ
+IN R AS T:HW
+CV = CONV2D(X, W, B, 1, 1)
+DC = DECONV2D(X, W, B, 2, 1)
+RS = RESIZE2D(R, 5, 7, 0)
+RL = RELU(R)
+";
+    let xv = [
+        0.5, -1.25, 2.0, -0.75, 3.5, 0.125, -0.5, 1.0, 0.25, -2.0, 0.75, 1.5, -1.0, 0.5, 2.5,
+        -0.25, -1.5, 0.75, 0.125, 3.0, -0.5, 1.25, -2.5, 0.5,
+    ];
+    let wv: Vec<f64> = (0..3 * 3 * 3 * 2)
+        .map(|i| (i as f64 * 0.17).sin() * 0.4)
+        .collect();
+    let bv = [0.1, -0.2, 0.3];
+    let rv = xv;
+    let mut f = Feeds::new();
+    f.insert("X".into(), Value::Triple(arr(&[3, 4, 2], &xv)));
+    f.insert("W".into(), Value::Triple(arr(&[3, 3, 3, 2], &wv)));
+    f.insert("B".into(), Value::Triple(arr(&[3], &bv)));
+    f.insert("R".into(), Value::Triple(arr(&[3, 4, 2], &rv)));
+    let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interpreter");
+    let opts = CompileOptions {
+        target: Target::NonFpu,
+        outputs: vec!["CV".into(), "DC".into(), "RS".into(), "RL".into()],
+        asm: AsmOptions::new("."),
+        use_fp16: false,
+    };
+    let art = compile_program(listing, &opts, f.clone()).expect("compile t2 image ops");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "nft2img", Target::NonFpu).expect("build");
+    let mut argv: Vec<String> = Vec::new();
+    for name in ["X", "W", "B", "R"] {
+        let t = match f.get(name).unwrap() {
+            Value::Triple(t) => t,
+            _ => unreachable!(),
+        };
+        argv.extend(write_planes(dir.path(), name, t));
+    }
+    for name in ["CV", "DC", "RS", "RL"] {
+        for comp in ["s", "e", "m", "z"] {
+            argv.push(
+                dir.path()
+                    .join(format!("{name}_{comp}.bin"))
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    assert!(Command::new(&exe).args(&argv).status().unwrap().success());
+    let shapes: &[(&str, &[usize])] = &[
+        ("CV", &[3, 4, 3]),
+        ("DC", &[5, 7, 3]),
+        ("RS", &[5, 7, 2]),
+        ("RL", &[3, 4, 2]),
+    ];
+    for (name, shape) in shapes {
+        let got = read_planes(dir.path(), name, shape);
+        let want = match expected.get(*name).unwrap() {
+            Value::Triple(t) => t,
+            _ => unreachable!(),
+        };
+        assert_eq!(&got.s, &want.s, "{name} sign");
+        assert_eq!(&got.e, &want.e, "{name} exponent");
+        assert_eq!(
+            got.m.as_ref().unwrap(),
+            want.m.as_ref().unwrap(),
+            "{name} mantissa"
+        );
+        assert_eq!(&got.z, &want.z, "{name} zero");
+    }
+}

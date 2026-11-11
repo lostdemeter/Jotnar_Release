@@ -88,8 +88,10 @@ byte-for-byte. On the non-FPU target, T2 currently lowers `MUL`,
 `Unimplemented` error rather than falling back to float. The
 fixed-point bridge uses a `u128` magnitude; `i64::MIN`/`i64::MAX`
 saturate at the high T2 exponent (the documented overflow boundary)
-instead of wrapping. See `docs/T2_PHI_FLOAT.md` for the format,
-rounding, and gate.
+instead of wrapping. T2 also lowers `CONV2D`, `DECONV2D`, `RESIZE2D`,
+and `RELU`: convolutions use per-output block-floating accumulators,
+resize uses integer `Q=2^24` bilinear weights, and ReLU is a sign/zero
+move. See `docs/T2_PHI_FLOAT.md` for the format, rounding, and gates.
 
 ::: warning [OPT-IN, NOT THE DEFAULT]
 T2 changes the datapath. Use it when the lattice-snap precision is the

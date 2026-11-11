@@ -9,6 +9,8 @@ use crate::error::{Error, Result};
 use crate::ir::Config;
 use crate::value::{Arg, Triple, Value};
 
+use super::arg_i64;
+
 fn m_bits(config: &Config) -> Option<i64> {
     config.get_i64("t2")
 }
@@ -82,6 +84,46 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
         )?),
         "GELU" => one(phi_core::t2::gelu(triple(args, 0, name)?, &tabs, m)?),
         "SOFTMAX" | "SOFTMAX_WIDE" => one(phi_core::t2::softmax(triple(args, 0, name)?, &tabs, m)?),
+        "RELU" => one(phi_core::t2::relu_array(triple(args, 0, name)?)?),
+        "CONV2D" => {
+            let stride = arg_i64(args, 3, name, "stride")?;
+            let pad = arg_i64(args, 4, name, "pad")?;
+            one(phi_core::t2::conv2d(
+                triple(args, 0, name)?,
+                triple(args, 1, name)?,
+                triple(args, 2, name)?,
+                stride,
+                pad,
+                &tabs,
+                m,
+            )?)
+        }
+        "DECONV2D" => {
+            let stride = arg_i64(args, 3, name, "stride")?;
+            let pad = arg_i64(args, 4, name, "pad")?;
+            one(phi_core::t2::deconv2d(
+                triple(args, 0, name)?,
+                triple(args, 1, name)?,
+                triple(args, 2, name)?,
+                stride,
+                pad,
+                &tabs,
+                m,
+            )?)
+        }
+        "RESIZE2D" => {
+            let ho = arg_i64(args, 1, name, "ho")? as usize;
+            let wo = arg_i64(args, 2, name, "wo")? as usize;
+            let align = arg_i64(args, 3, name, "align")? != 0;
+            one(phi_core::t2::resize2d(
+                triple(args, 0, name)?,
+                ho,
+                wo,
+                align,
+                &tabs,
+                m,
+            )?)
+        }
         "TRANSPOSE" => one(transpose(triple(args, 0, name)?)?),
         "CONCAT" => one(concat(triple(args, 0, name)?, triple(args, 1, name)?)?),
         other => Err(Error::unimplemented(format!(

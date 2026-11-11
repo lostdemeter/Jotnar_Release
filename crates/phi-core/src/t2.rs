@@ -744,3 +744,357 @@ pub fn decode_array(t: &Triple, m_bits: i64) -> Result<ArrayD<f64>> {
     }
     Ok(ArrayD::from_shape_vec(ndarray::IxDyn(&t.shape()), out).expect("t2 decode shape"))
 }
+
+// ---------------------------------------------------------------------------
+// T2 image ops: block-floating convolution / transposed conv / resize / relu
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn t2_at(s: &[i8], e: &[i32], m: &[i32], z: &[u8], i: usize) -> T2 {
+    T2 {
+        s: s[i],
+        e: e[i],
+        m: m[i],
+        z: z[i],
+    }
+}
+
+#[inline]
+fn t2_one() -> T2 {
+    T2 {
+        s: 1,
+        e: BIAS as i32,
+        m: 0,
+        z: 0,
+    }
+}
+
+/// Accumulate a block of T2 products, aligned to the largest term exponent.
+/// This is the same arithmetic as `matmul2`, factored for the image ops.
+fn accumulate(terms: &[(T2, T2)], bias: Option<T2>, tabs: &Tables, m_bits: i64) -> T2 {
+    let mut emax: Option<i64> = None;
+    for (a, b) in terms {
+        if a.z != 0 || b.z != 0 {
+            continue;
+        }
+        let ep = a.e as i64 + b.e as i64 - BIAS;
+        emax = Some(emax.map_or(ep, |x| x.max(ep)));
+    }
+    if let Some(bi) = bias {
+        if bi.z == 0 {
+            emax = Some(emax.map_or(bi.e as i64, |x| x.max(bi.e as i64)));
+        }
+    }
+    let Some(emax) = emax else { return T2::zero() };
+    let scale = 1i128 << m_bits;
+    let half = 1i128 << (2 * m_bits - 1);
+    let mut acc: i128 = 0;
+    let mut add_term = |a: T2, b: T2| {
+        if a.z != 0 || b.z != 0 {
+            return;
+        }
+        let ep = a.e as i64 + b.e as i64 - BIAS;
+        let base = tabs.base(emax - ep) as i128;
+        if base == 0 {
+            return;
+        }
+        let aa = scale + a.m as i128;
+        let bb = scale + b.m as i128;
+        let p = (base * aa * bb + half) >> (2 * m_bits);
+        acc += (a.s as i128) * (b.s as i128) * p;
+    };
+    for (a, b) in terms {
+        add_term(*a, *b);
+    }
+    if let Some(bi) = bias {
+        add_term(t2_one(), bi);
+    }
+    let q = acc.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    from_fixed(q, emax, tabs, m_bits)
+}
+
+/// T2 RELU: negative -> zero; positive/zero pass through.
+pub fn relu_array(a: &Triple) -> Result<Triple> {
+    let (as_, ae, am, az) = planes(a)?;
+    let mut s = Vec::with_capacity(as_.len());
+    let mut e = Vec::with_capacity(as_.len());
+    let mut m = Vec::with_capacity(as_.len());
+    let mut z = Vec::with_capacity(as_.len());
+    for i in 0..as_.len() {
+        let t = t2_at(as_, ae, am, az, i);
+        if t.z == 0 && t.s < 0 {
+            let q = T2::zero();
+            s.push(q.s);
+            e.push(q.e);
+            m.push(q.m);
+            z.push(q.z);
+        } else {
+            s.push(t.s);
+            e.push(t.e);
+            m.push(t.m);
+            z.push(t.z);
+        }
+    }
+    from_planes(&a.shape(), s, e, m, z)
+}
+
+/// T2 CONV2D on HWC, weight (Cout,kh,kw,Cin), bias (Cout).
+pub fn conv2d(
+    x: &Triple,
+    w: &Triple,
+    b: &Triple,
+    stride: i64,
+    pad: i64,
+    tabs: &Tables,
+    m_bits: i64,
+) -> Result<Triple> {
+    let xsh = x.shape();
+    let wsh = w.shape();
+    if xsh.len() != 3 || wsh.len() != 4 {
+        return Err(Error::runtime("T2 CONV2D needs HWC + (Cout,kh,kw,Cin)"));
+    }
+    let (h, ww, cin) = (xsh[0], xsh[1], xsh[2]);
+    let (cout, kh, kw, wcin) = (wsh[0], wsh[1], wsh[2], wsh[3]);
+    if wcin != cin || b.s.len() != cout || stride <= 0 || pad < 0 {
+        return Err(Error::runtime("T2 CONV2D channel/stride mismatch"));
+    }
+    let ho = (h as i64 + 2 * pad - kh as i64) / stride + 1;
+    let wo = (ww as i64 + 2 * pad - kw as i64) / stride + 1;
+    if ho <= 0 || wo <= 0 {
+        return Err(Error::runtime("T2 CONV2D bad output size"));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let (xs, xe, xm, xz) = planes(x)?;
+    let (ws, we, wm, wz) = planes(w)?;
+    let (bs, be, bm, bz) = planes(b)?;
+    let mut os = vec![1i8; ho * wo * cout];
+    let mut oe = vec![BIAS as i32; ho * wo * cout];
+    let mut om = vec![0i32; ho * wo * cout];
+    let mut oz = vec![1u8; ho * wo * cout];
+    for co in 0..cout {
+        for oy in 0..ho {
+            for ox in 0..wo {
+                let mut terms: Vec<(T2, T2)> = Vec::new();
+                for ky in 0..kh {
+                    let iy = oy as i64 * stride + ky as i64 - pad;
+                    if iy < 0 || iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw {
+                        let ix = ox as i64 * stride + kx as i64 - pad;
+                        if ix < 0 || ix >= ww as i64 {
+                            continue;
+                        }
+                        for ci in 0..cin {
+                            let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
+                            let wi = ((co * kh + ky) * kw + kx) * cin + ci;
+                            terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
+                        }
+                    }
+                }
+                let bias = t2_at(bs, be, bm, bz, co);
+                let r = accumulate(
+                    &terms,
+                    if bias.z == 0 { Some(bias) } else { None },
+                    tabs,
+                    m_bits,
+                );
+                let oi = (oy * wo + ox) * cout + co;
+                os[oi] = r.s;
+                oe[oi] = r.e;
+                om[oi] = r.m;
+                oz[oi] = r.z;
+            }
+        }
+    }
+    from_planes(&[ho, wo, cout], os, oe, om, oz)
+}
+
+/// T2 DECONV2D on HWC, weight (Cout,kh,kw,Cin), bias (Cout).
+pub fn deconv2d(
+    x: &Triple,
+    w: &Triple,
+    b: &Triple,
+    stride: i64,
+    pad: i64,
+    tabs: &Tables,
+    m_bits: i64,
+) -> Result<Triple> {
+    let xsh = x.shape();
+    let wsh = w.shape();
+    if xsh.len() != 3 || wsh.len() != 4 {
+        return Err(Error::runtime("T2 DECONV2D needs HWC + (Cout,kh,kw,Cin)"));
+    }
+    let (h, ww, cin) = (xsh[0], xsh[1], xsh[2]);
+    let (cout, kh, kw, wcin) = (wsh[0], wsh[1], wsh[2], wsh[3]);
+    if wcin != cin || b.s.len() != cout || stride <= 0 || pad < 0 {
+        return Err(Error::runtime("T2 DECONV2D channel/stride mismatch"));
+    }
+    let ho = (h as i64 - 1) * stride - 2 * pad + kh as i64;
+    let wo = (ww as i64 - 1) * stride - 2 * pad + kw as i64;
+    if ho <= 0 || wo <= 0 {
+        return Err(Error::runtime("T2 DECONV2D bad output size"));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let (xs, xe, xm, xz) = planes(x)?;
+    let (ws, we, wm, wz) = planes(w)?;
+    let (bs, be, bm, bz) = planes(b)?;
+    let mut os = vec![1i8; ho * wo * cout];
+    let mut oe = vec![BIAS as i32; ho * wo * cout];
+    let mut om = vec![0i32; ho * wo * cout];
+    let mut oz = vec![1u8; ho * wo * cout];
+    for co in 0..cout {
+        for oy in 0..ho {
+            for ox in 0..wo {
+                let mut terms: Vec<(T2, T2)> = Vec::new();
+                for ky in 0..kh {
+                    let n = oy as i64 + pad - ky as i64;
+                    if n < 0 || n % stride != 0 {
+                        continue;
+                    }
+                    let iy = n / stride;
+                    if iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw {
+                        let n2 = ox as i64 + pad - kx as i64;
+                        if n2 < 0 || n2 % stride != 0 {
+                            continue;
+                        }
+                        let ix = n2 / stride;
+                        if ix >= ww as i64 {
+                            continue;
+                        }
+                        for ci in 0..cin {
+                            let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
+                            let wi = ((co * kh + ky) * kw + kx) * cin + ci;
+                            terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
+                        }
+                    }
+                }
+                let bias = t2_at(bs, be, bm, bz, co);
+                let r = accumulate(
+                    &terms,
+                    if bias.z == 0 { Some(bias) } else { None },
+                    tabs,
+                    m_bits,
+                );
+                let oi = (oy * wo + ox) * cout + co;
+                os[oi] = r.s;
+                oe[oi] = r.e;
+                om[oi] = r.m;
+                oz[oi] = r.z;
+            }
+        }
+    }
+    from_planes(&[ho, wo, cout], os, oe, om, oz)
+}
+
+const RESIZE_Q: i64 = 1 << 24;
+
+fn resize_coord(o: usize, n: usize, no: usize, align: bool) -> (usize, usize, i64, i64) {
+    if n <= 1 || no <= 1 {
+        return (0, 0, RESIZE_Q, 0);
+    }
+    let (i0, rem, den);
+    if align {
+        let num = (o * (n - 1)) as i64;
+        let d = (no - 1) as i64;
+        i0 = (num / d) as usize;
+        rem = num % d;
+        den = d;
+    } else {
+        let num = ((2 * o + 1) * n) as i64 - no as i64;
+        let d = (2 * no) as i64;
+        if num <= 0 {
+            return (0, (1).min(n - 1), RESIZE_Q, 0);
+        }
+        if num >= (n as i64 - 1) * d {
+            return (n - 1, n - 1, RESIZE_Q, 0);
+        }
+        i0 = (num / d) as usize;
+        rem = num % d;
+        den = d;
+    }
+    let i1 = (i0 + 1).min(n - 1);
+    let w1 = (rem * RESIZE_Q + den / 2) / den;
+    (i0, i1, RESIZE_Q - w1, w1)
+}
+
+fn resize_weight(wy0: i64, wy1: i64, wx0: i64, wx1: i64) -> (i64, i64, i64, i64) {
+    let q = RESIZE_Q as i128;
+    let w00 = ((wy0 as i128 * wx0 as i128 + q / 2) / q) as i64;
+    let w01 = ((wy0 as i128 * wx1 as i128 + q / 2) / q) as i64;
+    let w10 = ((wy1 as i128 * wx0 as i128 + q / 2) / q) as i64;
+    let w11 = RESIZE_Q - w00 - w01 - w10;
+    (w00, w01, w10, w11)
+}
+
+/// T2 bilinear resize to explicit (ho,wo), with align_corners flag.
+pub fn resize2d(
+    x: &Triple,
+    ho: usize,
+    wo: usize,
+    align: bool,
+    tabs: &Tables,
+    m_bits: i64,
+) -> Result<Triple> {
+    let xsh = x.shape();
+    if xsh.len() != 3 || ho == 0 || wo == 0 {
+        return Err(Error::runtime("T2 RESIZE2D needs HWC and positive sizes"));
+    }
+    let (h, w, c) = (xsh[0], xsh[1], xsh[2]);
+    let (xs, xe, xm, xz) = planes(x)?;
+    let mut os = vec![1i8; ho * wo * c];
+    let mut oe = vec![BIAS as i32; ho * wo * c];
+    let mut om = vec![0i32; ho * wo * c];
+    let mut oz = vec![1u8; ho * wo * c];
+    for oy in 0..ho {
+        let (y0, y1, wy0, wy1) = resize_coord(oy, h, ho, align);
+        for ox in 0..wo {
+            let (x0, x1, wx0, wx1) = resize_coord(ox, w, wo, align);
+            let (w00, w01, w10, w11) = resize_weight(wy0, wy1, wx0, wx1);
+            for cc in 0..c {
+                let i00 = (y0 * w + x0) * c + cc;
+                let i01 = (y0 * w + x1) * c + cc;
+                let i10 = (y1 * w + x0) * c + cc;
+                let i11 = (y1 * w + x1) * c + cc;
+                let v = [
+                    t2_at(xs, xe, xm, xz, i00),
+                    t2_at(xs, xe, xm, xz, i01),
+                    t2_at(xs, xe, xm, xz, i10),
+                    t2_at(xs, xe, xm, xz, i11),
+                ];
+                let mut emax: Option<i64> = None;
+                for t in v {
+                    if t.z == 0 {
+                        emax = Some(emax.map_or(t.e as i64, |z| z.max(t.e as i64)));
+                    }
+                }
+                let oi = (oy * wo + ox) * c + cc;
+                let Some(emax) = emax else { continue };
+                let q00 = to_fixed(v[0], emax, tabs, m_bits) as i128;
+                let q01 = to_fixed(v[1], emax, tabs, m_bits) as i128;
+                let q10 = to_fixed(v[2], emax, tabs, m_bits) as i128;
+                let q11 = to_fixed(v[3], emax, tabs, m_bits) as i128;
+                let acc = (q00 * w00 as i128
+                    + q01 * w01 as i128
+                    + q10 * w10 as i128
+                    + q11 * w11 as i128
+                    + (RESIZE_Q as i128) / 2)
+                    / (RESIZE_Q as i128);
+                let r = from_fixed(
+                    acc.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+                    emax,
+                    tabs,
+                    m_bits,
+                );
+                os[oi] = r.s;
+                oe[oi] = r.e;
+                om[oi] = r.m;
+                oz[oi] = r.z;
+            }
+        }
+    }
+    from_planes(&[ho, wo, c], os, oe, om, oz)
+}

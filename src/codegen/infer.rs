@@ -541,15 +541,15 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 let b = get(&streams, a(2))?;
                 let stride = int_lit(a(3), &format!("{where_} stride"))?;
                 let pad = int_lit(a(4), &format!("{where_} pad"))?;
-                if x.kind != CKind::F
-                    || w.kind != CKind::F
-                    || b.kind != CKind::F
+                if !matches!(x.kind, CKind::F | CKind::T)
+                    || x.kind != w.kind
+                    || x.kind != b.kind
                     || x.shape.len() != 3
                     || w.shape.len() != 4
                     || b.shape.len() != 1
                 {
                     return Err(Error::unimplemented(format!(
-                        "{where_}: DECONV2D needs F x(H,W,C)+w(Cout,kh,kw,C)+b(Cout)"
+                        "{where_}: DECONV2D needs F/T x(H,W,C)+w(Cout,kh,kw,C)+b(Cout)"
                     )));
                 }
                 let (Some(h), Some(ww), Some(cin)) = (x.shape[0], x.shape[1], x.shape[2]) else {
@@ -577,7 +577,10 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(
                     o,
-                    StreamInfo::f(vec![Some(ho as usize), Some(wo as usize), Some(cout)]),
+                    StreamInfo {
+                        kind: x.kind,
+                        shape: vec![Some(ho as usize), Some(wo as usize), Some(cout)],
+                    },
                 );
             }
             "CONV2D" => {
@@ -586,15 +589,15 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 let b = get(&streams, a(2))?;
                 let stride = int_lit(a(3), &format!("{where_} stride"))?;
                 let pad = int_lit(a(4), &format!("{where_} pad"))?;
-                if x.kind != CKind::F
-                    || w.kind != CKind::F
-                    || b.kind != CKind::F
+                if !matches!(x.kind, CKind::F | CKind::T)
+                    || x.kind != w.kind
+                    || x.kind != b.kind
                     || x.shape.len() != 3
                     || w.shape.len() != 4
                     || b.shape.len() != 1
                 {
                     return Err(Error::unimplemented(format!(
-                        "{where_}: CONV2D needs F x(H,W,C)+w(Cout,kh,kw,C)+b(Cout)"
+                        "{where_}: CONV2D needs F/T x(H,W,C)+w(Cout,kh,kw,C)+b(Cout)"
                     )));
                 }
                 let (Some(h), Some(ww), Some(cin)) = (x.shape[0], x.shape[1], x.shape[2]) else {
@@ -620,7 +623,10 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(
                     o,
-                    StreamInfo::f(vec![Some(ho as usize), Some(wo as usize), Some(cout)]),
+                    StreamInfo {
+                        kind: x.kind,
+                        shape: vec![Some(ho as usize), Some(wo as usize), Some(cout)],
+                    },
                 );
             }
             "RESIZE2D" => {
@@ -628,9 +634,13 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 let ho = int_lit(a(1), &format!("{where_} ho"))?;
                 let wo = int_lit(a(2), &format!("{where_} wo"))?;
                 let align = int_lit(a(3), &format!("{where_} align"))?;
-                if x.kind != CKind::F || x.shape.len() != 3 || ho <= 0 || wo <= 0 {
+                if !matches!(x.kind, CKind::F | CKind::T)
+                    || x.shape.len() != 3
+                    || ho <= 0
+                    || wo <= 0
+                {
                     return Err(Error::unimplemented(format!(
-                        "{where_}: RESIZE2D needs F HWC + positive sizes"
+                        "{where_}: RESIZE2D needs F/T HWC + positive sizes"
                     )));
                 }
                 if align != 0 && align != 1 {
@@ -638,7 +648,10 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(
                     o,
-                    StreamInfo::f(vec![Some(ho as usize), Some(wo as usize), x.shape[2]]),
+                    StreamInfo {
+                        kind: x.kind,
+                        shape: vec![Some(ho as usize), Some(wo as usize), x.shape[2]],
+                    },
                 );
             }
             "CONV" => {

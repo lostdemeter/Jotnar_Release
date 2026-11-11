@@ -163,3 +163,166 @@ fn config_widths_are_typed_errors() {
     let (_, f) = t2::check_widths(None, None).unwrap();
     assert_eq!(f, 18);
 }
+
+fn conv_ref(
+    x: &[f64],
+    h: usize,
+    w: usize,
+    cin: usize,
+    wt: &[f64],
+    cout: usize,
+    kh: usize,
+    kw: usize,
+    b: &[f64],
+    stride: i64,
+    pad: i64,
+) -> (Vec<f64>, usize, usize) {
+    let ho = ((h as i64 + 2 * pad - kh as i64) / stride + 1) as usize;
+    let wo = ((w as i64 + 2 * pad - kw as i64) / stride + 1) as usize;
+    let mut o = vec![0.0; ho * wo * cout];
+    for co in 0..cout {
+        for oy in 0..ho {
+            for ox in 0..wo {
+                let mut acc = b[co];
+                for ky in 0..kh {
+                    let iy = oy as i64 * stride + ky as i64 - pad;
+                    if iy < 0 || iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw {
+                        let ix = ox as i64 * stride + kx as i64 - pad;
+                        if ix < 0 || ix >= w as i64 {
+                            continue;
+                        }
+                        for ci in 0..cin {
+                            acc += x[((iy as usize) * w + ix as usize) * cin + ci]
+                                * wt[((co * kh + ky) * kw + kx) * cin + ci];
+                        }
+                    }
+                }
+                o[(oy * wo + ox) * cout + co] = acc;
+            }
+        }
+    }
+    (o, ho, wo)
+}
+
+#[test]
+fn image_ops_match_f64() {
+    let m = 24;
+    let tabs = Tables::new(24);
+    let (h, w, cin, cout) = (3usize, 4usize, 2usize, 3usize);
+    let (kh, kw) = (3usize, 3usize);
+    let mut seed = 23u64;
+    let xv: Vec<f64> = (0..h * w * cin).map(|_| lcg(&mut seed) * 2.0).collect();
+    let wv: Vec<f64> = (0..cout * kh * kw * cin)
+        .map(|_| lcg(&mut seed) * 0.5)
+        .collect();
+    let bv: Vec<f64> = (0..cout).map(|_| lcg(&mut seed) * 0.2).collect();
+    let x = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[h, w, cin]), xv.clone()).unwrap(),
+        m,
+    );
+    let wt = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[cout, kh, kw, cin]), wv.clone()).unwrap(),
+        m,
+    );
+    let b = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[cout]), bv.clone()).unwrap(),
+        m,
+    );
+
+    let got = t2::conv2d(&x, &wt, &b, 1, 1, &tabs, m).unwrap();
+    let g = t2::decode_array(&got, m).unwrap();
+    let (want, ho, wo) = conv_ref(&xv, h, w, cin, &wv, cout, kh, kw, &bv, 1, 1);
+    for i in 0..ho {
+        for j in 0..wo {
+            for c in 0..cout {
+                let a = g[IxDyn(&[i, j, c])];
+                let e = want[(i * wo + j) * cout + c];
+                assert!(rel(a, e) < 2e-3, "conv {i},{j},{c}: {a} vs {e}");
+            }
+        }
+    }
+
+    let got = t2::deconv2d(&x, &wt, &b, 2, 1, &tabs, m).unwrap();
+    let g = t2::decode_array(&got, m).unwrap();
+    // f64 deconv reference by direct scatter.
+    let ho2 = ((h as i64 - 1) * 2 - 2 + kh as i64) as usize;
+    let wo2 = ((w as i64 - 1) * 2 - 2 + kw as i64) as usize;
+    let mut want = vec![0.0; ho2 * wo2 * cout];
+    for co in 0..cout {
+        for iy in 0..h {
+            for ix in 0..w {
+                for ky in 0..kh {
+                    let oy = iy as i64 * 2 - 1 + ky as i64;
+                    if oy < 0 || oy >= ho2 as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw {
+                        let ox = ix as i64 * 2 - 1 + kx as i64;
+                        if ox < 0 || ox >= wo2 as i64 {
+                            continue;
+                        }
+                        for ci in 0..cin {
+                            want[(oy as usize * wo2 + ox as usize) * cout + co] += xv
+                                [(iy * w + ix) * cin + ci]
+                                * wv[((co * kh + ky) * kw + kx) * cin + ci];
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..ho2 * wo2 {
+            want[i * cout + co] += bv[co];
+        }
+    }
+    for i in 0..ho2 {
+        for j in 0..wo2 {
+            for c in 0..cout {
+                let a = g[IxDyn(&[i, j, c])];
+                let e = want[(i * wo2 + j) * cout + c];
+                assert!(rel(a, e) < 2e-3, "deconv {i},{j},{c}: {a} vs {e}");
+            }
+        }
+    }
+
+    // Bilinear resize vs a direct f64 reference (align_corners=false).
+    let (ho3, wo3) = (5usize, 7usize);
+    let got = t2::resize2d(&x, ho3, wo3, false, &tabs, m).unwrap();
+    let g = t2::decode_array(&got, m).unwrap();
+    for oy in 0..ho3 {
+        let sy = (((oy as f64 + 0.5) * h as f64 / ho3 as f64 - 0.5).max(0.0)).min(h as f64 - 1.0);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(h - 1);
+        let wy = sy - y0 as f64;
+        for ox in 0..wo3 {
+            let sx =
+                (((ox as f64 + 0.5) * w as f64 / wo3 as f64 - 0.5).max(0.0)).min(w as f64 - 1.0);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(w - 1);
+            let wx = sx - x0 as f64;
+            for c in 0..cin {
+                let p = |yy: usize, xx: usize| xv[(yy * w + xx) * cin + c];
+                let e = (1.0 - wy) * (1.0 - wx) * p(y0, x0)
+                    + (1.0 - wy) * wx * p(y0, x1)
+                    + wy * (1.0 - wx) * p(y1, x0)
+                    + wy * wx * p(y1, x1);
+                let a = g[IxDyn(&[oy, ox, c])];
+                assert!(rel(a, e) < 2e-3, "resize {oy},{ox},{c}: {a} vs {e}");
+            }
+        }
+    }
+
+    let rv = [-2.0, -0.5, 0.0, 0.5, 2.0];
+    let r = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[5]), rv.to_vec()).unwrap(),
+        m,
+    );
+    let rr = t2::relu_array(&r).unwrap();
+    let rd = t2::decode_array(&rr, m).unwrap();
+    for (i, v) in rv.iter().enumerate() {
+        let want = v.max(0.0);
+        assert!((rd[IxDyn(&[i])] - want).abs() < 1e-5);
+    }
+}

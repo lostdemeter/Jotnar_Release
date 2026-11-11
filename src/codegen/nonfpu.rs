@@ -65,6 +65,10 @@ const INTEGER_MN: &[&str] = &[
     "SQUARE",
     "MATMUL",
     "BATCH_MATMUL",
+    "CONV2D",
+    "DECONV2D",
+    "RESIZE2D",
+    "RELU",
     "RMSNORM",
     "TSHIFT",
     "SOFTMAX_WIDE",
@@ -84,6 +88,10 @@ const FX_MN: &[&str] = &[
     "SQUARE",
     "MATMUL",
     "BATCH_MATMUL",
+    "CONV2D",
+    "DECONV2D",
+    "RESIZE2D",
+    "RELU",
     "RMSNORM",
     "TSHIFT",
     "SOFTMAX_WIDE",
@@ -107,6 +115,11 @@ pub fn allowed(mn: &str) -> bool {
 
 fn is_fx(mn: &str) -> bool {
     FX_MN.contains(&mn)
+}
+
+fn int_lit(a: &str, what: &str) -> Result<i64> {
+    a.parse::<i64>()
+        .map_err(|_| Error::asm(format!("{what}: need integer literal, got {a}")))
 }
 
 fn fill(s: &str, vars: &[(&str, String)]) -> String {
@@ -550,6 +563,193 @@ static void nf_t2_softmax_row(const int8_t *xs, const int32_t *xe, const int32_t
     nf_t2_from_fixed(c, 32768, &os[j], &oe[j], &om[j], &oz[j]);
   }
 }
+
+typedef struct { int8_t *s; int32_t *e; int32_t *m; uint8_t *z; } nf_t2_planes;
+
+static __int128 nf_t2_term(int8_t as, int32_t ae, int32_t am, uint8_t az,
+                           int8_t bs, int32_t be, int32_t bm, uint8_t bz,
+                           int64_t emax) {
+  if (az || bz) return 0;
+  int64_t ep = (int64_t)ae + (int64_t)be - 32768;
+  int64_t base = nf_t2_base((int)(emax - ep));
+  if (base == 0) return 0;
+  __int128 aa = (__int128)NF_T2_SCALE + (int64_t)am;
+  __int128 bb = (__int128)NF_T2_SCALE + (int64_t)bm;
+  __int128 p = ((__int128)base * aa * bb + NF_T2_HALF2) >> (2 * NF_T2_M);
+  return (__int128)as * (__int128)bs * p;
+}
+
+static void nf_t2_relu(int8_t s, int32_t e, int32_t m, uint8_t z,
+                       int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  if (z == 0 && s < 0) { *os = 1; *oe = 32768; *om = 0; *oz = 1; }
+  else { *os = s; *oe = e; *om = m; *oz = z; }
+}
+
+static void nf_t2_conv2d(nf_t2_planes x, int64_t H, int64_t W, int64_t Cin,
+                         nf_t2_planes w, int64_t Cout, int64_t KH, int64_t KW,
+                         nf_t2_planes b, int64_t stride, int64_t pad,
+                         int64_t Ho, int64_t Wo, nf_t2_planes o) {
+  for (int64_t co = 0; co < Cout; ++co)
+    for (int64_t oy = 0; oy < Ho; ++oy)
+      for (int64_t ox = 0; ox < Wo; ++ox) {
+        int64_t emax = 0; int any = 0;
+        for (int64_t ky = 0; ky < KH; ++ky) {
+          int64_t iy = oy * stride + ky - pad;
+          if (iy < 0 || iy >= H) continue;
+          for (int64_t kx = 0; kx < KW; ++kx) {
+            int64_t ix = ox * stride + kx - pad;
+            if (ix < 0 || ix >= W) continue;
+            for (int64_t ci = 0; ci < Cin; ++ci) {
+              int64_t ai = (iy * W + ix) * Cin + ci;
+              int64_t wi = ((co * KH + ky) * KW + kx) * Cin + ci;
+              if (x.z[ai] || w.z[wi]) continue;
+              int64_t ep = (int64_t)x.e[ai] + (int64_t)w.e[wi] - 32768;
+              if (!any || ep > emax) { emax = ep; any = 1; }
+            }
+          }
+        }
+        if (b.z[co] == 0) {
+          int64_t ep = (int64_t)b.e[co];
+          if (!any || ep > emax) { emax = ep; any = 1; }
+        }
+        int64_t oi = (oy * Wo + ox) * Cout + co;
+        if (!any) { o.s[oi] = 1; o.e[oi] = 32768; o.m[oi] = 0; o.z[oi] = 1; continue; }
+        __int128 acc = 0;
+        for (int64_t ky = 0; ky < KH; ++ky) {
+          int64_t iy = oy * stride + ky - pad;
+          if (iy < 0 || iy >= H) continue;
+          for (int64_t kx = 0; kx < KW; ++kx) {
+            int64_t ix = ox * stride + kx - pad;
+            if (ix < 0 || ix >= W) continue;
+            for (int64_t ci = 0; ci < Cin; ++ci) {
+              int64_t ai = (iy * W + ix) * Cin + ci;
+              int64_t wi = ((co * KH + ky) * KW + kx) * Cin + ci;
+              acc += nf_t2_term(x.s[ai], x.e[ai], x.m[ai], x.z[ai],
+                                 w.s[wi], w.e[wi], w.m[wi], w.z[wi], emax);
+            }
+          }
+        }
+        if (b.z[co] == 0) acc += nf_t2_term(1, 32768, 0, 0, b.s[co], b.e[co], b.m[co], b.z[co], emax);
+        nf_t2_from_fixed((int64_t)acc, (int)emax, &o.s[oi], &o.e[oi], &o.m[oi], &o.z[oi]);
+      }
+}
+
+static void nf_t2_deconv2d(nf_t2_planes x, int64_t H, int64_t W, int64_t Cin,
+                           nf_t2_planes w, int64_t Cout, int64_t KH, int64_t KW,
+                           nf_t2_planes b, int64_t stride, int64_t pad,
+                           int64_t Ho, int64_t Wo, nf_t2_planes o) {
+  for (int64_t co = 0; co < Cout; ++co)
+    for (int64_t oy = 0; oy < Ho; ++oy)
+      for (int64_t ox = 0; ox < Wo; ++ox) {
+        int64_t emax = 0; int any = 0;
+        for (int64_t ky = 0; ky < KH; ++ky) {
+          int64_t n = oy + pad - ky;
+          if (n < 0 || n % stride != 0) continue;
+          int64_t iy = n / stride;
+          if (iy >= H) continue;
+          for (int64_t kx = 0; kx < KW; ++kx) {
+            int64_t n2 = ox + pad - kx;
+            if (n2 < 0 || n2 % stride != 0) continue;
+            int64_t ix = n2 / stride;
+            if (ix >= W) continue;
+            for (int64_t ci = 0; ci < Cin; ++ci) {
+              int64_t ai = (iy * W + ix) * Cin + ci;
+              int64_t wi = ((co * KH + ky) * KW + kx) * Cin + ci;
+              if (x.z[ai] || w.z[wi]) continue;
+              int64_t ep = (int64_t)x.e[ai] + (int64_t)w.e[wi] - 32768;
+              if (!any || ep > emax) { emax = ep; any = 1; }
+            }
+          }
+        }
+        if (b.z[co] == 0) {
+          int64_t ep = (int64_t)b.e[co];
+          if (!any || ep > emax) { emax = ep; any = 1; }
+        }
+        int64_t oi = (oy * Wo + ox) * Cout + co;
+        if (!any) { o.s[oi] = 1; o.e[oi] = 32768; o.m[oi] = 0; o.z[oi] = 1; continue; }
+        __int128 acc = 0;
+        for (int64_t ky = 0; ky < KH; ++ky) {
+          int64_t n = oy + pad - ky;
+          if (n < 0 || n % stride != 0) continue;
+          int64_t iy = n / stride;
+          if (iy >= H) continue;
+          for (int64_t kx = 0; kx < KW; ++kx) {
+            int64_t n2 = ox + pad - kx;
+            if (n2 < 0 || n2 % stride != 0) continue;
+            int64_t ix = n2 / stride;
+            if (ix >= W) continue;
+            for (int64_t ci = 0; ci < Cin; ++ci) {
+              int64_t ai = (iy * W + ix) * Cin + ci;
+              int64_t wi = ((co * KH + ky) * KW + kx) * Cin + ci;
+              acc += nf_t2_term(x.s[ai], x.e[ai], x.m[ai], x.z[ai],
+                                 w.s[wi], w.e[wi], w.m[wi], w.z[wi], emax);
+            }
+          }
+        }
+        if (b.z[co] == 0) acc += nf_t2_term(1, 32768, 0, 0, b.s[co], b.e[co], b.m[co], b.z[co], emax);
+        nf_t2_from_fixed((int64_t)acc, (int)emax, &o.s[oi], &o.e[oi], &o.m[oi], &o.z[oi]);
+      }
+}
+
+static void nf_t2_resize_coord(int64_t o, int64_t n, int64_t no, int align,
+                               int64_t *i0, int64_t *i1, int64_t *w0, int64_t *w1) {
+  const int64_t Q = 1LL << 24;
+  if (n <= 1 || no <= 1) { *i0 = 0; *i1 = 0; *w0 = Q; *w1 = 0; return; }
+  int64_t i, rem, den;
+  if (align) {
+    int64_t num = o * (n - 1), d = no - 1;
+    i = num / d; rem = num % d; den = d;
+  } else {
+    int64_t num = (2 * o + 1) * n - no, d = 2 * no;
+    if (num <= 0) { *i0 = 0; *i1 = (1 < n ? 1 : n - 1); *w0 = Q; *w1 = 0; return; }
+    if (num >= (n - 1) * d) { *i0 = n - 1; *i1 = n - 1; *w0 = Q; *w1 = 0; return; }
+    i = num / d; rem = num % d; den = d;
+  }
+  *i0 = i; *i1 = (i + 1 < n ? i + 1 : n - 1);
+  int64_t frac = (rem * Q + den / 2) / den;
+  *w1 = frac; *w0 = Q - frac;
+}
+
+static void nf_t2_resize2d(nf_t2_planes x, int64_t H, int64_t W, int64_t C,
+                           int64_t Ho, int64_t Wo, int align, nf_t2_planes o) {
+  const int64_t Q = 1LL << 24;
+  for (int64_t oy = 0; oy < Ho; ++oy) {
+    int64_t y0, y1, wy0, wy1;
+    nf_t2_resize_coord(oy, H, Ho, align, &y0, &y1, &wy0, &wy1);
+    for (int64_t ox = 0; ox < Wo; ++ox) {
+      int64_t x0, x1, wx0, wx1;
+      nf_t2_resize_coord(ox, W, Wo, align, &x0, &x1, &wx0, &wx1);
+      int64_t w00 = (int64_t)(((__int128)wy0 * wx0 + Q / 2) / Q);
+      int64_t w01 = (int64_t)(((__int128)wy0 * wx1 + Q / 2) / Q);
+      int64_t w10 = (int64_t)(((__int128)wy1 * wx0 + Q / 2) / Q);
+      int64_t w11 = Q - w00 - w01 - w10;
+      for (int64_t c = 0; c < C; ++c) {
+        int64_t i00 = (y0 * W + x0) * C + c;
+        int64_t i01 = (y0 * W + x1) * C + c;
+        int64_t i10 = (y1 * W + x0) * C + c;
+        int64_t i11 = (y1 * W + x1) * C + c;
+        int64_t emax = 0; int any = 0;
+        int64_t is[4] = {i00, i01, i10, i11};
+        for (int t = 0; t < 4; ++t) {
+          if (x.z[is[t]] == 0) {
+            int64_t ep = (int64_t)x.e[is[t]];
+            if (!any || ep > emax) { emax = ep; any = 1; }
+          }
+        }
+        int64_t oi = (oy * Wo + ox) * C + c;
+        if (!any) { o.s[oi] = 1; o.e[oi] = 32768; o.m[oi] = 0; o.z[oi] = 1; continue; }
+        int64_t q00 = nf_t2_to_fixed(x.s[i00], x.e[i00], x.m[i00], x.z[i00], emax);
+        int64_t q01 = nf_t2_to_fixed(x.s[i01], x.e[i01], x.m[i01], x.z[i01], emax);
+        int64_t q10 = nf_t2_to_fixed(x.s[i10], x.e[i10], x.m[i10], x.z[i10], emax);
+        int64_t q11 = nf_t2_to_fixed(x.s[i11], x.e[i11], x.m[i11], x.z[i11], emax);
+        __int128 acc = ((__int128)q00 * w00 + (__int128)q01 * w01
+                        + (__int128)q10 * w10 + (__int128)q11 * w11 + Q / 2) / Q;
+        nf_t2_from_fixed((int64_t)acc, (int)emax, &o.s[oi], &o.e[oi], &o.m[oi], &o.z[oi]);
+      }
+    }
+  }
+}
+
 "#;
 
 pub fn prologue(ctx: &Ctx) -> Result<String> {
@@ -984,9 +1184,155 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
                 None,
             ))
         }
+        "CONV2D" | "DECONV2D" => {
+            if ctx.t2_m.is_none() {
+                return Err(Error::unimplemented(format!(
+                    "nonfpu {mn} requires T2 (CONFIG t2)"
+                )));
+            }
+            let (x, w, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let xsh = ctx.s(x)?.shape.clone();
+            let wsh = ctx.s(w)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented(format!(
+                    "nonfpu {mn} needs HWC + (Cout,kh,kw,Cin)"
+                )));
+            }
+            let (h, ww, cin) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let (cout, kh, kw) = (wsh[0].unwrap(), wsh[1].unwrap(), wsh[2].unwrap());
+            let stride = int_lit(&args[3], "stride")?;
+            let pad = int_lit(&args[4], "pad")?;
+            let (ho, wo) = if mn == "CONV2D" {
+                (
+                    (h as i64 + 2 * pad - kh as i64) / stride + 1,
+                    (ww as i64 + 2 * pad - kw as i64) / stride + 1,
+                )
+            } else {
+                (
+                    (h as i64 - 1) * stride - 2 * pad + kh as i64,
+                    (ww as i64 - 1) * stride - 2 * pad + kw as i64,
+                )
+            };
+            if ho <= 0 || wo <= 0 {
+                return Err(Error::asm(format!("nonfpu {mn} bad output size")));
+            }
+            let fn_name = if mn == "CONV2D" {
+                "nf_t2_conv2d"
+            } else {
+                "nf_t2_deconv2d"
+            };
+            Ok((
+                fill(
+                    r#"/* {o} = {mn}({x}) T2 block-floating */
+{ nf_t2_planes _x = { {x}_s, {x}_e, {x}_m, {x}_z };
+  nf_t2_planes _w = { {w}_s, {w}_e, {w}_m, {w}_z };
+  nf_t2_planes _b = { {b}_s, {b}_e, {b}_m, {b}_z };
+  nf_t2_planes _o = { {o}_s, {o}_e, {o}_m, {o}_z };
+  {fn_name}(_x, {h}, {ww}, {cin}, _w, {cout}, {kh}, {kw}, _b,
+             {stride}, {pad}, {ho}, {wo}, _o); {rbrace}"#,
+                    &[
+                        ("o", o.into()),
+                        ("mn", mn.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("h", h.to_string()),
+                        ("ww", ww.to_string()),
+                        ("cin", cin.to_string()),
+                        ("cout", cout.to_string()),
+                        ("kh", kh.to_string()),
+                        ("kw", kw.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("stride", stride.to_string()),
+                        ("pad", pad.to_string()),
+                        ("fn_name", fn_name.into()),
+                        ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "RESIZE2D" => {
+            if ctx.t2_m.is_none() {
+                return Err(Error::unimplemented("nonfpu RESIZE2D requires T2"));
+            }
+            let x = args[0].as_str();
+            let xsh = ctx.s(x)?.shape.clone();
+            if xsh.len() != 3 {
+                return Err(Error::unimplemented("nonfpu RESIZE2D needs HWC"));
+            }
+            let (h, ww, c) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let ho = int_lit(&args[1], "ho")?;
+            let wo = int_lit(&args[2], "wo")?;
+            let align = int_lit(&args[3], "align")?;
+            Ok((
+                fill(
+                    r#"/* {o} = RESIZE2D({x}) T2 weighted bilinear */
+{ nf_t2_planes _x = { {x}_s, {x}_e, {x}_m, {x}_z };
+  nf_t2_planes _o = { {o}_s, {o}_e, {o}_m, {o}_z };
+  nf_t2_resize2d(_x, {h}, {ww}, {c}, {ho}, {wo}, {align}, _o); {rbrace}"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("h", h.to_string()),
+                        ("ww", ww.to_string()),
+                        ("c", c.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("align", align.to_string()),
+                        ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "RELU" => {
+            let x = args[0].as_str();
+            let co = ctx.elems(o)?;
+            if ctx.t2_m.is_some() {
+                Ok((
+                    fill(
+                        r#"/* {o} = RELU({x}) T2 sign/zero move */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_relu({xs}, {xe}, {xm}, {xz}, &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                        &[
+                            ("o", o.into()),
+                            ("x", x.into()),
+                            ("co", co.to_string()),
+                            ("xs", tplane(ctx, x, "s", "f_i")),
+                            ("xe", tplane(ctx, x, "e", "f_i")),
+                            ("xm", tplane(ctx, x, "m", "f_i")),
+                            ("xz", tplane(ctx, x, "z", "f_i")),
+                        ],
+                    ),
+                    None,
+                ))
+            } else {
+                Ok((
+                    fill(
+                        r#"/* {o} = RELU({x}) T sign/zero move */
+for (int64_t f_i = 0; f_i < {co}; ++f_i) {
+  if ({xz} == 0 && {xs} < 0) {{ {o}_s[f_i] = 1; {o}_e[f_i] = 32768; {o}_z[f_i] = 1; }}
+  else {{ {o}_s[f_i] = {xs}; {o}_e[f_i] = {xe}; {o}_z[f_i] = {xz}; }}
+}"#,
+                        &[
+                            ("o", o.into()),
+                            ("x", x.into()),
+                            ("co", co.to_string()),
+                            ("xs", tplane(ctx, x, "s", "f_i")),
+                            ("xe", tplane(ctx, x, "e", "f_i")),
+                            ("xz", tplane(ctx, x, "z", "f_i")),
+                        ],
+                    ),
+                    None,
+                ))
+            }
+        }
         other => Err(Error::unimplemented(format!(
             "nonfpu T2: no pattern for {other} (supported: MUL, SQUARE, ADD, SUB, \
-             MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE)"
+             MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE, CONV2D, \
+             DECONV2D, RESIZE2D, RELU)"
         ))),
     }
 }
@@ -1446,6 +1792,151 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
                 ),
                 None,
             ))
+        }
+        "CONV2D" | "DECONV2D" => {
+            if ctx.t2_m.is_none() {
+                return Err(Error::unimplemented(format!(
+                    "nonfpu {mn} requires T2 (CONFIG t2)"
+                )));
+            }
+            let (x, w, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let xsh = ctx.s(x)?.shape.clone();
+            let wsh = ctx.s(w)?.shape.clone();
+            if xsh.len() != 3 || wsh.len() != 4 {
+                return Err(Error::unimplemented(format!(
+                    "nonfpu {mn} needs HWC + (Cout,kh,kw,Cin)"
+                )));
+            }
+            let (h, ww, cin) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let (cout, kh, kw) = (wsh[0].unwrap(), wsh[1].unwrap(), wsh[2].unwrap());
+            let stride = int_lit(&args[3], "stride")?;
+            let pad = int_lit(&args[4], "pad")?;
+            let (ho, wo) = if mn == "CONV2D" {
+                (
+                    (h as i64 + 2 * pad - kh as i64) / stride + 1,
+                    (ww as i64 + 2 * pad - kw as i64) / stride + 1,
+                )
+            } else {
+                (
+                    (h as i64 - 1) * stride - 2 * pad + kh as i64,
+                    (ww as i64 - 1) * stride - 2 * pad + kw as i64,
+                )
+            };
+            if ho <= 0 || wo <= 0 {
+                return Err(Error::asm(format!("nonfpu {mn} bad output size")));
+            }
+            let fn_name = if mn == "CONV2D" {
+                "nf_t2_conv2d"
+            } else {
+                "nf_t2_deconv2d"
+            };
+            Ok((
+                fill(
+                    r#"/* {o} = {mn}({x}) T2 block-floating */
+{ nf_t2_planes _x = { {x}_s, {x}_e, {x}_m, {x}_z };
+  nf_t2_planes _w = { {w}_s, {w}_e, {w}_m, {w}_z };
+  nf_t2_planes _b = { {b}_s, {b}_e, {b}_m, {b}_z };
+  nf_t2_planes _o = { {o}_s, {o}_e, {o}_m, {o}_z };
+  {fn_name}(_x, {h}, {ww}, {cin}, _w, {cout}, {kh}, {kw}, _b,
+             {stride}, {pad}, {ho}, {wo}, _o); {rbrace}"#,
+                    &[
+                        ("o", o.into()),
+                        ("mn", mn.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("h", h.to_string()),
+                        ("ww", ww.to_string()),
+                        ("cin", cin.to_string()),
+                        ("cout", cout.to_string()),
+                        ("kh", kh.to_string()),
+                        ("kw", kw.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("stride", stride.to_string()),
+                        ("pad", pad.to_string()),
+                        ("fn_name", fn_name.into()),
+                        ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "RESIZE2D" => {
+            if ctx.t2_m.is_none() {
+                return Err(Error::unimplemented("nonfpu RESIZE2D requires T2"));
+            }
+            let x = args[0].as_str();
+            let xsh = ctx.s(x)?.shape.clone();
+            if xsh.len() != 3 {
+                return Err(Error::unimplemented("nonfpu RESIZE2D needs HWC"));
+            }
+            let (h, ww, c) = (xsh[0].unwrap(), xsh[1].unwrap(), xsh[2].unwrap());
+            let ho = int_lit(&args[1], "ho")?;
+            let wo = int_lit(&args[2], "wo")?;
+            let align = int_lit(&args[3], "align")?;
+            Ok((
+                fill(
+                    r#"/* {o} = RESIZE2D({x}) T2 weighted bilinear */
+{ nf_t2_planes _x = { {x}_s, {x}_e, {x}_m, {x}_z };
+  nf_t2_planes _o = { {o}_s, {o}_e, {o}_m, {o}_z };
+  nf_t2_resize2d(_x, {h}, {ww}, {c}, {ho}, {wo}, {align}, _o); {rbrace}"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("h", h.to_string()),
+                        ("ww", ww.to_string()),
+                        ("c", c.to_string()),
+                        ("ho", ho.to_string()),
+                        ("wo", wo.to_string()),
+                        ("align", align.to_string()),
+                        ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "RELU" => {
+            let x = args[0].as_str();
+            let co = ctx.elems(o)?;
+            if ctx.t2_m.is_some() {
+                Ok((
+                    fill(
+                        r#"/* {o} = RELU({x}) T2 sign/zero move */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_relu({xs}, {xe}, {xm}, {xz}, &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                        &[
+                            ("o", o.into()),
+                            ("x", x.into()),
+                            ("co", co.to_string()),
+                            ("xs", tplane(ctx, x, "s", "f_i")),
+                            ("xe", tplane(ctx, x, "e", "f_i")),
+                            ("xm", tplane(ctx, x, "m", "f_i")),
+                            ("xz", tplane(ctx, x, "z", "f_i")),
+                        ],
+                    ),
+                    None,
+                ))
+            } else {
+                Ok((
+                    fill(
+                        r#"/* {o} = RELU({x}) T sign/zero move */
+for (int64_t f_i = 0; f_i < {co}; ++f_i) {
+  if ({xz} == 0 && {xs} < 0) {{ {o}_s[f_i] = 1; {o}_e[f_i] = 32768; {o}_z[f_i] = 1; }}
+  else {{ {o}_s[f_i] = {xs}; {o}_e[f_i] = {xe}; {o}_z[f_i] = {xz}; }}
+}"#,
+                        &[
+                            ("o", o.into()),
+                            ("x", x.into()),
+                            ("co", co.to_string()),
+                            ("xs", tplane(ctx, x, "s", "f_i")),
+                            ("xe", tplane(ctx, x, "e", "f_i")),
+                            ("xz", tplane(ctx, x, "z", "f_i")),
+                        ],
+                    ),
+                    None,
+                ))
+            }
         }
         "SILU" => {
             let a = args[0].as_str();
