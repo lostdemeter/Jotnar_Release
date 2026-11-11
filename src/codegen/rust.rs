@@ -731,24 +731,14 @@ fn pattern_rust(
                 return Err(Error::asm("Rust SLICE: bad bounds"));
             }
             let (outer, inner) = if ax == 0 { (hi - lo, w) } else { (h, hi - lo) };
-            let src = |r: usize, c: usize| {
-                if ax == 0 {
-                    format!("{x}[{} * {w} + {c}]", r + lo)
-                } else {
-                    format!("{x}[{r} * {w} + {}]", c + lo)
-                }
+            let src = if ax == 0 {
+                format!("{x}[(r + {lo}) * {w} + c]")
+            } else {
+                format!("{x}[r * {w} + (c + {lo})]")
             };
-            let mut body = String::new();
-            for r in 0..outer {
-                for c in 0..inner {
-                    body.push_str(&format!(
-                        "{o}[{r} * {inner} + {c}] = {};
-",
-                        src(r, c)
-                    ));
-                }
-            }
-            Ok(body)
+            Ok(format!(
+                "for r in 0..{outer} {{ for c in 0..{inner} {{ {o}[r * {inner} + c] = {src}; }} }}"
+            ))
         }
         "TRANSPOSE" => {
             let x = args[0].as_str();
