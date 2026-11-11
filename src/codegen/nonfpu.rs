@@ -69,6 +69,8 @@ const INTEGER_MN: &[&str] = &[
     "TSHIFT",
     "SOFTMAX_WIDE",
     "SOFTMAX",
+    "LAYERNORM",
+    "GELU",
     "TBETA",
     "BETA",
     "ROTARY",
@@ -86,6 +88,8 @@ const FX_MN: &[&str] = &[
     "TSHIFT",
     "SOFTMAX_WIDE",
     "SOFTMAX",
+    "LAYERNORM",
+    "GELU",
     "TBETA",
     "BETA",
     "ROTARY",
@@ -123,13 +127,17 @@ fn bake_vec(name: &str, arr: &[i64], per_line: usize) -> String {
     )
 }
 
-fn eps_counts(config: &Config, m_cov: i64) -> i64 {
-    if let Some(v) = config.get_f64("eps_rms") {
+fn eps_counts_key(config: &Config, m_cov: i64, fkey: &str, ckey: &str, default: i64) -> i64 {
+    if let Some(v) = config.get_f64(fkey) {
         let um = lattice::PHI.powf((m_cov - lattice::BIAS) as f64 / lattice::K as f64);
         lattice::round_half_even(v * ((1i64 << 36) as f64) / (um * um)) as i64
     } else {
-        config.get_i64_or("eps_rms_c", 4514)
+        config.get_i64_or(ckey, default)
     }
+}
+
+fn eps_counts(config: &Config, m_cov: i64) -> i64 {
+    eps_counts_key(config, m_cov, "eps_rms", "eps_rms_c", 4514)
 }
 
 const NF_F2I_HELPER: &str = r#"
@@ -340,6 +348,63 @@ static void nf_silu(int8_t s, int32_t e, uint8_t z,
 }
 "#;
 
+const NF_LAYERNORM_HELPERS: &str = r#"
+static void nf_layernorm_row(const int8_t *xs, const int32_t *xe, const uint8_t *xz,
+                             const int8_t *ws, const int32_t *we, const uint8_t *wz,
+                             const int8_t *bs, const int32_t *be, const uint8_t *bz,
+                             int64_t C, int m, int64_t epsc,
+                             int8_t *os, int32_t *oe, uint8_t *oz,
+                             int64_t *q, int64_t *wq, int64_t *bq) {
+  for (int64_t j = 0; j < C; ++j) {
+    q[j] = nf_to_fixed(xs[j], xe[j], xz[j], m);
+    wq[j] = nf_to_fixed(ws[j], we[j], wz[j], m);
+    bq[j] = nf_to_fixed(bs[j], be[j], bz[j], m);
+  }
+  __int128 sum = 0;
+  for (int64_t j = 0; j < C; ++j) sum += q[j];
+  int64_t mean = (int64_t)(sum / C);
+  __int128 ss = 0;
+  for (int64_t j = 0; j < C; ++j) {
+    int64_t d = q[j] - mean;
+    ss += (__int128)d * d;
+  }
+  int64_t var = (int64_t)(ss / C) + epsc;
+  uint64_t is = nf_isqrt((var >= 0) ? (uint64_t)var : 0);
+  for (int64_t j = 0; j < C; ++j) {
+    int64_t d = q[j] - mean;
+    int64_t norm;
+    if (is == 0) norm = 0;
+    else {
+      __int128 sc = (__int128)d * (int64_t)(1 << 18);
+      norm = (sc >= 0) ? (int64_t)(sc / (int64_t)is)
+                       : -(int64_t)((-sc) / (int64_t)is);
+    }
+    __int128 aw = (__int128)norm * wq[j];
+    int64_t aq = (aw >= 0) ? (int64_t)(aw / (int64_t)(1 << 18))
+                           : -(int64_t)((-aw) / (int64_t)(1 << 18));
+    int64_t av = aq + bq[j];
+    nf_from_fixed(av, m, &os[j], &oe[j], &oz[j]);
+  }
+}
+"#;
+
+const NF_GELU_HELPERS: &str = r#"
+static void nf_gelu(int8_t s, int32_t e, uint8_t z,
+                    int8_t *os, int32_t *oe, uint8_t *oz) {
+  int64_t ee = (int64_t)e;
+  if (ee < 0) ee = 0;
+  if (ee > 65535) ee = 65535;
+  int64_t x14 = z ? 0 : (int64_t)s * NF_GELUX[ee];
+  int64_t p14;
+  if (x14 < -NF_GSPAN) p14 = 0;
+  else if (x14 > NF_GSPAN) p14 = 16384;
+  else p14 = NF_GELUP[x14 + NF_GSPAN];
+  int64_t prod = x14 * p14;
+  int64_t y14 = (prod >= 0) ? (prod / 16384) : -((-prod) / 16384);
+  nf_from_fixed(y14 * 16, 32768, os, oe, oz);
+}
+"#;
+
 pub fn prologue(ctx: &Ctx) -> Result<String> {
     let mut l = String::from(
         "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n",
@@ -394,7 +459,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         }
         if mns
             .iter()
-            .any(|m| SM_MN.contains(&m.as_str()) || m == "RMSNORM")
+            .any(|m| SM_MN.contains(&m.as_str()) || m == "RMSNORM" || m == "LAYERNORM")
         {
             l.push_str(&bake_vec("NF_EXP", lattice::exp_lut(), 8));
             l.push('\n');
@@ -412,6 +477,24 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
             l.push_str(&bake_vec("NF_SIG", lattice::sig_lut(), 8));
             l.push('\n');
             l.push_str(NF_SILU_HELPERS);
+        }
+        if has("LAYERNORM") {
+            l.push_str(&format!(
+                "static const int64_t NF_EPSL = {}LL;\n",
+                eps_counts_key(&ctx.config, m_cov, "eps_ln", "eps_ln_c", 4514)
+            ));
+            l.push_str(NF_LAYERNORM_HELPERS);
+        }
+        if has("GELU") {
+            l.push_str(&bake_vec("NF_GELUX", lattice::sigx_lut(), 8));
+            l.push('\n');
+            l.push_str(&bake_vec("NF_GELUP", lattice::phi_lut(), 8));
+            l.push('\n');
+            l.push_str(&format!(
+                "static const int64_t NF_GSPAN = {}LL;\n",
+                lattice::SIG_SPAN
+            ));
+            l.push_str(NF_GELU_HELPERS);
         }
         if has("T2I") {
             l.push_str(&bake_vec("NF_T2I", lattice::t2i_lut(), 8));
@@ -853,6 +936,48 @@ for (int64_t w_b = 0; w_b < {batch}; ++w_b)
                     None,
                 ))
             }
+        }
+        "LAYERNORM" => {
+            let (x, w, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let d = ctx.width(x, "nonfpu LAYERNORM")?;
+            let rows = ctx.elems(x)? / d;
+            Ok((
+                fill(
+                    r#"/* {o} = LAYERNORM({x},{w},{b}) integer rows @ NF_M */
+{lbrace} int64_t *_q = malloc({d} * 8);
+  int64_t *_wq = malloc({d} * 8);
+  int64_t *_bq = malloc({d} * 8);
+  for (int64_t r_i = 0; r_i < {rows}; ++r_i)
+    nf_layernorm_row(&{x}_s[r_i * {d}], &{x}_e[r_i * {d}], &{x}_z[r_i * {d}],
+      {w}_s, {w}_e, {w}_z, {b}_s, {b}_e, {b}_z,
+      {d}, NF_M, NF_EPSL,
+      &{o}_s[r_i * {d}], &{o}_e[r_i * {d}], &{o}_z[r_i * {d}], _q, _wq, _bq);
+  free(_q); free(_wq); free(_bq); {rbrace}"#,
+                    &[
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("d", d.to_string()),
+                        ("rows", rows.to_string()),
+                        ("lbrace", "{".into()),
+                        ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "GELU" => {
+            let a = args[0].as_str();
+            Ok((
+                fill(
+                    r#"/* {o} = GELU({a}) exact-erf LUT */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_gelu({a}_s[f_i], {a}_e[f_i], {a}_z[f_i], &{o}_s[f_i], &{o}_e[f_i], &{o}_z[f_i]);"#,
+                    &[("o", o.into()), ("a", a.into()), ("co", co.to_string())],
+                ),
+                None,
+            ))
         }
         "RMSNORM" => {
             let (x, w) = (args[0].as_str(), args[1].as_str());
