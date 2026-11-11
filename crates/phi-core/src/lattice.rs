@@ -57,6 +57,34 @@ fn round_i64(x: f64) -> i64 {
     round_half_even(x) as i64
 }
 
+/// Fraction LUT at an explicit fixed-point width. Used by opt-in
+/// higher-precision NonFpu bridges; the frozen default is FIXED_F.
+pub fn frac_cap_for(f: i64) -> i64 {
+    if f == FIXED_F {
+        return FRAC_CAP;
+    }
+    (((f as f64 + 1.0) * K as f64 * LN_2 / LN_PHI).ceil() as i64) + 16
+}
+
+pub fn l_frac_for(f: i64) -> Vec<i64> {
+    if f == FIXED_F {
+        return l_frac().to_vec();
+    }
+    let cap = frac_cap_for(f);
+    (0..=cap)
+        .map(|i| round_i64(PHI.powf(-(i as f64) / K as f64) * (1i64 << f) as f64))
+        .collect()
+}
+
+pub fn frac_hi_for(f: i64) -> Vec<i64> {
+    if f == FIXED_F {
+        return frac_hi_lut().to_vec();
+    }
+    (1..=WIDE_CAP)
+        .map(|k| round_i64(PHI.powf(k as f64 / K as f64) * (1i64 << f) as f64))
+        .collect()
+}
+
 pub fn l_frac() -> &'static [i64] {
     L_FRAC.get_or_init(|| {
         (0..=FRAC_CAP)
