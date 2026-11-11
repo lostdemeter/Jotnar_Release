@@ -20,6 +20,7 @@ pub fn const_like(shape: &[usize], v: f64) -> Triple {
         s: ArrayD::from_elem(IxDyn(shape), s),
         e: ArrayD::from_elem(IxDyn(shape), e),
         z: ArrayD::from_elem(IxDyn(shape), 0u8),
+        m: None,
     }
 }
 
@@ -54,6 +55,10 @@ fn const_from_scalar(t: &Triple, shape: &[usize]) -> Triple {
         s: ArrayD::from_elem(IxDyn(shape), t.s.iter().next().copied().unwrap_or(1)),
         e: ArrayD::from_elem(IxDyn(shape), t.e.iter().next().copied().unwrap_or(0)),
         z: ArrayD::from_elem(IxDyn(shape), t.z.iter().next().copied().unwrap_or(0)),
+        m: t
+            .m
+            .as_ref()
+            .map(|m| ArrayD::from_elem(IxDyn(shape), m.iter().next().copied().unwrap_or(0))),
     }
 }
 

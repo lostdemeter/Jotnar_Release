@@ -19,6 +19,7 @@ pub mod element;
 pub mod image;
 pub mod int;
 pub mod linalg;
+pub mod t2;
 
 pub type OpFn = fn(&[Arg], &Config) -> Result<Vec<Value>>;
 
@@ -512,6 +513,9 @@ fn build_registry() -> Registry {
 /// Dispatch one instruction. Arity/layout are the assembler's job; this is
 /// the runtime call boundary.
 pub fn dispatch(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    if let Some(r) = t2::dispatch(name, args, config) {
+        return r;
+    }
     let def = registry()
         .get(name)
         .ok_or_else(|| Error::asm(format!("unknown mnemonic: {name}")))?;

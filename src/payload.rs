@@ -96,7 +96,28 @@ fn decode_stream(v: &Json, name: &str) -> Result<Value> {
                     "stream '{name}': T planes do not match shape {shape:?}"
                 )));
             }
-            Ok(Value::Triple(Triple::from_vecs(&shape, s, e, z)?))
+            // Optional T2 mantissa plane; its presence selects the phi-float
+            // format for this stream. Kept under kind "T" so frozen T
+            // payloads and listings are byte-compatible.
+            let m = match v.get("m") {
+                Some(arr) => {
+                    let arr = arr.as_array().ok_or_else(|| {
+                        Error::runtime(format!("stream '{name}': T.m must be an array"))
+                    })?;
+                    let mv: Vec<i32> = arr
+                        .iter()
+                        .map(|x| num_i64(x, "T.m").map(|v| v as i32))
+                        .collect::<Result<_>>()?;
+                    if mv.len() != expected {
+                        return Err(Error::runtime(format!(
+                            "stream '{name}': T.m does not match shape {shape:?}"
+                        )));
+                    }
+                    Some(mv)
+                }
+                None => None,
+            };
+            Ok(Value::Triple(Triple::from_vecs_opt(&shape, s, e, z, m)?))
         }
         "F64" | "F" => {
             let d: Vec<f64> = data_of(v, "data")?
@@ -207,13 +228,18 @@ pub fn value_to_json(v: &Value) -> Result<Json> {
             "shape": a.shape(),
             "data": arr_json(a, |x| json!(x)),
         })),
-        Value::Triple(t) => Ok(json!({
-            "kind": "T",
-            "shape": t.shape(),
-            "s": arr_json(&t.s, |x| json!(x)),
-            "e": arr_json(&t.e, |x| json!(x)),
-            "z": arr_json(&t.z, |x| json!(x)),
-        })),
+        Value::Triple(t) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("kind".into(), json!("T"));
+            obj.insert("shape".into(), json!(t.shape()));
+            obj.insert("s".into(), arr_json(&t.s, |x| json!(x)));
+            obj.insert("e".into(), arr_json(&t.e, |x| json!(x)));
+            obj.insert("z".into(), arr_json(&t.z, |x| json!(x)));
+            if let Some(m) = &t.m {
+                obj.insert("m".into(), arr_json(m, |x| json!(x)));
+            }
+            Ok(Json::Object(obj))
+        }
         Value::None => Ok(Json::Null),
     }
 }

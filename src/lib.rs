@@ -40,5 +40,6 @@ pub mod verilog;
 
 pub use error::{Error, Result};
 pub use ir::{BoundProgram, Config, InDecl, Instr, Program};
+pub use phi_core::t2;
 pub use runtime::run_text;
 pub use value::{Triple, Value};
