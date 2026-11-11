@@ -1256,7 +1256,7 @@ cargo build --release
 </tbody></table>
 <p><code>run_doom_demo.sh</code> is <strong>playable by default</strong>. <code>--frames N</code> is the headless path. If the external image or WAD is absent, the script falls back to the checked-in reference title and does not pretend the live run happened.</p>
 <aside class="warning span-all"><div class="aside-title">DRAFT NOTICE</div><p>This is <strong>issue 01</strong>, a first rough draft. Some chapters describe behavior that is gated by parity scripts but not yet exposed in the CLI. Some commands are stable; some are scaffolding. Where the manual and the assembler disagree, the assembler wins. Where the assembler and the oracle disagree, the parity harness wins. Where the harness and reality disagree, file a bug.</p>
-</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>201/201 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
+</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>218/218 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
 </aside><h2>Conventions</h2>
 <table><thead><tr><th>Convention</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>UPPERCASE</code></td><td>A mnemonic, directive, or keyword.</td></tr>
@@ -1787,8 +1787,11 @@ Addition aligns to the larger exponent and uses the fixed-point bridge.</p>
 byte-for-byte. On the non-FPU target, T2 currently lowers <code>MUL</code>,
 <code>SQUARE</code>, <code>ADD</code>, <code>SUB</code>, <code>MATMUL</code>, <code>LAYERNORM</code>, <code>GELU</code>, <code>SOFTMAX</code>,
 <code>SOFTMAX_WIDE</code>, <code>TRANSPOSE</code>, and <code>CONCAT</code>; other ops refuse with a typed
-<code>Unimplemented</code> error rather than falling back to float. See
-<code>docs/T2_PHI_FLOAT.md</code> for the format, rounding, and gate.</p>
+<code>Unimplemented</code> error rather than falling back to float. The
+fixed-point bridge uses a <code>u128</code> magnitude; <code>i64::MIN</code>/<code>i64::MAX</code>
+saturate at the high T2 exponent (the documented overflow boundary)
+instead of wrapping. See <code>docs/T2_PHI_FLOAT.md</code> for the format,
+rounding, and gate.</p>
 <aside class="warning span-all"><div class="aside-title">OPT-IN, NOT THE DEFAULT</div><p>T2 changes the datapath. Use it when the lattice-snap precision is the
 bottleneck, and gate it against the frozen T reference. The frozen T
 format remains the default contract.</p>
@@ -2807,7 +2810,7 @@ cargo run -p jotnar-lab -- bench doom \
   --runner target/release/jotnar-demo-doom --runs 3 \
   --certificate certificates/doom/native-gpu-migration.json
 </code></pre>
-<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>201/201</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
+<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>218/218</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
 </aside><h2>What the harness must not do</h2>
 <ul>
 <li>It must not call a blocked run a pass.</li>

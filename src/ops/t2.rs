@@ -10,11 +10,7 @@ use crate::ir::Config;
 use crate::value::{Arg, Triple, Value};
 
 fn m_bits(config: &Config) -> Option<i64> {
-    config.get_i64("t2").filter(|m| *m > 0)
-}
-
-fn f_bits(config: &Config, m: i64) -> i64 {
-    config.get_i64("bridge_f").unwrap_or(m.max(24))
+    config.get_i64("t2")
 }
 
 fn eps(config: &Config) -> f64 {
@@ -24,15 +20,17 @@ fn eps(config: &Config) -> f64 {
 fn triple<'a>(args: &'a [Arg], i: usize, op: &str) -> Result<&'a Triple> {
     match args.get(i).and_then(|a| a.value()) {
         Some(Value::Triple(t)) => Ok(t),
-        _ => Err(Error::runtime(format!("{op}: argument {i} must be a T2 stream"))),
+        _ => Err(Error::runtime(format!(
+            "{op}: argument {i} must be a T2 stream"
+        ))),
     }
 }
 
 /// Route an instruction when any argument is T2. `None` means "not T2".
 pub fn dispatch(name: &str, args: &[Arg], config: &Config) -> Option<Result<Vec<Value>>> {
-    let any_t2 = args.iter().any(|a| {
-        matches!(a.value(), Some(Value::Triple(t)) if t.is_t2())
-    });
+    let any_t2 = args
+        .iter()
+        .any(|a| matches!(a.value(), Some(Value::Triple(t)) if t.is_t2()));
     if !any_t2 {
         return None;
     }
@@ -40,7 +38,8 @@ pub fn dispatch(name: &str, args: &[Arg], config: &Config) -> Option<Result<Vec<
 }
 
 fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let m = match m_bits(config) {
+    let (m, f) = phi_core::t2::check_widths(m_bits(config), config.get_i64("bridge_f"))?;
+    let m = match m {
         Some(m) => m,
         None => {
             return Err(Error::runtime(
@@ -48,7 +47,6 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             ))
         }
     };
-    let f = f_bits(config, m);
     let tabs = phi_core::t2::Tables::new(f);
     let one = |v: Triple| Ok(vec![Value::Triple(v)]);
     match name {
@@ -83,14 +81,9 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             eps(config),
         )?),
         "GELU" => one(phi_core::t2::gelu(triple(args, 0, name)?, &tabs, m)?),
-        "SOFTMAX" | "SOFTMAX_WIDE" => {
-            one(phi_core::t2::softmax(triple(args, 0, name)?, &tabs, m)?)
-        }
+        "SOFTMAX" | "SOFTMAX_WIDE" => one(phi_core::t2::softmax(triple(args, 0, name)?, &tabs, m)?),
         "TRANSPOSE" => one(transpose(triple(args, 0, name)?)?),
-        "CONCAT" => one(concat(
-            triple(args, 0, name)?,
-            triple(args, 1, name)?,
-        )?),
+        "CONCAT" => one(concat(triple(args, 0, name)?, triple(args, 1, name)?)?),
         other => Err(Error::unimplemented(format!(
             "T2: no non-FPU reference for {other} (supported: MUL, SQUARE, ADD, SUB, \
              MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE, TRANSPOSE, CONCAT)"

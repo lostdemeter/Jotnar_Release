@@ -112,6 +112,13 @@ integer normalisation, convert back. T2 has the full fixed range, so
 
 `TRANSPOSE` and `CONCAT` are exact 4-plane moves.
 
+### Overflow boundary
+
+`from_fixed` uses a `u128`/`i128` magnitude, so `i64::MIN` does not wrap.
+Both `i64::MIN` and `i64::MAX` saturate at the high T2 exponent (the
+representable bridge boundary); this is documented behavior, not a panic.
+The add/matmul/layernorm clamps share that boundary.
+
 ## Reference semantics and gates
 
 `phi_core::t2` is the integer reference. The interpreter routes any

@@ -583,11 +583,8 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
     if mns.iter().any(|m| is_fx(m)) {
         let m_cov = ctx.config.get_i64_or("m_cov", 33280);
         let m_acc = ctx.config.get_i64_or("m_acc", 31344);
-        let t2_m = ctx.t2_m;
-        let bridge_f = ctx.config.get_i64_or(
-            "bridge_f",
-            t2_m.map(|m| m.max(24)).unwrap_or(lattice::FIXED_F),
-        );
+        let (t2_m, bridge_f) =
+            phi_core::t2::check_widths(ctx.t2_m, ctx.config.get_i64("bridge_f"))?;
         let frac = lattice::l_frac_for(bridge_f);
         l.push_str(&bake_vec("NF_FRAC", &frac, 16));
         l.push('\n');
@@ -664,9 +661,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
                 ctx.config.get_f64_or("eps_ln", 1e-6) * (1i64 << 30) as f64,
             ) as i64;
             l.push_str(&format!("static const int NF_T2_M = {m};\n"));
-            l.push_str(&format!(
-                "static const int64_t NF_T2_SCALE = 1LL << {m};\n"
-            ));
+            l.push_str(&format!("static const int64_t NF_T2_SCALE = 1LL << {m};\n"));
             l.push_str(&format!(
                 "static const int64_t NF_T2_HALF = 1LL << {};\n",
                 m - 1
@@ -794,7 +789,9 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
   nf_t2_mul({as}, {ae}, {am}, {az}, {bs}, {be}, {bm}, {bz},
             &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
                     &[
-                        ("o", o.into()), ("a", a.into()), ("b", b.into()),
+                        ("o", o.into()),
+                        ("a", a.into()),
+                        ("b", b.into()),
                         ("as", tplane(ctx, a, "s", "f_i")),
                         ("ae", tplane(ctx, a, "e", "f_i")),
                         ("am", tplane(ctx, a, "m", "f_i")),
@@ -818,7 +815,8 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
   nf_t2_mul({as}, {ae}, {am}, {az}, {as}, {ae}, {am}, {az},
             &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
                     &[
-                        ("o", o.into()), ("a", a.into()),
+                        ("o", o.into()),
+                        ("a", a.into()),
                         ("as", tplane(ctx, a, "s", "f_i")),
                         ("ae", tplane(ctx, a, "e", "f_i")),
                         ("am", tplane(ctx, a, "m", "f_i")),
@@ -839,7 +837,10 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
   nf_t2_add({as}, {ae}, {am}, {az}, {bs}, {be}, {bm}, {bz}, {sub},
             &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
                     &[
-                        ("o", o.into()), ("mn", mn.into()), ("a", a.into()), ("b", b.into()),
+                        ("o", o.into()),
+                        ("mn", mn.into()),
+                        ("a", a.into()),
+                        ("b", b.into()),
                         ("as", tplane(ctx, a, "s", "f_i")),
                         ("ae", tplane(ctx, a, "e", "f_i")),
                         ("am", tplane(ctx, a, "m", "f_i")),
@@ -900,8 +901,12 @@ for (int64_t w_i = 0; w_i < {m}; ++w_i)
       &{o}_s[oi], &{o}_e[oi], &{o}_m[oi], &{o}_z[oi]);
   }"#,
                     &[
-                        ("o", o.into()), ("a", a.into()), ("b", b.into()),
-                        ("m", m.to_string()), ("k", k.to_string()), ("n", n.to_string()),
+                        ("o", o.into()),
+                        ("a", a.into()),
+                        ("b", b.into()),
+                        ("m", m.to_string()),
+                        ("k", k.to_string()),
+                        ("n", n.to_string()),
                     ],
                 ),
                 None,
@@ -924,9 +929,14 @@ for (int64_t w_i = 0; w_i < {m}; ++w_i)
       &{o}_s[r_i * {d}], &{o}_e[r_i * {d}], &{o}_m[r_i * {d}], &{o}_z[r_i * {d}]);
   free(_q); free(_wq); free(_bq); {rbrace}"#,
                     &[
-                        ("o", o.into()), ("x", x.into()), ("w", w.into()), ("b", b.into()),
-                        ("d", d.to_string()), ("rows", rows.to_string()),
-                        ("lbrace", "{".into()), ("rbrace", "}".into()),
+                        ("o", o.into()),
+                        ("x", x.into()),
+                        ("w", w.into()),
+                        ("b", b.into()),
+                        ("d", d.to_string()),
+                        ("rows", rows.to_string()),
+                        ("lbrace", "{".into()),
+                        ("rbrace", "}".into()),
                     ],
                 ),
                 None,
@@ -940,7 +950,8 @@ for (int64_t w_i = 0; w_i < {m}; ++w_i)
 for (int64_t f_i = 0; f_i < {co}; ++f_i)
   nf_t2_gelu({as}, {ae}, {am}, {az}, &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
                     &[
-                        ("o", o.into()), ("a", a.into()),
+                        ("o", o.into()),
+                        ("a", a.into()),
                         ("as", tplane(ctx, a, "s", "f_i")),
                         ("ae", tplane(ctx, a, "e", "f_i")),
                         ("am", tplane(ctx, a, "m", "f_i")),
@@ -964,7 +975,9 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
       {d}, _q, _num, &{o}_s[f_i * {d}], &{o}_e[f_i * {d}], &{o}_m[f_i * {d}], &{o}_z[f_i * {d}]);
   free(_q); free(_num); }"#,
                     &[
-                        ("o", o.into()), ("mn", mn.into()), ("x", x.into()),
+                        ("o", o.into()),
+                        ("mn", mn.into()),
+                        ("x", x.into()),
                         ("d", d.to_string()),
                     ],
                 ),

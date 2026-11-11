@@ -85,8 +85,11 @@ T2 is **opt-in**. Listings without `CONFIG t2` emit the frozen T path
 byte-for-byte. On the non-FPU target, T2 currently lowers `MUL`,
 `SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`, `SOFTMAX`,
 `SOFTMAX_WIDE`, `TRANSPOSE`, and `CONCAT`; other ops refuse with a typed
-`Unimplemented` error rather than falling back to float. See
-`docs/T2_PHI_FLOAT.md` for the format, rounding, and gate.
+`Unimplemented` error rather than falling back to float. The
+fixed-point bridge uses a `u128` magnitude; `i64::MIN`/`i64::MAX`
+saturate at the high T2 exponent (the documented overflow boundary)
+instead of wrapping. See `docs/T2_PHI_FLOAT.md` for the format,
+rounding, and gate.
 
 ::: warning [OPT-IN, NOT THE DEFAULT]
 T2 changes the datapath. Use it when the lattice-snap precision is the

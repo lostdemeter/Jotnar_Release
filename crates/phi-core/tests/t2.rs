@@ -8,7 +8,9 @@ use phi_core::t2::{self, Tables, T2};
 use phi_core::Triple;
 
 fn lcg(seed: &mut u64) -> f64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
 }
 
@@ -70,10 +72,10 @@ fn fixed_roundtrip_is_canonical() {
     for _ in 0..2000 {
         let v = lcg(&mut seed) * 1e4;
         let p = t2::encode(v, m);
-        let q = t2::to_fixed(p, 32768, &tabs);
+        let q = t2::to_fixed(p, 32768, &tabs, m);
         let t = t2::from_fixed(q, 32768, &tabs, m);
         assert!(t.m >= -(half as i32) && t.m < half as i32);
-        let q2 = t2::to_fixed(t, 32768, &tabs);
+        let q2 = t2::to_fixed(t, 32768, &tabs, m);
         assert!(rel(q2 as f64, q as f64) < 2.0f64.powi(-(m as i32)) * 4.0);
     }
 }
@@ -86,8 +88,14 @@ fn matmul_and_layernorm_close_f64() {
     let (rows, k, cols) = (3usize, 8usize, 4usize);
     let av: Vec<f64> = (0..rows * k).map(|_| lcg(&mut seed) * 2.0).collect();
     let bv: Vec<f64> = (0..k * cols).map(|_| lcg(&mut seed) * 2.0).collect();
-    let a = t2::encode_array(&ArrayD::from_shape_vec(IxDyn(&[rows, k]), av.clone()).unwrap(), m);
-    let b = t2::encode_array(&ArrayD::from_shape_vec(IxDyn(&[k, cols]), bv.clone()).unwrap(), m);
+    let a = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[rows, k]), av.clone()).unwrap(),
+        m,
+    );
+    let b = t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(&[k, cols]), bv.clone()).unwrap(),
+        m,
+    );
     let got = t2::matmul2(&a, &b, &tabs, m).unwrap();
     let g = t2::decode_array(&got, m).unwrap();
     for i in 0..rows {
@@ -111,4 +119,47 @@ fn triple_mantissa_is_optional() {
     )
     .unwrap();
     assert!(t2v.is_t2());
+}
+
+#[test]
+fn to_fixed_uses_mantissa_width() {
+    for (m, f) in [(24i64, 30i64), (18, 24)] {
+        let t = t2::encode(1.5, m);
+        let q = t2::to_fixed(t, 32768, &Tables::new(f), m);
+        let v = q as f64 / (1i64 << f) as f64;
+        assert!((v - 1.5).abs() < 1e-5, "M={m} F={f}: {v}");
+    }
+}
+
+#[test]
+fn from_fixed_min_max_do_not_wrap() {
+    let tabs = Tables::new(24);
+    let lo = t2::from_fixed(i64::MIN, 32768, &tabs, 24);
+    let hi = t2::from_fixed(i64::MAX, 32768, &tabs, 24);
+    assert_eq!(lo.s, -1);
+    assert_eq!(hi.s, 1);
+    assert!(lo.e >= 0 && lo.e <= 65535, "MIN e={}", lo.e);
+    assert!(hi.e >= 0 && hi.e <= 65535, "MAX e={}", hi.e);
+    assert!(
+        lo.e > 60000,
+        "MIN e={} (should be the high bridge range)",
+        lo.e
+    );
+    assert!(hi.e > 60000, "MAX e={}", hi.e);
+    assert_eq!(lo.e, hi.e, "MIN/MAX magnitudes must agree");
+}
+
+#[test]
+fn config_widths_are_typed_errors() {
+    assert!(t2::check_widths(Some(64), None).is_err());
+    assert!(t2::check_widths(Some(0), None).is_err());
+    assert!(t2::check_widths(None, Some(0)).is_err());
+    assert!(t2::check_widths(None, Some(13)).is_err());
+    assert!(t2::check_widths(None, Some(63)).is_err());
+    let (_, f) = t2::check_widths(Some(24), Some(18)).unwrap();
+    assert_eq!(f, 24);
+    let (_, f) = t2::check_widths(Some(30), Some(30)).unwrap();
+    assert_eq!(f, 30);
+    let (_, f) = t2::check_widths(None, None).unwrap();
+    assert_eq!(f, 18);
 }

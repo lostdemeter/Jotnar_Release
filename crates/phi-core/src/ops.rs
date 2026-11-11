@@ -55,8 +55,7 @@ fn const_from_scalar(t: &Triple, shape: &[usize]) -> Triple {
         s: ArrayD::from_elem(IxDyn(shape), t.s.iter().next().copied().unwrap_or(1)),
         e: ArrayD::from_elem(IxDyn(shape), t.e.iter().next().copied().unwrap_or(0)),
         z: ArrayD::from_elem(IxDyn(shape), t.z.iter().next().copied().unwrap_or(0)),
-        m: t
-            .m
+        m: t.m
             .as_ref()
             .map(|m| ArrayD::from_elem(IxDyn(shape), m.iter().next().copied().unwrap_or(0))),
     }

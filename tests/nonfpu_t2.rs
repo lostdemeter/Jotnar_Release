@@ -35,7 +35,10 @@ MM = MATMUL(A, B2)
 ";
 
 fn arr(shape: &[usize], v: &[f64]) -> Triple {
-    t2::encode_array(&ArrayD::from_shape_vec(IxDyn(shape), v.to_vec()).unwrap(), 24)
+    t2::encode_array(
+        &ArrayD::from_shape_vec(IxDyn(shape), v.to_vec()).unwrap(),
+        24,
+    )
 }
 
 fn feeds() -> Feeds {
@@ -56,14 +59,8 @@ fn feeds() -> Feeds {
         "X".into(),
         Value::Triple(arr(&[2, 3], &[0.1, -0.2, 0.3, 1.5, -2.5, 0.5])),
     );
-    f.insert(
-        "W".into(),
-        Value::Triple(arr(&[3], &[2.0, 0.5, 1.5])),
-    );
-    f.insert(
-        "BB".into(),
-        Value::Triple(arr(&[3], &[0.1, -0.2, 0.3])),
-    );
+    f.insert("W".into(), Value::Triple(arr(&[3], &[2.0, 0.5, 1.5])));
+    f.insert("BB".into(), Value::Triple(arr(&[3], &[0.1, -0.2, 0.3])));
     f
 }
 
@@ -115,7 +112,15 @@ fn nonfpu_t2_matches_interpreter() {
     let expected = jotnar::run_text(LISTING, &AsmOptions::new("."), &f).expect("interpreter");
     let opts = CompileOptions {
         target: Target::NonFpu,
-        outputs: vec!["M".into(), "S".into(), "D".into(), "LN".into(), "G".into(), "SM".into(), "MM".into()],
+        outputs: vec![
+            "M".into(),
+            "S".into(),
+            "D".into(),
+            "LN".into(),
+            "G".into(),
+            "SM".into(),
+            "MM".into(),
+        ],
         asm: AsmOptions::new("."),
         use_fp16: false,
     };
@@ -133,7 +138,12 @@ fn nonfpu_t2_matches_interpreter() {
     }
     for name in ["M", "S", "D", "LN", "G", "SM", "MM"] {
         for comp in ["s", "e", "m", "z"] {
-            argv.push(dir.path().join(format!("{name}_{comp}.bin")).to_string_lossy().into_owned());
+            argv.push(
+                dir.path()
+                    .join(format!("{name}_{comp}.bin"))
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     let status = Command::new(&exe).args(&argv).status().expect("run");
@@ -163,4 +173,50 @@ fn nonfpu_t2_matches_interpreter() {
         );
         assert_eq!(&got.z, &want.z, "{name} zero");
     }
+}
+
+fn single_feed() -> Feeds {
+    let mut f = Feeds::new();
+    f.insert(
+        "A".into(),
+        Value::Triple(arr(&[2, 2], &[0.5, -1.25, 2.0, -0.75])),
+    );
+    f
+}
+
+#[test]
+fn t2_requires_nonfpu_target() {
+    let listing = "CONFIG t2 24\nIN A AS T:HW\nOUT = TRANSPOSE(A)\n";
+    for target in [Target::C, Target::Rust, Target::Cuda] {
+        let opts = CompileOptions {
+            target,
+            outputs: vec!["OUT".into()],
+            asm: AsmOptions::new("."),
+            use_fp16: false,
+        };
+        let err = compile_program(listing, &opts, single_feed())
+            .expect_err("T2 must not lower on a non-NonFpu target");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("T2 requires --target nonfpu"),
+            "target {target:?}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn invalid_t2_widths_are_typed_errors() {
+    for cfg in ["t2 64", "t2 0", "bridge_f 0", "bridge_f 13", "bridge_f 63"] {
+        let listing = format!("CONFIG {cfg}\nIN A AS T:HW\nOUT = MUL(A, A)\n");
+        let r = jotnar::run_text(&listing, &AsmOptions::new("."), &single_feed());
+        assert!(r.is_err(), "CONFIG {cfg} must refuse");
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("t2") || msg.contains("bridge_f"),
+            "CONFIG {cfg}: {msg}"
+        );
+    }
+    // bridge_f below M is raised to the validated T2 bridge width.
+    let listing = "CONFIG t2 24\nCONFIG bridge_f 18\nIN A AS T:HW\nOUT = MUL(A, A)\n";
+    assert!(jotnar::run_text(listing, &AsmOptions::new("."), &single_feed()).is_ok());
 }

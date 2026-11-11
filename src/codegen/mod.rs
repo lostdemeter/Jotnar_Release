@@ -315,6 +315,16 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
             "compile_program needs outputs=[...] (OUT streams)",
         ));
     }
+    // Assemble once so the T2 target guard and width validation apply to
+    // every backend, including CUDA/Rust (which re-assemble below).
+    let mut bound = asm::assemble(text, &opts.asm)?;
+    let (t2_cfg, _f_bits) =
+        phi_core::t2::check_widths(bound.config.get_i64("t2"), bound.config.get_i64("bridge_f"))?;
+    if t2_cfg.is_some() && opts.target != Target::NonFpu {
+        return Err(Error::unimplemented(
+            "T2 requires --target nonfpu (no silent mantissa drop)",
+        ));
+    }
     if opts.target == Target::Cuda {
         return cuda::compile_cuda(text, opts, sample);
     }
@@ -322,7 +332,6 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         return rust::compile_rust(text, opts, sample);
     }
     let nonfpu = opts.target == Target::NonFpu;
-    let mut bound = asm::assemble(text, &opts.asm)?;
     let mut sample = sample;
     let mut outputs = opts.outputs.clone();
     sanitize_cnames(&mut bound, &mut outputs, &mut sample)?;
@@ -383,11 +392,7 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         }
     }
 
-    let t2_m = if nonfpu {
-        bound.config.get_i64("t2").filter(|m| *m > 0)
-    } else {
-        None
-    };
+    let t2_m = if nonfpu { t2_cfg } else { None };
     let t2 = t2_m.is_some();
 
     let mut ctx = Ctx {

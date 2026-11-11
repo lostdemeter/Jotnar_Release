@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde_json::{json, Value as Json};
@@ -20,6 +20,28 @@ fn wait_for_port(addr: &str) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+/// Spawn a node on a fresh port, retrying if another test grabbed the
+/// just-freed port between `free_port()` and the node bind. This keeps the
+/// default parallel `cargo test --workspace` reliable.
+fn spawn_node(extra: &[&str]) -> (Child, String) {
+    let bin = env!("CARGO_BIN_EXE_jotnar-node");
+    for _ in 0..20 {
+        let addr = free_port();
+        let mut child = Command::new(bin)
+            .arg("--bind")
+            .arg(&addr)
+            .args(extra)
+            .spawn()
+            .expect("spawn jotnar-node");
+        if wait_for_port(&addr) {
+            return (child, addr);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    panic!("jotnar-node did not listen after 20 fresh-port retries");
 }
 
 #[test]
@@ -74,16 +96,7 @@ fn repl_runs_actual_binary_and_survives_bad_lines() {
 
 #[test]
 fn node_binary_loopback_no_token_and_token_gate() {
-    let bin = env!("CARGO_BIN_EXE_jotnar-node");
-    let addr = free_port();
-    let mut child = Command::new(bin)
-        .arg("--bind")
-        .arg(&addr)
-        .arg("--token")
-        .arg("s3cret")
-        .spawn()
-        .expect("spawn jotnar-node");
-    assert!(wait_for_port(&addr), "node did not listen on {addr}");
+    let (mut child, addr) = spawn_node(&["--token", "s3cret"]);
     // Bad token is rejected with unauthorized.
     let frame = request(1, "ping", json!({"auth": "wrong"}), &[]).unwrap();
     let (h, _) = node_roundtrip(&addr, &frame);
@@ -122,16 +135,7 @@ fn node_binary_refuses_non_loopback_and_empty_token() {
 
 #[test]
 fn node_binary_rejects_oversize_frame() {
-    let bin = env!("CARGO_BIN_EXE_jotnar-node");
-    let addr = free_port();
-    let mut child = Command::new(bin)
-        .arg("--bind")
-        .arg(&addr)
-        .arg("--max-frame")
-        .arg("1024")
-        .spawn()
-        .expect("spawn jotnar-node");
-    assert!(wait_for_port(&addr));
+    let (mut child, addr) = spawn_node(&["--max-frame", "1024"]);
     // Server requires no token on loopback; send a frame whose claimed
     // length exceeds the cap. The server replies error/too-large and closes.
     let mut stream = TcpStream::connect(&addr).unwrap();
@@ -212,14 +216,7 @@ fn node_roundtrip(addr: &str, frame: &[u8]) -> (Json, Vec<u8>) {
 
 #[test]
 fn node_loopback_no_token_ping_succeeds() {
-    let bin = env!("CARGO_BIN_EXE_jotnar-node");
-    let addr = free_port();
-    let mut child = Command::new(bin)
-        .arg("--bind")
-        .arg(&addr)
-        .spawn()
-        .expect("spawn jotnar-node");
-    assert!(wait_for_port(&addr), "node did not listen on {addr}");
+    let (mut child, addr) = spawn_node(&[]);
     let frame = request(1, "ping", json!({}), &[]).unwrap();
     let (h, _) = node_roundtrip(&addr, &frame);
     assert_eq!(h["ok"], true);

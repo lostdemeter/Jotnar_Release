@@ -29,6 +29,38 @@ use crate::triple::Triple;
 
 pub const DEFAULT_M: i64 = 24;
 
+/// Validate the T2/bridge configuration widths.
+///
+/// `t2` is the mantissa width M (1..=30), `bridge_f` is the fixed-point
+/// fraction width (14..=62). For T2 the effective bridge is
+/// `max(bridge_f, M, 24)`; a listing must not silently lower the validated
+/// T2 bridge below 24 or below its mantissa width.
+pub fn check_widths(t2: Option<i64>, bridge_f: Option<i64>) -> Result<(Option<i64>, i64)> {
+    if let Some(m) = t2 {
+        if !(1..=30).contains(&m) {
+            return Err(Error::runtime(format!(
+                "CONFIG t2 must be 1..=30 (got {m})"
+            )));
+        }
+    }
+    let bf = match bridge_f {
+        Some(f) => {
+            if !(14..=62).contains(&f) {
+                return Err(Error::runtime(format!(
+                    "CONFIG bridge_f must be 14..=62 (got {f})"
+                )));
+            }
+            f
+        }
+        None => 18,
+    };
+    let f = match t2 {
+        Some(m) => bf.max(m).max(24),
+        None => bf,
+    };
+    Ok((t2, f))
+}
+
 /// Tables at one bridge width. Fractions are `round(PHI^... * 2^f)`.
 pub struct Tables {
     pub f: i64,
@@ -64,7 +96,7 @@ impl Tables {
     }
 }
 
-fn bit_length(mut x: i64) -> i64 {
+fn bit_length(mut x: u128) -> i64 {
     if x <= 0 {
         return 0;
     }
@@ -186,19 +218,17 @@ pub fn decode(t: T2, m_bits: i64) -> f64 {
 }
 
 /// T2 -> fixed-point integer at scale `m0` (integer units of `2^-f`).
-pub fn to_fixed(t: T2, m0: i64, tabs: &Tables) -> i64 {
+///
+/// The residual is `1 + m/2^M`, so the mantissa shift is `m_bits`; the
+/// bridge width `tabs.f` only sets the fixed-point fraction scale.
+pub fn to_fixed(t: T2, m0: i64, tabs: &Tables, m_bits: i64) -> i64 {
     if t.is_zero() {
         return 0;
     }
     let base = tabs.base(m0 - t.e as i64) as i128;
-    let scale = 1i128 << tabs_f(tabs);
-    let q = (base * (scale + t.m as i128) + (scale >> 1)) >> tabs_f(tabs);
+    let scale = 1i128 << m_bits;
+    let q = (base * (scale + t.m as i128) + (scale >> 1)) >> m_bits;
     (t.s as i128 * q) as i64
-}
-
-#[inline]
-fn tabs_f(tabs: &Tables) -> i64 {
-    tabs.f
 }
 
 /// Fixed-point integer at scale `m0` -> canonical T2.
@@ -207,18 +237,18 @@ pub fn from_fixed(q: i64, m0: i64, tabs: &Tables, m_bits: i64) -> T2 {
         return T2::zero();
     }
     let s = if q > 0 { 1 } else { -1 };
-    let a = (q as i128).unsigned_abs() as i128;
-    let a64 = a as i64;
-    let bl = bit_length(a64);
+    // u128 magnitude avoids the i64::MIN wrap in `q.abs()`/`as i64`.
+    let a: u128 = (q as i128).unsigned_abs();
+    let bl = bit_length(a);
     let shift = bl - 15;
-    let mant = if shift >= 0 {
-        a64 >> shift
+    let mant: u128 = if shift >= 0 {
+        a >> shift
     } else {
-        a64 << (-shift)
+        a << (-shift)
     };
     let t = shift + 14 - tabs.f;
     let idx = (t + 64).clamp(0, 192);
-    let fi = (mant - 16384).clamp(0, 16383);
+    let fi = (mant.saturating_sub(16384)).min(16383) as i64;
     let coarse = lattice::l_coarse();
     let fine = lattice::l_fine();
     let e = (m0 + coarse[idx as usize] + fine[fi as usize]).clamp(0, 65535);
@@ -228,7 +258,7 @@ pub fn from_fixed(q: i64, m0: i64, tabs: &Tables, m_bits: i64) -> T2 {
     let m = if base == 0 {
         0
     } else {
-        (round_div_pos(a << m_bits, base) - scale).clamp(-half, half - 1) as i64
+        (round_div_pos((a << m_bits) as i128, base) - scale).clamp(-half, half - 1) as i64
     };
     T2 {
         s,
@@ -268,8 +298,8 @@ pub fn add(a: T2, b: T2, sub: bool, tabs: &Tables, m_bits: i64) -> T2 {
     } else {
         (a.e as i64).max(b.e as i64)
     };
-    let qa = to_fixed(a, m0, tabs);
-    let qb = to_fixed(b, m0, tabs);
+    let qa = to_fixed(a, m0, tabs, m_bits);
+    let qb = to_fixed(b, m0, tabs, m_bits);
     let acc = if sub {
         qa as i128 - qb as i128
     } else {
@@ -284,10 +314,9 @@ pub fn add(a: T2, b: T2, sub: bool, tabs: &Tables, m_bits: i64) -> T2 {
 // ---------------------------------------------------------------------------
 
 fn planes(t: &Triple) -> Result<(&[i8], &[i32], &[i32], &[u8])> {
-    let m = t
-        .m
-        .as_ref()
-        .ok_or_else(|| Error::runtime("T2 op needs a mantissa plane"))?;
+    let m =
+        t.m.as_ref()
+            .ok_or_else(|| Error::runtime("T2 op needs a mantissa plane"))?;
     Ok((
         t.s.as_slice().unwrap(),
         t.e.as_slice().unwrap(),
@@ -296,7 +325,13 @@ fn planes(t: &Triple) -> Result<(&[i8], &[i32], &[i32], &[u8])> {
     ))
 }
 
-fn from_planes(shape: &[usize], s: Vec<i8>, e: Vec<i32>, m: Vec<i32>, z: Vec<u8>) -> Result<Triple> {
+fn from_planes(
+    shape: &[usize],
+    s: Vec<i8>,
+    e: Vec<i32>,
+    m: Vec<i32>,
+    z: Vec<u8>,
+) -> Result<Triple> {
     Triple::from_vecs_opt(shape, s, e, z, Some(m))
 }
 
@@ -307,11 +342,26 @@ pub fn mul_array(a: &Triple, b: &Triple, m_bits: i64) -> Result<Triple> {
     let (as_, ae, am, az) = planes(a)?;
     let (bs, be, bm, bz) = planes(b)?;
     let n = as_.len();
-    let (mut s, mut e, mut m, mut z) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut s, mut e, mut m, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     for i in 0..n {
         let r = mul(
-            T2 { s: as_[i], e: ae[i], m: am[i], z: az[i] },
-            T2 { s: bs[i], e: be[i], m: bm[i], z: bz[i] },
+            T2 {
+                s: as_[i],
+                e: ae[i],
+                m: am[i],
+                z: az[i],
+            },
+            T2 {
+                s: bs[i],
+                e: be[i],
+                m: bm[i],
+                z: bz[i],
+            },
             m_bits,
         );
         s.push(r.s);
@@ -329,11 +379,26 @@ pub fn add_array(a: &Triple, b: &Triple, sub: bool, tabs: &Tables, m_bits: i64) 
     let (as_, ae, am, az) = planes(a)?;
     let (bs, be, bm, bz) = planes(b)?;
     let n = as_.len();
-    let (mut s, mut e, mut m, mut z) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut s, mut e, mut m, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     for i in 0..n {
         let r = add(
-            T2 { s: as_[i], e: ae[i], m: am[i], z: az[i] },
-            T2 { s: bs[i], e: be[i], m: bm[i], z: bz[i] },
+            T2 {
+                s: as_[i],
+                e: ae[i],
+                m: am[i],
+                z: az[i],
+            },
+            T2 {
+                s: bs[i],
+                e: be[i],
+                m: bm[i],
+                z: bz[i],
+            },
             sub,
             tabs,
             m_bits,
@@ -464,19 +529,37 @@ pub fn layernorm(
         for j in 0..c {
             let i = r * c + j;
             q[j] = to_fixed(
-                T2 { s: xs[i], e: xe[i], m: xm[i], z: xz[i] },
+                T2 {
+                    s: xs[i],
+                    e: xe[i],
+                    m: xm[i],
+                    z: xz[i],
+                },
                 m0,
                 tabs,
+                m_bits,
             );
             wq[j] = to_fixed(
-                T2 { s: ws[j], e: we[j], m: wm[j], z: wz[j] },
+                T2 {
+                    s: ws[j],
+                    e: we[j],
+                    m: wm[j],
+                    z: wz[j],
+                },
                 m0,
                 tabs,
+                m_bits,
             );
             bq[j] = to_fixed(
-                T2 { s: bs[j], e: be_[j], m: bm[j], z: bz[j] },
+                T2 {
+                    s: bs[j],
+                    e: be_[j],
+                    m: bm[j],
+                    z: bz[j],
+                },
                 m0,
                 tabs,
+                m_bits,
             );
         }
         let sum: i128 = q.iter().map(|&v| v as i128).sum();
@@ -488,11 +571,21 @@ pub fn layernorm(
                 d * d
             })
             .sum();
-        let var = trunc_div(ss, c as i128) as i64 + eps_scaled(eps_q, to_fixed(
-            T2 { s: 1, e: BIAS as i32, m: 0, z: 0 },
-            m0,
-            tabs,
-        ));
+        let var = trunc_div(ss, c as i128) as i64
+            + eps_scaled(
+                eps_q,
+                to_fixed(
+                    T2 {
+                        s: 1,
+                        e: BIAS as i32,
+                        m: 0,
+                        z: 0,
+                    },
+                    m0,
+                    tabs,
+                    m_bits,
+                ),
+            );
         let is = isqrt_u64(var.max(0) as u64) as i128;
         let scale = 1i128 << tabs.f;
         for j in 0..c {
@@ -515,12 +608,27 @@ pub fn layernorm(
 pub fn gelu(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
     let (as_, ae, am, az) = planes(a)?;
     let n = as_.len();
-    let (mut s, mut e, mut m, mut z) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut s, mut e, mut m, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
     let phi = lattice::phi_lut();
     let span = lattice::SIG_SPAN;
     let sh = tabs.f - 14;
     for i in 0..n {
-        let q = to_fixed(T2 { s: as_[i], e: ae[i], m: am[i], z: az[i] }, BIAS, tabs);
+        let q = to_fixed(
+            T2 {
+                s: as_[i],
+                e: ae[i],
+                m: am[i],
+                z: az[i],
+            },
+            BIAS,
+            tabs,
+            m_bits,
+        );
         let x14 = trunc_div(q as i128, 1i128 << sh) as i64;
         let p14 = if x14 < -span {
             0
@@ -548,7 +656,12 @@ pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
     let rows = a.numel() / d;
     let (as_, ae, am, az) = planes(a)?;
     let exp = lattice::exp_lut();
-    let (mut s, mut e, mut m, mut z) = (vec![1i8; rows * d], vec![BIAS as i32; rows * d], vec![0i32; rows * d], vec![1u8; rows * d]);
+    let (mut s, mut e, mut m, mut z) = (
+        vec![1i8; rows * d],
+        vec![BIAS as i32; rows * d],
+        vec![0i32; rows * d],
+        vec![1u8; rows * d],
+    );
     let sh14 = tabs.f - 14;
     for r in 0..rows {
         let mut q = vec![0i64; d];
@@ -556,7 +669,17 @@ pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
         let mut vmax = i64::MIN;
         for j in 0..d {
             let i = r * d + j;
-            q[j] = to_fixed(T2 { s: as_[i], e: ae[i], m: am[i], z: az[i] }, BIAS, tabs);
+            q[j] = to_fixed(
+                T2 {
+                    s: as_[i],
+                    e: ae[i],
+                    m: am[i],
+                    z: az[i],
+                },
+                BIAS,
+                tabs,
+                m_bits,
+            );
             s14[j] = trunc_div(q[j] as i128, 1i128 << sh14) as i64;
             if s14[j] > vmax {
                 vmax = s14[j];
@@ -610,7 +733,12 @@ pub fn decode_array(t: &Triple, m_bits: i64) -> Result<ArrayD<f64>> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         out.push(decode(
-            T2 { s: s[i], e: e[i], m: m[i], z: z[i] },
+            T2 {
+                s: s[i],
+                e: e[i],
+                m: m[i],
+                z: z[i],
+            },
             m_bits,
         ));
     }

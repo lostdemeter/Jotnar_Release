@@ -61,7 +61,7 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          198/198
+workspace tests          218/218
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms

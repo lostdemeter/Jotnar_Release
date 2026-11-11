@@ -208,7 +208,7 @@ cargo run -p jotnar-lab -- bench doom \
 ```
 
 ::: note [STATUS AT THIS DRAFT / 2026-11-08]
-Workspace tests: **201/201**. Self-contained example certificate: **PASS**. DOOM certificate: **PASS on this host**, and **BLOCKED** when the local artifacts are absent. Manual witness: **4/4** listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.
+Workspace tests: **218/218**. Self-contained example certificate: **PASS**. DOOM certificate: **PASS on this host**, and **BLOCKED** when the local artifacts are absent. Manual witness: **4/4** listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.
 :::
 
 ## What the harness must not do
