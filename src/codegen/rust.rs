@@ -707,6 +707,49 @@ fn pattern_rust(
         "GATHER" => Err(Error::unimplemented(
             "Rust backend GATHER not yet (next slice)",
         )),
+        "SLICE" => {
+            // v0.2 contract: 2D axis 0/1 with baked bounds, F/I (T is
+            // refused by the backend contract).
+            let x = args[0].as_str();
+            let sh = get(x)?.shape.clone();
+            if sh.len() != 2 {
+                return Err(Error::unimplemented("Rust SLICE needs 2D"));
+            }
+            let (Some(h), Some(w)) = (sh[0], sh[1]) else {
+                return Err(Error::unimplemented("Rust backend: dynamic dim in SLICE"));
+            };
+            let ax: usize = args[1]
+                .parse()
+                .map_err(|_| Error::asm("Rust SLICE: bad axis literal"))?;
+            let lo: usize = args[2]
+                .parse()
+                .map_err(|_| Error::asm("Rust SLICE: bad lo literal"))?;
+            let hi: usize = args[3]
+                .parse()
+                .map_err(|_| Error::asm("Rust SLICE: bad hi literal"))?;
+            if ax > 1 || lo > hi || hi > if ax == 0 { h } else { w } {
+                return Err(Error::asm("Rust SLICE: bad bounds"));
+            }
+            let (outer, inner) = if ax == 0 { (hi - lo, w) } else { (h, hi - lo) };
+            let src = |r: usize, c: usize| {
+                if ax == 0 {
+                    format!("{x}[{} * {w} + {c}]", r + lo)
+                } else {
+                    format!("{x}[{r} * {w} + {}]", c + lo)
+                }
+            };
+            let mut body = String::new();
+            for r in 0..outer {
+                for c in 0..inner {
+                    body.push_str(&format!(
+                        "{o}[{r} * {inner} + {c}] = {};
+",
+                        src(r, c)
+                    ));
+                }
+            }
+            Ok(body)
+        }
         "TRANSPOSE" => {
             let x = args[0].as_str();
             let sh = get(x)?.shape.clone();

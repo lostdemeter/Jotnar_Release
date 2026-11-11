@@ -635,6 +635,67 @@ fn deconv2d_matches_interpreter() {
 }
 
 #[test]
+fn slice_matches_interpreter_and_reshapes_for_the_seam() {
+    let xs: Vec<f64> = (0..10 * 4).map(|i| i as f64).collect();
+    // Axis 0 and axis 1 slices against the reference interpreter.
+    for (axis, lo, hi) in [(0, 1, 10), (1, 1, 3)] {
+        let listing = format!("IN X AS F:HW\nOUT = SLICE(X, {axis}, {lo}, {hi})\n");
+        let f = feeds(&[("X", fvalue(&[10, 4], &xs))]);
+        let want = jotnar::run_text(&listing, &AsmOptions::new("."), &f).expect("interp");
+        let want = match want.get("OUT").unwrap() {
+            Value::F64(a) => a.iter().copied().collect::<Vec<f64>>(),
+            other => panic!("expected F64, got {other:?}"),
+        };
+        let art = compile_program(&listing, &opts(&["OUT"]), f).expect("compile slice");
+        let dir = tempfile::tempdir().unwrap();
+        let exe = build(&art.source, dir.path(), "slice", Target::Rust).expect("build");
+        let p = dir.path().join("x.f64");
+        let mut b = Vec::new();
+        for x in &xs {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        fs::write(&p, b).unwrap();
+        let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+        assert!(Command::new(&exe)
+            .args([p.to_string_lossy().as_ref(), &out])
+            .status()
+            .unwrap()
+            .success());
+        let got: Vec<f64> = fs::read(&out)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, want, "slice axis {axis}");
+    }
+
+    // The backbone->neck seam: drop CLS (row 0), then tokens -> HWC.
+    let listing = "IN X AS F:HW\nS = SLICE(X, 0, 1, 10)\nOUT = RESHAPE3(S, 3, 3, 4)\n";
+    let f = feeds(&[("X", fvalue(&[10, 4], &xs))]);
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile seam");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "seam", Target::Rust).expect("build seam");
+    let p = dir.path().join("x.f64");
+    let mut b = Vec::new();
+    for x in &xs {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    fs::write(&p, b).unwrap();
+    let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([p.to_string_lossy().as_ref(), &out])
+        .status()
+        .unwrap()
+        .success());
+    let got: Vec<f64> = fs::read(&out)
+        .unwrap()
+        .chunks(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got, xs[4..].to_vec());
+}
+
+#[test]
 fn scalar_left_refused_loudly() {
     // Upstream infer requires the first operand to be a stream; a literal
     // first operand (IADD(1, A)) must refuse with a typed error, never
