@@ -16,6 +16,7 @@ pub mod lattice;
 pub mod numpy_ops;
 pub mod ops;
 pub mod score;
+pub mod t2;
 pub mod triple;
 
 pub use calibrate::m_of;

@@ -43,6 +43,7 @@ pub fn abs_trip(t: &Triple) -> Result<Triple> {
         s: t.s.mapv(|_| 1i8),
         e: t.e.clone(),
         z: t.z.clone(),
+        m: t.m.clone(),
     })
 }
 
@@ -51,6 +52,7 @@ pub fn neg_trip(t: &Triple) -> Result<Triple> {
         s: t.s.mapv(|s| -s),
         e: t.e.clone(),
         z: t.z.clone(),
+        m: t.m.clone(),
     })
 }
 

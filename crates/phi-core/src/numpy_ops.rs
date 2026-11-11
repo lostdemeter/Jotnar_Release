@@ -86,6 +86,7 @@ pub fn const_triple(v: f64, shape: &[usize]) -> Triple {
         s: ArrayD::from_elem(IxDyn(shape), s),
         e: ArrayD::from_elem(IxDyn(shape), e),
         z: ArrayD::from_elem(IxDyn(shape), z),
+        m: None,
     }
 }
 
@@ -130,6 +131,7 @@ pub fn prelu_int(t: &Triple, slope: &Triple) -> Result<Triple> {
             s: ArrayD::from_elem(IxDyn(&shape), *slope.s.iter().next().unwrap_or(&1)),
             e: ArrayD::from_elem(IxDyn(&shape), *slope.e.iter().next().unwrap_or(&0)),
             z: ArrayD::from_elem(IxDyn(&shape), *slope.z.iter().next().unwrap_or(&0)),
+            m: None,
         }
     } else if slope.numel() == c {
         let ss = flat(&slope.s);
