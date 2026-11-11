@@ -158,17 +158,43 @@ fn rows_expr(s: &infer::StreamInfo) -> usize {
     s.rows().unwrap_or(1)
 }
 
-fn c_decl_stream(name: &str, s: &infer::StreamInfo, frepr: &str) -> String {
+fn c_decl_stream(name: &str, s: &infer::StreamInfo, frepr: &str, t2: bool) -> String {
     match s.kind {
         CKind::F => format!("static {frepr} *{name}; static int64_t {name}_N;"),
         CKind::I => format!("static int64_t *{name}; static int64_t {name}_N;"),
-        CKind::T => format!(
-            "static int8_t *{name}_s; static int32_t *{name}_e; static uint8_t *{name}_z; static int64_t {name}_N;"
-        ),
+        CKind::T => {
+            if t2 {
+                format!(
+                    "static int8_t *{name}_s; static int32_t *{name}_e; static int32_t *{name}_m; static uint8_t *{name}_z; static int64_t {name}_N;"
+                )
+            } else {
+                format!(
+                    "static int8_t *{name}_s; static int32_t *{name}_e; static uint8_t *{name}_z; static int64_t {name}_N;"
+                )
+            }
+        }
     }
 }
 
-fn input_load(name: &str, s: &infer::StreamInfo, idx: usize, frepr: &str) -> Result<String> {
+fn plane_count(kind: CKind, t2: bool) -> usize {
+    if kind == CKind::T {
+        if t2 {
+            4
+        } else {
+            3
+        }
+    } else {
+        1
+    }
+}
+
+fn input_load(
+    name: &str,
+    s: &infer::StreamInfo,
+    idx: usize,
+    frepr: &str,
+    t2: bool,
+) -> Result<String> {
     match s.kind {
         CKind::F => {
             let n = static_dim(s, 0, name)?;
@@ -188,7 +214,21 @@ fn input_load(name: &str, s: &infer::StreamInfo, idx: usize, frepr: &str) -> Res
                 sh.first().copied().unwrap_or(1)
             );
             let mut j = idx;
-            for (comp, ct) in [("s", "int8_t"), ("e", "int32_t"), ("z", "uint8_t")] {
+            let comps: &[(&str, &str)] = if t2 {
+                &[
+                    ("s", "int8_t"),
+                    ("e", "int32_t"),
+                    ("m", "int32_t"),
+                    ("z", "uint8_t"),
+                ]
+            } else {
+                &[
+                    ("s", "int8_t"),
+                    ("e", "int32_t"),
+                    ("z", "uint8_t"),
+                ]
+            };
+            for (comp, ct) in comps {
                 out.push_str(&format!(
                     "  {{ FILE *_fp = fopen(argv[{j}], \"rb\"); if (!_fp) return 1;\n    {name}_{comp} = malloc(({cnt}) * sizeof({ct})); if (fread({name}_{comp}, sizeof({ct}), ({cnt}), _fp) != (size_t)({cnt})) return 2; fclose(_fp); }}\n"
                 ));
@@ -199,7 +239,7 @@ fn input_load(name: &str, s: &infer::StreamInfo, idx: usize, frepr: &str) -> Res
     }
 }
 
-fn alloc_stream(name: &str, s: &infer::StreamInfo, frepr: &str) -> Result<String> {
+fn alloc_stream(name: &str, s: &infer::StreamInfo, frepr: &str, t2: bool) -> Result<String> {
     let cnt = count_expr(s, name)?;
     match s.kind {
         CKind::F => Ok(format!(
@@ -209,14 +249,29 @@ fn alloc_stream(name: &str, s: &infer::StreamInfo, frepr: &str) -> Result<String
         CKind::I => Ok(format!(
             "  {name}_N = ({cnt}); {name} = malloc(({cnt}) * sizeof(int64_t));"
         )),
-        CKind::T => Ok(format!(
-            "  {name}_s = malloc(({cnt}) * sizeof(int8_t));\n  {name}_e = malloc(({cnt}) * sizeof(int32_t));\n  {name}_z = malloc(({cnt}) * sizeof(uint8_t));\n  int64_t {name}_N = {};",
-            rows_expr(s)
-        )),
+        CKind::T => {
+            if t2 {
+                Ok(format!(
+                    "  {name}_s = malloc(({cnt}) * sizeof(int8_t));\n  {name}_e = malloc(({cnt}) * sizeof(int32_t));\n  {name}_m = malloc(({cnt}) * sizeof(int32_t));\n  {name}_z = malloc(({cnt}) * sizeof(uint8_t));\n  int64_t {name}_N = {};",
+                    rows_expr(s)
+                ))
+            } else {
+                Ok(format!(
+                    "  {name}_s = malloc(({cnt}) * sizeof(int8_t));\n  {name}_e = malloc(({cnt}) * sizeof(int32_t));\n  {name}_z = malloc(({cnt}) * sizeof(uint8_t));\n  int64_t {name}_N = {};",
+                    rows_expr(s)
+                ))
+            }
+        }
     }
 }
 
-fn store_stream(name: &str, s: &infer::StreamInfo, idx: usize, frepr: &str) -> Result<String> {
+fn store_stream(
+    name: &str,
+    s: &infer::StreamInfo,
+    idx: usize,
+    frepr: &str,
+    t2: bool,
+) -> Result<String> {
     let cnt = count_expr(s, name)?;
     match s.kind {
         CKind::F => Ok(format!(
@@ -228,12 +283,21 @@ fn store_stream(name: &str, s: &infer::StreamInfo, idx: usize, frepr: &str) -> R
         CKind::T => {
             let mut out = String::new();
             let mut j = idx;
-            for comp in ["s", "e", "z"] {
-                let ct = match comp {
-                    "s" => "int8_t",
-                    "e" => "int32_t",
-                    _ => "uint8_t",
-                };
+            let comps: &[(&str, &str)] = if t2 {
+                &[
+                    ("s", "int8_t"),
+                    ("e", "int32_t"),
+                    ("m", "int32_t"),
+                    ("z", "uint8_t"),
+                ]
+            } else {
+                &[
+                    ("s", "int8_t"),
+                    ("e", "int32_t"),
+                    ("z", "uint8_t"),
+                ]
+            };
+            for (comp, ct) in comps {
                 out.push_str(&format!(
                     "  {{ FILE *_fp = fopen(argv[{j}], \"wb\"); if (!_fp) return 3;\n    fwrite({name}_{comp}, sizeof({ct}), {cnt}, _fp); fclose(_fp); }}\n"
                 ));
@@ -319,6 +383,13 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         }
     }
 
+    let t2_m = if nonfpu {
+        bound.config.get_i64("t2").filter(|m| *m > 0)
+    } else {
+        None
+    };
+    let t2 = t2_m.is_some();
+
     let mut ctx = Ctx {
         streams: streams.clone(),
         config: bound.config.clone(),
@@ -327,6 +398,7 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         inputs: in_names.clone(),
         outputs: outputs.clone(),
         nonfpu,
+        t2_m,
         mns: mns.clone(),
         rope,
     };
@@ -354,7 +426,7 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     let mut decls = Vec::new();
     decls.push("/* inputs: argv files, order below */".to_string());
     for n in &in_names {
-        decls.push(c_decl_stream(n, streams.get(n).unwrap(), frepr));
+        decls.push(c_decl_stream(n, streams.get(n).unwrap(), frepr, t2));
     }
     for o in &outputs {
         if in_names.contains(o) {
@@ -364,9 +436,15 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         match s.kind {
             CKind::F => decls.push(format!("static {frepr} *{o};")),
             CKind::I => decls.push(format!("static int64_t *{o}; static int64_t {o}_N;")),
-            CKind::T => decls.push(format!(
-                "static int8_t *{o}_s; static int32_t *{o}_e; static uint8_t *{o}_z; static int64_t {o}_N;"
-            )),
+            CKind::T => decls.push(if t2 {
+                format!(
+                    "static int8_t *{o}_s; static int32_t *{o}_e; static int32_t *{o}_m; static uint8_t *{o}_z; static int64_t {o}_N;"
+                )
+            } else {
+                format!(
+                    "static int8_t *{o}_s; static int32_t *{o}_e; static uint8_t *{o}_z; static int64_t {o}_N;"
+                )
+            }),
         }
     }
 
@@ -386,9 +464,15 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
             match s.kind {
                 CKind::F => decls.push(format!("static {frepr} *{x}; int64_t {x}_N;")),
                 CKind::I => decls.push(format!("static int64_t *{x}; int64_t {x}_N;")),
-                CKind::T => decls.push(format!(
-                    "static int8_t *{x}_s; static int32_t *{x}_e; static uint8_t *{x}_z; int64_t {x}_N;"
-                )),
+                CKind::T => decls.push(if t2 {
+                    format!(
+                        "static int8_t *{x}_s; static int32_t *{x}_e; static int32_t *{x}_m; static uint8_t *{x}_z; int64_t {x}_N;"
+                    )
+                } else {
+                    format!(
+                        "static int8_t *{x}_s; static int32_t *{x}_e; static uint8_t *{x}_z; int64_t {x}_N;"
+                    )
+                }),
             }
         }
     }
@@ -397,39 +481,27 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     // main
     let mut n_argv = 0usize;
     for n in &in_names {
-        n_argv += if streams.get(n).unwrap().kind == CKind::T {
-            3
-        } else {
-            1
-        };
+        n_argv += plane_count(streams.get(n).unwrap().kind, t2);
     }
     for o in &outputs {
-        n_argv += if streams.get(o).unwrap().kind == CKind::T {
-            3
-        } else {
-            1
-        };
+        n_argv += plane_count(streams.get(o).unwrap().kind, t2);
     }
     let mut main = Vec::new();
     main.push("int main(int argc, char **argv) {".to_string());
     main.push(format!("  if (argc != {}) return 9;", n_argv + 1));
     let mut idx = 1usize;
     for n in &in_names {
-        main.push(input_load(n, streams.get(n).unwrap(), idx, frepr)?);
-        idx += if streams.get(n).unwrap().kind == CKind::T {
-            3
-        } else {
-            1
-        };
+        main.push(input_load(n, streams.get(n).unwrap(), idx, frepr, t2)?);
+        idx += plane_count(streams.get(n).unwrap().kind, t2);
     }
     for x in &inter {
-        main.push(alloc_stream(x, streams.get(x).unwrap(), frepr)?);
+        main.push(alloc_stream(x, streams.get(x).unwrap(), frepr, t2)?);
     }
     for o in &outputs {
         if in_names.contains(o) {
             continue;
         }
-        main.push(alloc_stream(o, streams.get(o).unwrap(), frepr)?);
+        main.push(alloc_stream(o, streams.get(o).unwrap(), frepr, t2)?);
     }
 
     for ins in &bound.instrs {
@@ -464,12 +536,8 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     }
 
     for o in &outputs {
-        main.push(store_stream(o, streams.get(o).unwrap(), idx, frepr)?);
-        idx += if streams.get(o).unwrap().kind == CKind::T {
-            3
-        } else {
-            1
-        };
+        main.push(store_stream(o, streams.get(o).unwrap(), idx, frepr, t2)?);
+        idx += plane_count(streams.get(o).unwrap().kind, t2);
     }
     main.push("  return 0;\n}".to_string());
     parts.push(main.join("\n"));

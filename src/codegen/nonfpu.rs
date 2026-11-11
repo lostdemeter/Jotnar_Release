@@ -362,14 +362,13 @@ static void nf_layernorm_row(const int8_t *xs, const int32_t *xe, const uint8_t 
   }
   __int128 sum = 0;
   for (int64_t j = 0; j < C; ++j) sum += q[j];
-  int64_t mean = (sum >= 0) ? (int64_t)((sum + C / 2) / C)
-                            : -(int64_t)((-sum + C / 2) / C);
+  int64_t mean = (int64_t)(sum / C);
   __int128 ss = 0;
   for (int64_t j = 0; j < C; ++j) {
     int64_t d = q[j] - mean;
     ss += (__int128)d * d;
   }
-  int64_t var = (int64_t)((ss + C / 2) / C) + epsc;
+  int64_t var = (int64_t)(ss / C) + epsc;
   uint64_t is = nf_isqrt((var >= 0) ? (uint64_t)var : 0);
   for (int64_t j = 0; j < C; ++j) {
     int64_t d = q[j] - mean;
@@ -377,12 +376,12 @@ static void nf_layernorm_row(const int8_t *xs, const int32_t *xe, const uint8_t 
     if (is == 0) norm = 0;
     else {
       __int128 sc = (__int128)d * (int64_t)(1 << NF_FIXED_F);
-      norm = (sc >= 0) ? (int64_t)((sc + (int64_t)is / 2) / (int64_t)is)
-                       : -(int64_t)((-sc + (int64_t)is / 2) / (int64_t)is);
+      norm = (sc >= 0) ? (int64_t)(sc / (int64_t)is)
+                       : -(int64_t)((-sc) / (int64_t)is);
     }
     __int128 aw = (__int128)norm * wq[j];
-    int64_t aq = (aw >= 0) ? (int64_t)((aw + (int64_t)(1 << (NF_FIXED_F - 1))) / (int64_t)(1 << NF_FIXED_F))
-                           : -(int64_t)((-aw + (int64_t)(1 << (NF_FIXED_F - 1))) / (int64_t)(1 << NF_FIXED_F));
+    int64_t aq = (aw >= 0) ? (int64_t)(aw / (int64_t)(1 << NF_FIXED_F))
+                           : -(int64_t)((-aw) / (int64_t)(1 << NF_FIXED_F));
     int64_t av = aq + bq[j];
     nf_from_fixed(av, m, &os[j], &oe[j], &oz[j]);
   }
@@ -403,6 +402,153 @@ static void nf_gelu(int8_t s, int32_t e, uint8_t z,
   int64_t prod = x14 * p14;
   int64_t y14 = (prod >= 0) ? (prod / 16384) : -((-prod) / 16384);
   nf_from_fixed(y14 * (int64_t)(1 << (NF_FIXED_F - 14)), 32768, os, oe, oz);
+}
+"#;
+
+const NF_T2_HELPERS: &str = r#"
+static int64_t nf_t2_base(int d) {
+  if (d < 0) { int k = -d; if (k > 8192) return (int64_t)(1LL << NF_FIXED_F); return NF_FRACHI[k - 1]; }
+  if (d > NF_T2_CAP) return 0;
+  return NF_FRAC[d];
+}
+static int64_t nf_t2_tdiv(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if ((a < 0) ^ (b < 0)) return -((a < 0 ? -a : a) / (b < 0 ? -b : b));
+  return (a < 0 ? -a : a) / (b < 0 ? -b : b);
+}
+static int64_t nf_t2_round_div(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if (a < 0) return -(((-a) + b / 2) / b);
+  return (a + b / 2) / b;
+}
+static uint64_t nf_t2_isqrt(uint64_t a) {
+  if (a < 2) return a;
+  uint64_t x = a, y = (x + 1) >> 1;
+  while (y < x) { x = y; y = (x + a / x) >> 1; }
+  return x;
+}
+static int64_t nf_t2_to_fixed(int8_t s, int32_t e, int32_t m, uint8_t z, int m0) {
+  if (z) return 0;
+  int64_t base = nf_t2_base(m0 - (int64_t)e);
+  __int128 q = ((__int128)base * ((__int128)NF_T2_SCALE + (int64_t)m) + (NF_T2_SCALE >> 1)) >> NF_T2_M;
+  return (int64_t)((s < 0) ? -q : q);
+}
+static void nf_t2_from_fixed(int64_t q, int m0, int8_t *s, int32_t *e, int32_t *m, uint8_t *z) {
+  if (q == 0) { *z = 1; *s = 1; *e = 32768; *m = 0; return; }
+  *z = 0; *s = (q > 0) ? 1 : -1;
+  uint64_t a = (q >= 0) ? (uint64_t)q : (uint64_t)(-(q + 1)) + 1u;
+  int bl = 0; uint64_t x = a;
+  if (x >> 32) { bl += 32; x >>= 32; }
+  if (x >> 16) { bl += 16; x >>= 16; }
+  if (x >> 8) { bl += 8; x >>= 8; }
+  if (x >> 4) { bl += 4; x >>= 4; }
+  if (x >> 2) { bl += 2; x >>= 2; }
+  if (x >> 1) { bl += 1; }
+  bl += (a != 0);
+  int shift = bl - 15;
+  uint64_t mant = (shift >= 0) ? ((shift > 0) ? (a >> shift) : a) : (a << (-shift));
+  int t = shift + 14 - NF_FIXED_F;
+  int idx = t + 64; if (idx < 0) idx = 0; if (idx > 192) idx = 192;
+  int64_t fi = (int64_t)mant - 16384; if (fi < 0) fi = 0; if (fi > 16383) fi = 16383;
+  int64_t ev = (int64_t)m0 + NF_COARSE[idx] + NF_FINE[fi];
+  if (ev < 0) ev = 0; if (ev > 65535) ev = 65535;
+  *e = (int32_t)ev;
+  int64_t base = nf_t2_base((int)((int64_t)m0 - ev));
+  if (base == 0) { *m = 0; return; }
+  __int128 num = ((__int128)a) << NF_T2_M;
+  __int128 ratio = (num + base / 2) / base;
+  __int128 mm = ratio - NF_T2_SCALE;
+  if (mm < -NF_T2_HALF) mm = -NF_T2_HALF;
+  if (mm > NF_T2_HALF - 1) mm = NF_T2_HALF - 1;
+  *m = (int32_t)mm;
+}
+static void nf_t2_mul(int8_t sa, int32_t ea, int32_t ma, uint8_t za,
+                      int8_t sb, int32_t eb, int32_t mb, uint8_t zb,
+                      int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  if (za || zb) { *os = 1; *oe = 32768; *om = 0; *oz = 1; return; }
+  int64_t cross = nf_t2_round_div((int64_t)ma * (int64_t)mb, NF_T2_SCALE);
+  int64_t m = (int64_t)ma + (int64_t)mb + cross;
+  int64_t e = (int64_t)ea + (int64_t)eb - 32768;
+  if (e < 0) e = 0; if (e > 65535) e = 65535;
+  *os = (int8_t)((int)sa * (int)sb); *oe = (int32_t)e; *om = (int32_t)m; *oz = 0;
+}
+static void nf_t2_add(int8_t sa, int32_t ea, int32_t ma, uint8_t za,
+                      int8_t sb, int32_t eb, int32_t mb, uint8_t zb, int sub,
+                      int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  if (za && zb) { *os = 1; *oe = 32768; *om = 0; *oz = 1; return; }
+  int m0 = za ? (int)eb : (zb ? (int)ea : ((ea > eb) ? (int)ea : (int)eb));
+  int64_t qa = nf_t2_to_fixed(sa, ea, ma, za, m0);
+  int64_t qb = nf_t2_to_fixed(sb, eb, mb, zb, m0);
+  int64_t acc = sub ? (qa - qb) : (qa + qb);
+  nf_t2_from_fixed(acc, m0, os, oe, om, oz);
+}
+static void nf_t2_layernorm_row(const int8_t *xs, const int32_t *xe, const int32_t *xm, const uint8_t *xz,
+                                const int8_t *ws, const int32_t *we, const int32_t *wm, const uint8_t *wz,
+                                const int8_t *bs, const int32_t *be, const int32_t *bm, const uint8_t *bz,
+                                int64_t C, int64_t *q, int64_t *wq, int64_t *bq,
+                                int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  int m0 = 32768; int any = 0;
+  for (int64_t j = 0; j < C; ++j) {
+    if (!xz[j]) { if (!any || (int)xe[j] > m0) m0 = (int)xe[j]; any = 1; }
+  }
+  if (!any) m0 = 32768;
+  for (int64_t j = 0; j < C; ++j) {
+    q[j]  = nf_t2_to_fixed(xs[j], xe[j], xm[j], xz[j], m0);
+    wq[j] = nf_t2_to_fixed(ws[j], we[j], wm[j], wz[j], m0);
+    bq[j] = nf_t2_to_fixed(bs[j], be[j], bm[j], bz[j], m0);
+  }
+  __int128 sum = 0;
+  for (int64_t j = 0; j < C; ++j) sum += q[j];
+  int64_t mean = (int64_t)(sum / C);
+  __int128 ss = 0;
+  for (int64_t j = 0; j < C; ++j) { int64_t d = q[j] - mean; ss += (__int128)d * d; }
+  int64_t var = (int64_t)(ss / C);
+  int64_t q1 = nf_t2_to_fixed(1, 32768, 0, 0, m0);
+  __int128 ev = ((__int128)NF_T2_EPSQ * q1 * q1 + (1LL << 29)) >> 30;
+  var += (int64_t)ev;
+  uint64_t is = nf_t2_isqrt((var < 0) ? 0 : (uint64_t)var);
+  int64_t S = (int64_t)(1LL << NF_FIXED_F);
+  for (int64_t j = 0; j < C; ++j) {
+    int64_t d = q[j] - mean;
+    int64_t norm = (is == 0) ? 0 : nf_t2_tdiv(d * S, (int64_t)is);
+    int64_t aq = nf_t2_tdiv(norm * wq[j], S);
+    int64_t av = aq + bq[j];
+    nf_t2_from_fixed(av, m0, &os[j], &oe[j], &om[j], &oz[j]);
+  }
+}
+static void nf_t2_gelu(int8_t s, int32_t e, int32_t m, uint8_t z,
+                       int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  int64_t q = nf_t2_to_fixed(s, e, m, z, 32768);
+  int64_t x14 = nf_t2_tdiv(q, (int64_t)(1LL << (NF_FIXED_F - 14)));
+  int64_t p14;
+  if (x14 < -NF_GSPAN) p14 = 0;
+  else if (x14 > NF_GSPAN) p14 = 16384;
+  else p14 = NF_GELUP[x14 + NF_GSPAN];
+  int64_t y14 = nf_t2_tdiv(x14 * p14, 16384);
+  nf_t2_from_fixed(y14 * (int64_t)(1LL << (NF_FIXED_F - 14)), 32768, os, oe, om, oz);
+}
+static void nf_t2_softmax_row(const int8_t *xs, const int32_t *xe, const int32_t *xm, const uint8_t *xz,
+                              int64_t n, int64_t *q, int64_t *num,
+                              int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  int64_t sh14 = (int64_t)(1LL << (NF_FIXED_F - 14));
+  int64_t vmax = 0;
+  for (int64_t j = 0; j < n; ++j) {
+    q[j] = nf_t2_to_fixed(xs[j], xe[j], xm[j], xz[j], 32768);
+    if (j == 0 || nf_t2_tdiv(q[j], sh14) > vmax) vmax = nf_t2_tdiv(q[j], sh14);
+  }
+  __int128 den = 0;
+  for (int64_t j = 0; j < n; ++j) {
+    int64_t s14 = nf_t2_tdiv(q[j], sh14);
+    int64_t dd = vmax - s14; if (dd < 0) dd = 0; if (dd > 262144) dd = 262144;
+    num[j] = NF_EXP[dd];
+    den += num[j];
+  }
+  if (den == 0) den = 1;
+  int64_t S = (int64_t)(1LL << NF_FIXED_F);
+  for (int64_t j = 0; j < n; ++j) {
+    int64_t c = (int64_t)(((__int128)num[j] * S) / den);
+    nf_t2_from_fixed(c, 32768, &os[j], &oe[j], &om[j], &oz[j]);
+  }
 }
 "#;
 
@@ -437,7 +583,11 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
     if mns.iter().any(|m| is_fx(m)) {
         let m_cov = ctx.config.get_i64_or("m_cov", 33280);
         let m_acc = ctx.config.get_i64_or("m_acc", 31344);
-        let bridge_f = ctx.config.get_i64_or("bridge_f", lattice::FIXED_F);
+        let t2_m = ctx.t2_m;
+        let bridge_f = ctx.config.get_i64_or(
+            "bridge_f",
+            t2_m.map(|m| m.max(24)).unwrap_or(lattice::FIXED_F),
+        );
         let frac = lattice::l_frac_for(bridge_f);
         l.push_str(&bake_vec("NF_FRAC", &frac, 16));
         l.push('\n');
@@ -452,7 +602,10 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
             "static const int NF_FRAC_CAP = {};\n",
             frac.len() - 1
         ));
-        l.push_str(&format!("static const int64_t NF_BASE = {};\n", frac[0]));
+        l.push_str(&format!(
+            "static const int64_t NF_BASE = {};\n",
+            1i64 << bridge_f
+        ));
         l.push_str(NF_BRIDGE_HELPERS);
         if has("SQUARE") {
             let qlo_t = lattice::encode(&ndarray::ArrayD::from_elem(ndarray::IxDyn(&[1]), 0.0f64));
@@ -465,6 +618,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         if mns
             .iter()
             .any(|m| SM_MN.contains(&m.as_str()) || m == "RMSNORM" || m == "LAYERNORM")
+            || t2_m.is_some()
         {
             l.push_str(&bake_vec("NF_EXP", lattice::exp_lut(), 8));
             l.push('\n');
@@ -490,7 +644,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
             ));
             l.push_str(NF_LAYERNORM_HELPERS);
         }
-        if has("GELU") {
+        if has("GELU") || t2_m.is_some() {
             l.push_str(&bake_vec("NF_GELUX", lattice::sigx_lut(), 8));
             l.push('\n');
             l.push_str(&bake_vec("NF_GELUP", lattice::phi_lut(), 8));
@@ -504,6 +658,29 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
         if has("T2I") {
             l.push_str(&bake_vec("NF_T2I", lattice::t2i_lut(), 8));
             l.push('\n');
+        }
+        if let Some(m) = t2_m {
+            let eps_q = lattice::round_half_even(
+                ctx.config.get_f64_or("eps_ln", 1e-6) * (1i64 << 30) as f64,
+            ) as i64;
+            l.push_str(&format!("static const int NF_T2_M = {m};\n"));
+            l.push_str(&format!(
+                "static const int64_t NF_T2_SCALE = 1LL << {m};\n"
+            ));
+            l.push_str(&format!(
+                "static const int64_t NF_T2_HALF = 1LL << {};\n",
+                m - 1
+            ));
+            l.push_str(&format!(
+                "static const int64_t NF_T2_HALF2 = 1LL << {};\n",
+                2 * m - 1
+            ));
+            l.push_str(&format!(
+                "static const int NF_T2_CAP = {};\n",
+                frac.len() - 1
+            ));
+            l.push_str(&format!("static const int64_t NF_T2_EPSQ = {eps_q}LL;\n"));
+            l.push_str(NF_T2_HELPERS);
         }
     }
     l.push('\n');
@@ -604,7 +781,207 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
     }
 }
 
+fn t2_pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Result<Pat> {
+    let o = outs[0].as_str();
+    let co = ctx.elems(o)?;
+    match mn {
+        "MUL" => {
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            Ok((
+                fill(
+                    r#"/* {o} = MUL({a},{b}) T2 mantissa product */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_mul({as}, {ae}, {am}, {az}, {bs}, {be}, {bm}, {bz},
+            &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()), ("a", a.into()), ("b", b.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("bs", tplane(ctx, b, "s", "f_i")),
+                        ("be", tplane(ctx, b, "e", "f_i")),
+                        ("bm", tplane(ctx, b, "m", "f_i")),
+                        ("bz", tplane(ctx, b, "z", "f_i")),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "SQUARE" => {
+            let a = args[0].as_str();
+            Ok((
+                fill(
+                    r#"/* {o} = SQUARE({a}) T2 mantissa product */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_mul({as}, {ae}, {am}, {az}, {as}, {ae}, {am}, {az},
+            &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()), ("a", a.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "ADD" | "SUB" => {
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            let sub = if mn == "SUB" { 1 } else { 0 };
+            Ok((
+                fill(
+                    r#"/* {o} = {mn}({a},{b}) T2 aligned add */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_add({as}, {ae}, {am}, {az}, {bs}, {be}, {bm}, {bz}, {sub},
+            &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()), ("mn", mn.into()), ("a", a.into()), ("b", b.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("bs", tplane(ctx, b, "s", "f_i")),
+                        ("be", tplane(ctx, b, "e", "f_i")),
+                        ("bm", tplane(ctx, b, "m", "f_i")),
+                        ("bz", tplane(ctx, b, "z", "f_i")),
+                        ("sub", sub.to_string()),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "MATMUL" => {
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            let ash = ctx.s(a)?.shape.clone();
+            let bsh = ctx.s(b)?.shape.clone();
+            if ash.len() != 2 || bsh.len() != 2 {
+                return Err(Error::unimplemented(
+                    "nonfpu T2 MATMUL supports 2-D only (no BATCH_MATMUL)",
+                ));
+            }
+            let (m, k, n) = (ash[0].unwrap(), ash[1].unwrap(), bsh[1].unwrap());
+            Ok((
+                fill(
+                    r#"/* {o} = MATMUL({a},{b}) T2 block-floating dot */
+for (int64_t w_i = 0; w_i < {m}; ++w_i)
+  for (int64_t w_j = 0; w_j < {n}; ++w_j) {
+    int64_t emax = 0; int any = 0;
+    for (int64_t w_k = 0; w_k < {k}; ++w_k) {
+      int64_t ai = w_i * {k} + w_k, bi = w_k * {n} + w_j;
+      if ({a}_z[ai] || {b}_z[bi]) continue;
+      int64_t ep = (int64_t){a}_e[ai] + (int64_t){b}_e[bi] - 32768;
+      if (!any || ep > emax) { emax = ep; any = 1; }
+    }
+    if (!any) {
+      int64_t oi = w_i * {n} + w_j;
+      {o}_s[oi] = 1; {o}_e[oi] = 32768; {o}_m[oi] = 0; {o}_z[oi] = 1;
+      continue;
+    }
+    __int128 acc = 0;
+    for (int64_t w_k = 0; w_k < {k}; ++w_k) {
+      int64_t ai = w_i * {k} + w_k, bi = w_k * {n} + w_j;
+      if ({a}_z[ai] || {b}_z[bi]) continue;
+      int64_t ep = (int64_t){a}_e[ai] + (int64_t){b}_e[bi] - 32768;
+      int64_t base = nf_t2_base((int)(emax - ep));
+      if (base == 0) continue;
+      __int128 aa = (__int128)NF_T2_SCALE + {a}_m[ai];
+      __int128 bb = (__int128)NF_T2_SCALE + {b}_m[bi];
+      __int128 p = ((__int128)base * aa * bb + NF_T2_HALF2) >> (2 * NF_T2_M);
+      int64_t sg = (int64_t){a}_s[ai] * (int64_t){b}_s[bi];
+      acc += sg * p;
+    }
+    int64_t oi = w_i * {n} + w_j;
+    nf_t2_from_fixed((int64_t)acc, (int)emax,
+      &{o}_s[oi], &{o}_e[oi], &{o}_m[oi], &{o}_z[oi]);
+  }"#,
+                    &[
+                        ("o", o.into()), ("a", a.into()), ("b", b.into()),
+                        ("m", m.to_string()), ("k", k.to_string()), ("n", n.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "LAYERNORM" => {
+            let (x, w, b) = (args[0].as_str(), args[1].as_str(), args[2].as_str());
+            let d = ctx.width(x, "nonfpu T2 LAYERNORM")?;
+            let rows = ctx.elems(x)? / d;
+            Ok((
+                fill(
+                    r#"/* {o} = LAYERNORM({x},{w},{b}) T2 row bridge */
+{lbrace} int64_t *_q = malloc({d} * 8);
+  int64_t *_wq = malloc({d} * 8);
+  int64_t *_bq = malloc({d} * 8);
+  for (int64_t r_i = 0; r_i < {rows}; ++r_i)
+    nf_t2_layernorm_row(&{x}_s[r_i * {d}], &{x}_e[r_i * {d}], &{x}_m[r_i * {d}], &{x}_z[r_i * {d}],
+      {w}_s, {w}_e, {w}_m, {w}_z, {b}_s, {b}_e, {b}_m, {b}_z,
+      {d}, _q, _wq, _bq,
+      &{o}_s[r_i * {d}], &{o}_e[r_i * {d}], &{o}_m[r_i * {d}], &{o}_z[r_i * {d}]);
+  free(_q); free(_wq); free(_bq); {rbrace}"#,
+                    &[
+                        ("o", o.into()), ("x", x.into()), ("w", w.into()), ("b", b.into()),
+                        ("d", d.to_string()), ("rows", rows.to_string()),
+                        ("lbrace", "{".into()), ("rbrace", "}".into()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "GELU" => {
+            let a = args[0].as_str();
+            Ok((
+                fill(
+                    r#"/* {o} = GELU({a}) T2 mantissa-aware exact-erf LUT */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_gelu({as}, {ae}, {am}, {az}, &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()), ("a", a.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        "SOFTMAX_WIDE" | "SOFTMAX" => {
+            let x = args[0].as_str();
+            let d = ctx.width(x, "nonfpu T2 SOFTMAX")?;
+            Ok((
+                fill(
+                    r#"/* {o} = {mn}({x}) T2 row softmax @ BIAS */
+{ int64_t *_q = malloc({d} * 8);
+  int64_t *_num = malloc({d} * 8);
+  for (int64_t f_i = 0; f_i < {o}_N; ++f_i)
+    nf_t2_softmax_row(&{x}_s[f_i * {d}], &{x}_e[f_i * {d}], &{x}_m[f_i * {d}], &{x}_z[f_i * {d}],
+      {d}, _q, _num, &{o}_s[f_i * {d}], &{o}_e[f_i * {d}], &{o}_m[f_i * {d}], &{o}_z[f_i * {d}]);
+  free(_q); free(_num); }"#,
+                    &[
+                        ("o", o.into()), ("mn", mn.into()), ("x", x.into()),
+                        ("d", d.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
+        other => Err(Error::unimplemented(format!(
+            "nonfpu T2: no pattern for {other} (supported: MUL, SQUARE, ADD, SUB, \
+             MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE)"
+        ))),
+    }
+}
+
 fn fx_pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Result<Pat> {
+    if ctx.t2_m.is_some() {
+        return t2_pattern(mn, outs, args, ctx);
+    }
     let o = outs[0].as_str();
     if mn == "ARGMAX" {
         let src = args[0].as_str();

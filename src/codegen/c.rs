@@ -25,6 +25,8 @@ pub struct Ctx {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub nonfpu: bool,
+    /// `Some(M)` enables the T+mantissa (T2) value format with M-bit residual.
+    pub t2_m: Option<i64>,
     pub mns: Vec<String>,
     pub rope: Option<RopeCtx>,
 }
@@ -1731,7 +1733,12 @@ for (int64_t r = 0; r < {rows}; ++r) {
             match kind {
                 CKind::T => {
                     let mut body = format!("/* {o} = TRANSPOSE({x}) triples, exact move */\n");
-                    for comp in ["s", "e", "z"] {
+                    let comps: &[&str] = if ctx.t2_m.is_some() {
+                        &["s", "e", "m", "z"]
+                    } else {
+                        &["s", "e", "z"]
+                    };
+                    for comp in comps {
                         body.push_str(&format!(
                             "for (int64_t t_i = 0; t_i < {re}; ++t_i)\n  for (int64_t t_j = 0; t_j < {}; ++t_j)\n    {o}_{comp}[t_j * {re} + t_i] = {x}_{comp}[t_i * {} + t_j];\n",
                             c.unwrap(), c.unwrap()
@@ -1953,7 +1960,12 @@ for (int64_t w_i = 0; w_i < {o}_N; ++w_i) {
             match ctx.s(a)?.kind {
                 CKind::T => {
                     let mut body = format!("/* {o} = CONCAT({a},{b},1) triples, exact */\n");
-                    for comp in ["s", "e", "z"] {
+                    let comps: &[&str] = if ctx.t2_m.is_some() {
+                        &["s", "e", "m", "z"]
+                    } else {
+                        &["s", "e", "z"]
+                    };
+                    for comp in comps {
                         body.push_str(&format!(
                             "for (int64_t n_i = 0; n_i < {o}_N; ++n_i) {{\n  memcpy(&{o}_{comp}[n_i * {}], &{a}_{comp}[n_i * {da}], {da} * sizeof({o}_{comp}[0]));\n  memcpy(&{o}_{comp}[n_i * {} + {da}], &{b}_{comp}[n_i * {db}], {db} * sizeof({o}_{comp}[0]));\n}}\n",
                             da + db, da + db
