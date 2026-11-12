@@ -12,6 +12,11 @@ payload=${2:?usage: bench_runtime_warm.sh LISTING PAYLOAD [ITERS]}
 iters=${3:-3}
 repl=${JOTNAR_REPL:-target/release/jotnar-repl}
 outputs=${JOTNAR_OUTPUTS:-OUT}
+threads=${JOTNAR_THREADS:-1}
+extra=()
+if [ "${JOTNAR_PROFILE:-0}" = "1" ]; then
+  extra+=(--profile)
+fi
 
 if [ ! -x "$repl" ]; then
   echo "missing $repl; run: cargo build --release --bin jotnar-repl" >&2
@@ -29,7 +34,7 @@ for _ in $(seq "$iters"); do
   cat "$payload"
   printf '\n'
 done | /usr/bin/time -v "$repl" "$listing" --outputs "$outputs" --stats \
-  >/dev/null 2>"$tmp"
+  --threads "$threads" "${extra[@]}" >/dev/null 2>"$tmp"
 
 echo "listing: $listing"
 echo "payload: $payload ($(du -h "$payload" | cut -f1))"

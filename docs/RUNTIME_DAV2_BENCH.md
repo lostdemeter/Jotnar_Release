@@ -93,6 +93,33 @@ stores/execs.
 - That the runtime should replace fast-float or compiled fast-int for live
   production.
 
+## Update: deterministic threading (`research/jotnar-job-server`)
+
+The follow-up experiment added a per-job execution thread budget and
+output-partitioned kernels (MATMUL rows, CONV2D/DECONV2D output elements,
+SOFTMAX rows) without changing any accumulation order. Results at 518 px:
+
+- T2 layer 0: **~29 s → 2.65–2.71 s at 16 threads** (~10.9x), identical `OUT`
+  hash.
+- T2 neck: **63.9 s serial → 5.2 s at 16 threads** (12.3x), identical
+  `NA0..NA3` hash. The old T2 convolution allocated one term vector per output
+  pixel (460 GiB allocated for 170 MiB of output); one reused scratch buffer
+  per worker removed the churn.
+- T2 head: **39.0 s serial → 3.15 s at 16 threads** (12.4x), identical `OUT`
+  hash (3 convolutions + resize).
+- Full 12-block backbone: **335.4 s serial → 27.7 s at 16 threads** (12.1x),
+  hash-identical. That is at or slightly faster than the compiled 16-thread
+  fast-int backbone (29.0 s).
+- Stage-wise full T2 depth (backbone + neck + head, 518 px):
+  **~438 s serial → ~36 s at 16 threads**, hash-identical at every stage.
+- Two concurrent backbone jobs at 8 threads each complete in 52.9 s (slowest)
+  with the same output hash.
+
+This supersedes the "single-threaded and ignores `CONFIG threads`" statement
+above. The thread budget is independent of `CONFIG threads`; see
+`docs/RUNTIME_THREADING.md` for the determinism contract, harness
+(`jotnar-det`), and full profile.
+
 ## Recommendation
 
 1. **Use the runtime as the native execution/reference engine**, not a custom
