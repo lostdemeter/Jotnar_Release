@@ -177,17 +177,20 @@ pub fn encode_stream(v: &Value) -> Result<(StreamSpec, Vec<u8>)> {
                     b,
                 ));
             }
-            // Frozen T keeps the original widened wire format for
-            // compatibility with existing nodes/clients.
+            // Frozen T keeps the pre-T2 wire contract: 24 bytes per
+            // element, interleaved s/e/z as i64. (The pre-T2 decoder read
+            // this layout; the old encoder wrote planes by mistake, which
+            // only happened to work for a single element.)
+            let (ss, ee, zz) = (
+                t.s.as_slice().expect("standard-layout sign plane"),
+                t.e.as_slice().expect("standard-layout exponent plane"),
+                t.z.as_slice().expect("standard-layout zero plane"),
+            );
             let mut b = Vec::with_capacity(n * 24);
-            for x in t.s.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
-            }
-            for x in t.e.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
-            }
-            for x in t.z.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
+            for i in 0..n {
+                b.extend_from_slice(&(ss[i] as i64).to_le_bytes());
+                b.extend_from_slice(&(ee[i] as i64).to_le_bytes());
+                b.extend_from_slice(&(zz[i] as i64).to_le_bytes());
             }
             Ok((
                 StreamSpec {
@@ -278,9 +281,19 @@ pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
                 Some(m),
             )?))
         }
-        ("T", "i64x3") => {
+        // Frozen-T compatibility: the pre-T2 decoder accepted any dtype as
+        // long as the payload was the 24-byte-per-element i64x3 layout. Keep
+        // that fallback (after the explicit T2 arm) so old clients and
+        // hand-written `dtype: ""`/`"i64"` payloads still work; a wrong
+        // length still fails loud.
+        ("T", _) => {
             if payload.len() != n * 24 {
-                return Err(Error::runtime("protocol: T payload size"));
+                return Err(Error::runtime(format!(
+                    "protocol: unsupported T/{:?} payload size {} (expected {})",
+                    spec.dtype,
+                    payload.len(),
+                    n * 24
+                )));
             }
             let mut s = Vec::with_capacity(n);
             let mut e = Vec::with_capacity(n);

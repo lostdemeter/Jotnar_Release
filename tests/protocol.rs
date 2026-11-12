@@ -336,3 +336,38 @@ fn node_receipt_is_canonical_and_excludes_timing() {
         );
     }
 }
+
+#[test]
+fn frozen_t_accepts_legacy_dtype_and_rejects_wrong_length() {
+    let t2t = t2_triple(&[2, 3], &[0.5, -1.25, 2.0, -0.75, 3.5, 0.125]);
+    let frozen = jotnar::Triple::from_vecs(
+        &t2t.shape(),
+        t2t.s.iter().copied().collect(),
+        t2t.e.iter().copied().collect(),
+        t2t.z.iter().copied().collect(),
+    )
+    .unwrap();
+    let (spec, bytes) = encode_stream(&Value::Triple(frozen.clone())).unwrap();
+    assert_eq!(spec.dtype, "i64x3");
+
+    for legacy in ["", "i64", "i64x3"] {
+        let mut s = spec.clone();
+        s.dtype = legacy.to_string();
+        let back = match decode_stream(&s, &bytes).unwrap() {
+            Value::Triple(t) => t,
+            _ => panic!("not a triple"),
+        };
+        assert_eq!(back.s, frozen.s, "dtype {legacy:?} sign");
+        assert_eq!(back.e, frozen.e, "dtype {legacy:?} exponent");
+        assert_eq!(back.z, frozen.z, "dtype {legacy:?} zero");
+        assert!(back.m.is_none(), "frozen T gained a mantissa");
+    }
+
+    // An unknown dtype with the legacy 24-byte layout is accepted for
+    // compatibility; the same unknown dtype with a truncated payload must
+    // still fail loud.
+    let mut unknown = spec.clone();
+    unknown.dtype = "mystery".into();
+    assert!(decode_stream(&unknown, &bytes).is_ok());
+    assert!(decode_stream(&unknown, &bytes[..bytes.len() - 1]).is_err());
+}
