@@ -4,34 +4,45 @@
 //! timestamp/dirty state: a receipt must name the binary deterministically,
 //! not the working tree. Falls back to `unknown` when git is unavailable
 //! (for example a source tarball).
+//!
+//! Cargo caches build-script output, so we watch the real ref files (HEAD,
+//! the current branch ref, and packed-refs). Watching only `.git/HEAD` is
+//! not enough: it names the branch, and that file does not change when the
+//! branch advances.
 
 use std::process::Command;
 
+fn git(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn main() {
-    let hash = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let hash =
+        git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=JOTNAR_GIT_HASH={hash}");
 
-    // Re-run when HEAD moves (branch switch) or the build script changes.
-    // A normal source change already invalidates the build; this keeps the
-    // identity reasonably fresh without shelling out on every compile.
     println!("cargo:rerun-if-changed=build.rs");
-    if let Ok(out) = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-    {
-        if out.status.success() {
-            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !dir.is_empty() {
-                println!("cargo:rerun-if-changed={dir}/HEAD");
-            }
+    // Detached HEAD / branch switch.
+    if let Some(p) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={p}");
+    }
+    // The branch ref itself: this is what changes on commit.
+    if let Some(refname) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(p) = git(&["rev-parse", "--git-path", &refname]) {
+            println!("cargo:rerun-if-changed={p}");
         }
+    }
+    // Packed refs (after gc) hold the branch tip when the loose ref is gone.
+    if let Some(p) = git(&["rev-parse", "--git-path", "packed-refs"]) {
+        println!("cargo:rerun-if-changed={p}");
     }
 }
