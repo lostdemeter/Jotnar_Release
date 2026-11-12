@@ -35,6 +35,52 @@ impl Default for ExecOptions {
     }
 }
 
+/// Stable identifier for the deterministic partition/scheduling scheme.
+/// Bump when the mapping from shape+threads to work blocks changes, so
+/// receipts from different schedules can be told apart.
+pub const SCHED_VERSION: u64 = 1;
+
+/// How a caller at the job-server/CLI boundary chooses a thread budget.
+///
+/// The library default stays [`ExecOptions::default`] (one thread): embedding
+/// code is never silently threaded. Auto-threading is an explicit policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadPolicy {
+    /// Permanent oracle: the exact serial order.
+    Reference,
+    /// The largest deterministic budget available, capped by the job budget.
+    DeterministicAuto,
+}
+
+impl ThreadPolicy {
+    /// Parse a protocol/CLI policy name. `None` means "not a known policy".
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "reference" | "serial" => Some(Self::Reference),
+            "auto" | "deterministic-auto" => Some(Self::DeterministicAuto),
+            _ => None,
+        }
+    }
+
+    /// Resolve to a concrete budget. `job_budget == 0` means "no caller cap".
+    pub fn resolve(self, job_budget: usize) -> ExecOptions {
+        match self {
+            Self::Reference => ExecOptions::new(1),
+            Self::DeterministicAuto => {
+                let available = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+                let cap = if job_budget == 0 {
+                    available
+                } else {
+                    job_budget.min(available)
+                };
+                ExecOptions::new(cap)
+            }
+        }
+    }
+}
+
 fn find_end(prog: &[BoundInstr], i: usize) -> Result<usize> {
     let mut depth = 0i32;
     for (j, ins) in prog.iter().enumerate().skip(i) {

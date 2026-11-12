@@ -50,6 +50,19 @@ pub enum Value {
     None,
 }
 
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Canonical FNV-1a over bytes. Used for program/blob/input/output receipts.
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = FNV_OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 impl Value {
     /// Exact byte size of the stream's arithmetic payload, used by the
     /// profile/allocation budget. This is the volume an op materialises,
@@ -122,6 +135,13 @@ impl Value {
             }
             Value::None => {}
         }
+    }
+
+    /// Canonical hash of the exact arithmetic bytes (planes, not JSON).
+    pub fn exact_hash(&self) -> u64 {
+        let mut h = FNV_OFFSET;
+        self.hash_into(&mut h);
+        h
     }
 
     pub fn kind(&self) -> Kind {

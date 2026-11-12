@@ -169,6 +169,36 @@ Recorded hashes (this build): layer-0 `OUT` `68960ef97c3c1960` at 518 and
 `7cf39ca993d814e0` at 112; backbone `M0..M3` `38fb36f90fbb25e5`; neck
 `811c687f1de57a9d`; head `321940074394c7bb`.
 
+## Protocol/node follow-up (review integration)
+
+The T2/session review found two drifts in `src/protocol.rs`; both are fixed:
+
+- `ping` now reports `ops::registry().len()` instead of a hardcoded 86.
+- `Node::exec` honours execution options: `threads: N` is a literal job
+  budget, and `thread_policy: "auto" | "reference"` is explicit. The default
+  stays the 1-thread reference order. `ExecOptions::default()` in the library
+  remains 1; auto-threading lives at the job/CLI boundary.
+- `exec-ok` now carries a canonical `receipt` (BTreeMap-backed JSON, no
+  timing): program/blob/input/output hashes, determinism profile, backend,
+  kernel, runtime version, `sched_version`, resolved threads, partition
+  descriptor, and verdict. `profile_ops: true` adds advisory per-op timing
+  *outside* the receipt.
+- T2 streams now round-trip all four planes over the protocol using a compact
+  `T/t2` wire dtype (s:i8, e:i32, z:u8, m:i32 = 10 bytes/element). Frozen T
+  keeps the existing `T/i64x3` format.
+- `NodeHandle` uses a bounded request queue (`spawn_bounded`; default 64) so
+  callers get backpressure. Program/store requests still share the single
+  worker, and immutable `Arc` snapshots are the next job-server step.
+- `jotnar-ctl exec` accepts `--threads`, `--policy reference|auto`, and
+  `--receipt`. A single-job TCP smoke with the 112 px T2 layer produced
+  identical output bytes for reference and auto; receipts matched on program
+  and output hashes and differed only in resolved threads/partition.
+
+**Transport size limit:** a 64 MiB frame carries about 6.7M T2 elements. A
+296x296x384 neck output is ~336 MiB, so neck/head job outputs need
+chunked/segmented transport (or a store-backed result) before TCP parity is
+claimed. The in-process `NodeHandle` uses the same frames.
+
 ## What remains
 
 1. **Backbone/full-depth determinism**: green at 1/4/16 threads (and a
