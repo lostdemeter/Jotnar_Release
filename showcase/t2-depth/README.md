@@ -28,12 +28,12 @@ These are the only claims a reviewer can reproduce from this branch:
   to the T2 interpreter.
 - `CONFIG threads N` (1..=256; 0 typed) emits OpenMP over T2 `MATMUL`
   rows and produces identical T2 output.
-- Gates: **223/223 workspace tests**, **26/26** Rust parity, fmt clean.
+- Gates: **231/231 workspace tests**, **26/26** Rust parity, fmt clean.
 
 ```sh
 cargo test --test nonfpu_t2
 cargo test -p phi-core t2::
-cargo test --workspace -- --test-threads=1    # 223/223
+cargo test --workspace -- --test-threads=1    # 231/231
 python3 scripts/parity_rust.py --bin target/debug/jotnar   # 26/26
 ```
 

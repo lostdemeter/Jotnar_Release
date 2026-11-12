@@ -193,7 +193,7 @@ same loop at different layers:
 | DOOM | RV32IM checkpoint | C native + GPU state | all programs / plan completeness |
 | analog filter | edge/hole field | L1 + cost + nulls | physical analog hardware |
 | certified agent | harness/pipeline edits | exact interpreter + C/non-FPU parity | open-ended self-improvement / universal equivalence |
-| interpreter + node | warm listings / framed TCP | exact bytes + transport bench | serve mode / TLS / host-side placement |
+| interpreter + node + job server | warm listings / framed TCP / threaded T2 | exact bytes across 1–16 threads, repeats, concurrent jobs + receipts | live serve / large-output or concurrent TCP / TLS / memory policy / host-side placement |
 
 The broader eight from the other Jotnar projects — board v2, solver, field
 guide, Yarnball, Echion, resonance/Hopfield, depth — are registered later

@@ -61,7 +61,7 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          223/223
+workspace tests          231/231
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms
@@ -90,6 +90,12 @@ fixed-point bridge width (default 18); T2 uses 24. See
   the store-hook fused executor. The in-process frame codec, registry, blob
   shelf, deterministic EXEC path, and TCP transport (`jotnar-node`) are
   in place.
+- Deterministic job-server Stage E: concurrent TCP jobs, cancellation and
+  timeouts, `Arc` snapshots that decouple `program`/`store` from a long
+  `exec`, a per-job memory policy, and chunked/segmented or store-backed
+  results for outputs larger than one frame. The current node is one client
+  at a time with a bounded in-process queue; TCP parity is claimed only for
+  single-job, small-output T2.
 - The model-side phi-core modules (`calibrate`, `score`, `compose`, `stamp`,
   `zoo`); the substrate crate covers the lattice/triple/exact helpers and
   numpy-style ops Jotnar consumes.
@@ -105,7 +111,7 @@ trace and p99/max gate before calling the frontend finished.
 ```text
 jotnar check  <file.asm> [--stdlib DIR]
 jotnar verify <file.asm> [--stdlib DIR] [--json]
-jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--stdlib DIR]
+jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--threads N] [--stdlib DIR]
 jotnar ops
 ```
 
@@ -128,15 +134,20 @@ declared layouts and prints the DEF interface table. `run` executes and
 writes every stream (or named outputs). `--stdlib DIR` overrides `IMPORT`
 search; otherwise the frontend searches the listing directory and ancestors.
 
-## Runtime binaries (`jotnar-repl`, `jotnar-node`, `jotnar-ctl`, `jotnar-bench`)
+## Runtime binaries (`jotnar-repl`, `jotnar-det`, `jotnar-node`, `jotnar-ctl`, `jotnar-bench`)
 
 ```text
 jotnar-repl <file.asm> [--stdlib DIR] [--outputs a,b] [--pretty] [--stats]
+            [--threads N] [--profile]
+jotnar-det  <file.asm> <payload.ndjson> [--outputs a,b]
+            [--threads 1,4,16] [--repeat N]
+            [--concurrency 1,2,8] [--job-threads N] [--stagger-ms N]
 jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
 jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
 jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>
 jotnar-ctl  [--addr ADDR] [--token SECRET] exec <handle> --payload <payload.json> --outputs a,b
+            [--threads N] [--policy reference|auto] [--receipt]
 jotnar-ctl  [--addr ADDR] [--token SECRET] drop <name>
 jotnar-bench [--jobs N] [--workload matmul2|vec|u8|f64|shelf] [--n N] [--modes inproc,tcp-frames,tcp-json]
 ```
@@ -157,13 +168,47 @@ cargo run --release --bin jotnar-bench -- --workload u8 --side 128 --jobs 100
 cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 ```
 
+`jotnar-det` is the exact-output determinism harness. It assembles once and
+replays NDJSON payloads across thread budgets, repeats, and staggered
+concurrent jobs, hashing every requested stream and exiting 1 on any
+mismatch. `--threads 1,4,16` is the usual matrix; `--repeat 2` checks
+repeated runs; `--concurrency 2,8 --job-threads 4 --stagger-ms 20` checks
+independent jobs with varying completion order.
+
+Execution budgets are per job, not per listing: `ExecOptions::default()` is
+**one thread** (the permanent oracle), and auto-threading is an explicit
+boundary policy (`ThreadPolicy::{Reference, DeterministicAuto}`) used by
+`jotnar run --threads`, `jotnar-repl --threads`, `jotnar-node` exec headers,
+and `jotnar-ctl exec --policy`. `CONFIG threads` remains a compiled-target
+directive only; the runtime never reuses it as the job budget. The
+output-partitioned T2 kernels keep each output's accumulation order fixed, so
+1/4/16 threads are hash-identical.
+
+An `exec-ok` response carries a canonical `receipt` with program/blob/input/
+output hashes, determinism profile, backend/kernel, runtime version (package
+plus short git), scheduler version, resolved threads, partition descriptor,
+and verdict. `profile_ops: true` adds advisory per-op timing outside the
+receipt. T2 streams use the compact `T/t2` wire dtype (`s:i8, e:i32, z:u8,
+m:i32` = 10 bytes/element); frozen T keeps the interleaved 24-byte
+`i64x3` form. A 64 MiB frame carries about 6.7M T2 elements, so large
+application outputs need chunked or store-backed transport before TCP parity
+is claimed.
+
 `jotnar-repl` assembles once, then answers one JSON payload per stdin
 line (errors are per-line `{"error": ...}`, the process stays alive).
 `jotnar-node` is the model-blind worker: framed TCP (`u32BE || JSON ||
 payload`), one client at a time, loopback by default, `--max-frame`
-(64 MiB default) and `--token` for non-loopback binds. See
-`docs/RUNTIME_RESEARCH.md` for the transport measurements and
-`showcase/runtime/` for the exhibit.
+(64 MiB default) and `--token` for non-loopback binds.
+`--bind 127.0.0.1:0` binds an OS-assigned ephemeral port and prints the
+resolved address on stderr. `exec` headers accept `threads: N` (literal job
+budget) and `thread_policy: "reference" | "auto"`; the default stays the
+one-thread reference order. `ping` (pong) and `exec-ok` carry
+`runtime_version=<crate>+<short-git>`. The in-process `NodeHandle` uses a
+bounded queue (default 64), but one worker: program/store mutations can
+still queue behind a long exec until `Arc` snapshots land. See
+`docs/RUNTIME_RESEARCH.md` for transport measurements,
+`docs/RUNTIME_THREADING.md` for the determinism/threading design, and
+`showcase/runtime/` for the exhibit and claim boundary.
 
 ## Payload format
 

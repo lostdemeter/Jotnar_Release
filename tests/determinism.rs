@@ -3,7 +3,7 @@
 //! Independent outputs are partitioned across workers; the reference
 //! (single-thread) hash must survive every thread count, repeat, and
 //! concurrent job. This test is the cheap CI companion to the `jotnar-det`
-//! harness, which does the same over real DAV2 listings.
+//! harness, which does the same over external listings.
 
 use jotnar::asm::AsmOptions;
 use jotnar::payload::Feeds;

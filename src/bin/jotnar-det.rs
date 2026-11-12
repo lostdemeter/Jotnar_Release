@@ -5,7 +5,7 @@
 //! mismatch against the single-thread reference is a hard failure.
 //!
 //! ```sh
-//! jotnar-det layer0.asm payload.ndjson --outputs OUT \
+//! jotnar-det program.asm payload.ndjson --outputs OUT \
 //!   --threads 1,2,4,8,16 --repeat 3 --concurrency 1,2,8
 //! ```
 //!

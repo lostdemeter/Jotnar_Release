@@ -147,7 +147,7 @@ Each one is a different angle on the same stack. The full visual index is
 | [DOOM](showcase/doom/) | native frame exact; checkpoint frame 2 exact vs GPU |
 | [Analog filter](showcase/analog_filter/) | quality and cost, including the negative real-hole limit |
 | [Certified agent](showcase/agent/) | exact-gate harness composition; bit-exact backend pipeline with C/non-FPU parity |
-| [Interpreter + node](showcase/runtime/) | warm execution; same bytes over framed TCP |
+| [Interpreter + node](showcase/runtime/) | warm execution; deterministic threaded kernels; same bytes over framed TCP |
 
 ## Start here
 
@@ -173,7 +173,12 @@ The front door is deliberately short. The actual parts are here:
 - code generators: [`src/codegen/`](src/codegen/)
 - structural Verilog: [`src/verilog.rs`](src/verilog.rs)
 - RV32IM and DOOM: [`src/rv32.rs`](src/rv32.rs)
-- in-process node protocol: [`src/protocol.rs`](src/protocol.rs)
+- in-process node protocol and deterministic job-server research:
+  [`src/protocol.rs`](src/protocol.rs),
+  [`docs/RUNTIME_THREADING.md`](docs/RUNTIME_THREADING.md),
+  [`showcase/runtime/`](showcase/runtime/)
+- per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
+  [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - certificates and verification: [`crates/jotnar-lab`](crates/jotnar-lab)
 - autonomous listing circuit and experience loop: [`crates/jotnar-agent`](crates/jotnar-agent)
 - language reference and field notes: [`manual/`](manual/)
@@ -189,7 +194,8 @@ The front door is deliberately short. The actual parts are here:
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
-223/223 workspace tests
+exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
+231/231 workspace tests
 ```
 
 These are gates, not a leaderboard. The details and commands are in

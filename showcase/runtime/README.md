@@ -1,5 +1,12 @@
 # Interpreter + model-blind node (warm execution over TCP)
 
+> **Status: language-repo exhibit 10.** The deterministic job-server section
+> below is first-class research/tooling, not a production serve claim. The
+> language repository certifies the hash-identical kernels, receipts, build
+> provenance, and small-output transport; application performance and Stage E
+> live-service behavior are not certified here. See
+> [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
+
 The warm interpreter and the network node are one processor with two
 front doors:
 
@@ -68,18 +75,67 @@ JSON at 64K elements; image blobs inflate JSON to 4.6× the frame
 bytes. The blob shelf pays the store once and references it by name
 thereafter.
 
+## Deterministic job server (research)
+
+The node boundary now carries the deterministic threading work. This is
+language/runtime research, not a production serve claim:
+
+- **Per-job execution budget.** `ExecOptions::default()` is one thread (the
+  permanent oracle). Auto-threading is explicit at the boundary:
+  `ThreadPolicy::{Reference, DeterministicAuto}`, `jotnar run/repl --threads`,
+  `jotnar-ctl exec --policy`, or the node's `thread_policy` header.
+  `CONFIG threads` remains a compiled-target directive and is never reused as
+  the job budget.
+- **Output-partitioned T2 kernels.** MATMUL rows, CONV2D/DECONV2D flattened
+  outputs, and SOFTMAX rows are split into stable contiguous blocks. Each
+  output keeps the serial exponent scan and ascending accumulation order, so
+  1/4/16 threads, repeats, and concurrent jobs are hash-identical.
+- **Exact harness.** `jotnar-det` replays NDJSON payloads across thread
+  budgets, repeats, and staggered concurrent jobs, hashing the requested
+  streams and failing loudly on mismatch. `tests/determinism.rs` is the
+  short CI gate.
+- **Receipts and provenance.** `exec-ok` carries a canonical receipt:
+  program/blob/input/output hashes, determinism profile, backend/kernel,
+  runtime version (`<crate>+<short-git>`), scheduler version, resolved
+  threads, partition descriptor, and verdict. Per-op timing is advisory and
+  never enters the receipt.
+- **Transport and queue.** T2 streams use the compact `T/t2` wire dtype
+  (`s:i8, e:i32, z:u8, m:i32` = 10 B/element); frozen T keeps the
+  interleaved 24-byte `i64x3` form. `NodeHandle` has a bounded request queue
+  (default 64). `jotnar-node --bind 127.0.0.1:0` reports its resolved
+  ephemeral address.
+
+Reproduce the language-side claims without application payloads:
+
+```sh
+cargo test --release --test determinism      # 1..16 threads, repeats, concurrent jobs
+cargo test --release --test protocol         # T2 transport, receipts, ping/build identity
+cargo run --release --bin jotnar-det -- <listing.asm> <payload.ndjson> \
+  --outputs OUT --threads 1,4,16 --repeat 2
+```
+
+Application-level DAV2 layer-0/backbone/neck/head measurements are
+companion-repository evidence and are not reproduced from this repository.
+See [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md) for the certified/research
+split and the Stage E blockers.
+
 ## Proves
 
 Local warm execution and remote model-blind execution are the same
 deterministic boundary: same program + same input bytes = same output
-bytes, with compile cost removed from the per-command path.
+bytes, with compile cost removed from the per-command path. The T2 kernels
+certified here are hash-identical across the tested thread counts, repeats,
+and in-process concurrent jobs, and the receipt names the build and
+partition.
 
 ## Does not prove
 
 Cross-backend float bit-identity (integer/triple are cross-target
 exact; float is exact on identical engines/orders), TLS beyond the
 loopback + `--token` trusted-LAN model, or host-side workload
-placement (that lives in the controller, by design).
+placement (that lives in the controller, by design). It does not prove
+large-output TCP parity, concurrent TCP, cancellation/timeouts, a memory
+quota, or live service.
 
 ## Boundaries (explicit)
 
@@ -93,6 +149,16 @@ placement (that lives in the controller, by design).
   as `error/too-large` and the connection closes.
 - The JSON arm is a benchmark/debugging aid, not a supported wire.
 - Numbers above are one-machine observations, not cross-host gates.
+- **Stage E research, not claimed:** concurrent TCP jobs,
+  cancellation/timeouts, `Arc` snapshots for program/store, a per-job memory
+  policy, and chunked/segmented or store-backed results for outputs larger
+  than one frame. A 64 MiB frame carries ~6.7M T2 elements; application
+  neck/head outputs are much larger, so TCP parity is not claimed for them.
+- `NodeHandle` has a bounded queue but one worker; a long `exec` can still
+  delay `program`/`store` until snapshots land.
+- FNV-1a 64-bit is a fast fingerprint, not a cryptographic content address.
+  Do not use these hashes for immutable dedup or security without a stronger
+  hash.
 
 ## Footprint (one-off observation, reproducible)
 

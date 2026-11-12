@@ -1256,7 +1256,7 @@ cargo build --release
 </tbody></table>
 <p><code>run_doom_demo.sh</code> is <strong>playable by default</strong>. <code>--frames N</code> is the headless path. If the external image or WAD is absent, the script falls back to the checked-in reference title and does not pretend the live run happened.</p>
 <aside class="warning span-all"><div class="aside-title">DRAFT NOTICE</div><p>This is <strong>issue 01</strong>, a first rough draft. Some chapters describe behavior that is gated by parity scripts but not yet exposed in the CLI. Some commands are stable; some are scaffolding. Where the manual and the assembler disagree, the assembler wins. Where the assembler and the oracle disagree, the parity harness wins. Where the harness and reality disagree, file a bug.</p>
-</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>223/223 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
+</aside><aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>The Rust workspace is green at <strong>231/231 tests</strong>. The self-contained trust-spine example verifies <strong>PASS</strong>. The real DOOM certificate verifies <strong>PASS on this host</strong>, and correctly prints <strong>BLOCKED</strong> when its local <code>/tmp</code> artifacts are absent. The manual’s witness script passes <strong>4/4</strong> listings. The trust spine has its own appendix now: <strong>Appendix A</strong>.</p>
 </aside><h2>Conventions</h2>
 <table><thead><tr><th>Convention</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>UPPERCASE</code></td><td>A mnemonic, directive, or keyword.</td></tr>
@@ -2604,7 +2604,7 @@ layouts resolved: 53/59 (0 error(s))
   </div>
   <p class="chapter-lede">Four exhibits that are deliberately different: a real game, a word-level inference unit, a model-blind fleet, and an honest analog filter.</p>
 </header>
-<div class="chapter-body cols-2"><p><span class="dropcap">A</span> language is only as convincing as the things people build with it. The full index has ten exhibits; Part IV is a <strong>selected set of four</strong>: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18), the certified agent/backend-tuning exhibit lives in <code>showcase/agent/</code>, and the interpreter/model-blind node exhibit lives in <code>showcase/runtime/</code>. These four stories are not benchmarks. They are stories about the same stack under different pressures.</p>
+<div class="chapter-body cols-2"><p><span class="dropcap">A</span> language is only as convincing as the things people build with it. The full index has ten exhibits; Part IV is a <strong>selected set of four</strong>: the 43-op image pipeline and the DAC → RC → ADC analog field have their own chapters (17 and 18), the certified agent/backend-tuning exhibit lives in <code>showcase/agent/</code>, and the interpreter/model-blind node exhibit — now including the deterministic job-server research — lives in <code>showcase/runtime/</code>. These four stories are not benchmarks. They are stories about the same stack under different pressures.</p>
 <h2>DOOM on the RV32IM core</h2>
 <p>A real compiled program on a real machine model. <code>doomgeneric</code> is built with Zig clang/lld for <code>riscv32-freestanding -mcpu=generic_rv32+m</code>, producing an 847,112-byte flat image. The Rust core implements RV32I + M, the CSR/trap surface, and the MMIO the game needs: WAD, framebuffer, clock, frame counter, key ring, UART/CLINT.</p>
 <pre><code class="language-text">frame 1: 24,502,445 instructions, pc=0x00048860
@@ -2814,7 +2814,7 @@ cargo run -p jotnar-lab -- bench doom \
   --runner target/release/jotnar-demo-doom --runs 3 \
   --certificate certificates/doom/native-gpu-migration.json
 </code></pre>
-<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>223/223</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
+<aside class="note span-all"><div class="aside-title">STATUS AT THIS DRAFT / 2026-11-08</div><p>Workspace tests: <strong>231/231</strong>. Self-contained example certificate: <strong>PASS</strong>. DOOM certificate: <strong>PASS on this host</strong>, and <strong>BLOCKED</strong> when the local artifacts are absent. Manual witness: <strong>4/4</strong> listings. The trust spine does not make every Jotnar claim certified; it makes the claim’s boundary explicit.</p>
 </aside><h2>What the harness must not do</h2>
 <ul>
 <li>It must not call a blocked run a pass.</li>

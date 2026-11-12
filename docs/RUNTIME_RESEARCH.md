@@ -1,8 +1,10 @@
 # Runtime research: warm interpreter + network node
 
 Status: merged runtime research note. The warm `jotnar-repl`, TCP
-`jotnar-node`/`jotnar-ctl`, and transport bench are in place. For the first
-DAV2-scale measurement see [`RUNTIME_DAV2_BENCH.md`](RUNTIME_DAV2_BENCH.md). The goal is twofold:
+`jotnar-node`/`jotnar-ctl`, transport bench, and deterministic threading
+work are in place; see [`RUNTIME_THREADING.md`](RUNTIME_THREADING.md) for the
+model-blind determinism design. Application-scale measurements live in the
+companion depth-conversion repository, not here. The goal is twofold:
 (1) a small-footprint processor that takes Jotnar listings and processes
 them like an interpreted language locally, and (2) a network stack so
 the same processor can live on another machine, model-blind, and do work
