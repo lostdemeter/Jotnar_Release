@@ -31,7 +31,8 @@ fn usage() -> &'static str {
      usage:\n\
        jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]\n\
      \n\
-     ADDR defaults to 127.0.0.1:9999. --allow defaults to lattice.\n\
+     ADDR defaults to 127.0.0.1:9999. Port 0 binds an ephemeral port; the\n\
+     resolved address is printed on stderr. --allow defaults to lattice.\n\
      --max-frame defaults to 67108864 (64 MiB). --stats logs per-request ms.\n\
      Non-loopback binds require --token (trusted-LAN requirement).\n"
 }
@@ -177,9 +178,12 @@ fn run() -> Result<(), String> {
     }
     let listener =
         TcpListener::bind(&cfg.bind).map_err(|e| format!("cannot bind {}: {e}", cfg.bind))?;
+    let local = listener
+        .local_addr()
+        .map_err(|e| format!("cannot read bound address: {e}"))?;
     eprintln!(
         "jotnar-node v{} listening on {} (allowed {:?})",
-        PROTO_V, cfg.bind, cfg.allowed
+        PROTO_V, local, cfg.allowed
     );
     let mut node = Node::new(cfg.allowed.clone());
     if let Some(t) = cfg.token.clone() {

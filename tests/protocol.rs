@@ -3,7 +3,11 @@ use std::thread;
 
 use serde_json::json;
 
-use jotnar::protocol::{decode_frame, encode_frame, exec_outputs, request, Node, NodeHandle};
+use jotnar::protocol::{
+    decode_frame, decode_stream, encode_frame, encode_stream, exec_outputs, request, Node,
+    NodeHandle,
+};
+use jotnar::value::Value;
 
 fn i64_bytes(v: i64) -> Vec<u8> {
     v.to_le_bytes().to_vec()
@@ -45,6 +49,11 @@ fn node_program_store_and_exec_are_deterministic() {
     let r1 = node.handle(&exec);
     let r2 = node.handle(&exec);
     assert_eq!(r1, r2, "same request must produce the same frame bytes");
+    let (eh, _) = decode_frame(&r1).unwrap();
+    assert_eq!(
+        eh["runtime_version"],
+        format!("{}+{}", env!("CARGO_PKG_VERSION"), jotnar::BUILD_GIT_HASH)
+    );
     let out = exec_outputs(&r1).unwrap();
     assert_eq!(
         i64::from_le_bytes(out["OUT"].as_slice().try_into().unwrap()),
@@ -175,4 +184,47 @@ fn node_token_rejects_missing_and_bad_auth() {
     let f = request(3, "ping", json!({"auth": "s3cret"}), &[]).unwrap();
     let (h, _) = decode_frame(&node.handle(&f)).unwrap();
     assert_eq!(h["ok"], true);
+}
+
+#[test]
+fn ping_reports_live_registry_count_and_build_identity() {
+    let mut node = Node::new(vec!["lattice".into()]);
+    let f = request(1, "ping", json!({}), &[]).unwrap();
+    let (h, _) = decode_frame(&node.handle(&f)).unwrap();
+    assert_eq!(h["pong"]["mnemonics"], jotnar::ops::registry().len());
+    assert_eq!(
+        h["pong"]["runtime_version"],
+        format!("{}+{}", env!("CARGO_PKG_VERSION"), jotnar::BUILD_GIT_HASH)
+    );
+}
+
+#[test]
+fn frozen_t_wire_is_interleaved_and_length_checked() {
+    let frozen = jotnar::Triple::from_vecs(
+        &[2, 3],
+        vec![1, -1, 1, -1, 1, 1],
+        vec![100, 200, 300, 400, 500, 600],
+        vec![0, 0, 0, 0, 0, 0],
+    )
+    .unwrap();
+    let (spec, bytes) = encode_stream(&Value::Triple(frozen.clone())).unwrap();
+    assert_eq!(spec.dtype, "i64x3");
+    assert_eq!(bytes.len(), 6 * 24);
+
+    for dtype in ["", "i64", "i64x3", "mystery"] {
+        let mut s = spec.clone();
+        s.dtype = dtype.to_string();
+        let back = match decode_stream(&s, &bytes).unwrap() {
+            Value::Triple(t) => t,
+            _ => panic!("not a triple"),
+        };
+        assert_eq!(back.s, frozen.s, "dtype {dtype:?} sign");
+        assert_eq!(back.e, frozen.e, "dtype {dtype:?} exponent");
+        assert_eq!(back.z, frozen.z, "dtype {dtype:?} zero");
+        assert!(back.m.is_none(), "frozen T gained a mantissa");
+    }
+
+    let mut unknown = spec.clone();
+    unknown.dtype = "mystery".into();
+    assert!(decode_stream(&unknown, &bytes[..bytes.len() - 1]).is_err());
 }

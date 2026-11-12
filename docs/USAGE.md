@@ -61,7 +61,7 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          223/223
+workspace tests          225/225
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms
@@ -161,8 +161,12 @@ cargo run --release --bin jotnar-bench -- --workload shelf --n 16384 --jobs 100
 line (errors are per-line `{"error": ...}`, the process stays alive).
 `jotnar-node` is the model-blind worker: framed TCP (`u32BE || JSON ||
 payload`), one client at a time, loopback by default, `--max-frame`
-(64 MiB default) and `--token` for non-loopback binds. See
-`docs/RUNTIME_RESEARCH.md` for the transport measurements and
+(64 MiB default) and `--token` for non-loopback binds.
+`--bind 127.0.0.1:0` binds an OS-assigned ephemeral port and prints the
+resolved address on stderr; this is what the CLI tests use to avoid
+free-port races. `ping` (pong) and `exec-ok` responses carry
+`runtime_version` as `<crate>+<short-git>` so a client can name the exact
+binary. See `docs/RUNTIME_RESEARCH.md` for the transport measurements and
 `showcase/runtime/` for the exhibit.
 
 ## Payload format

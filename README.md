@@ -189,7 +189,7 @@ The front door is deliberately short. The actual parts are here:
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
-223/223 workspace tests
+225/225 workspace tests
 ```
 
 These are gates, not a leaderboard. The details and commands are in

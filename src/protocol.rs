@@ -23,6 +23,12 @@ use crate::value::{Triple, Value};
 
 pub const PROTO_V: u64 = 1;
 
+/// Build identity for protocol responses. Deterministic for a given binary:
+/// package version plus the short git HEAD resolved by `build.rs`.
+pub fn runtime_version() -> String {
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), crate::BUILD_GIT_HASH)
+}
+
 #[derive(Clone, Debug)]
 pub struct StreamSpec {
     pub kind: String,
@@ -151,15 +157,18 @@ pub fn encode_stream(v: &Value) -> Result<(StreamSpec, Vec<u8>)> {
         )),
         Value::Triple(t) => {
             let n = t.s.len();
+            // Frozen T is 24 bytes per element, interleaved s/e/z as i64.
+            // This matches the decoder (and the pre-T2 wire contract).
+            let (ss, ee, zz) = (
+                t.s.as_slice().expect("standard-layout sign plane"),
+                t.e.as_slice().expect("standard-layout exponent plane"),
+                t.z.as_slice().expect("standard-layout zero plane"),
+            );
             let mut b = Vec::with_capacity(n * 24);
-            for x in t.s.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
-            }
-            for x in t.e.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
-            }
-            for x in t.z.iter() {
-                b.extend_from_slice(&(*x as i64).to_le_bytes());
+            for i in 0..n {
+                b.extend_from_slice(&(ss[i] as i64).to_le_bytes());
+                b.extend_from_slice(&(ee[i] as i64).to_le_bytes());
+                b.extend_from_slice(&(zz[i] as i64).to_le_bytes());
             }
             Ok((
                 StreamSpec {
@@ -222,7 +231,12 @@ pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
         }
         ("T", _) => {
             if payload.len() != n * 24 {
-                return Err(Error::runtime("protocol: T payload size"));
+                return Err(Error::runtime(format!(
+                    "protocol: unsupported T/{:?} payload size {} (expected {})",
+                    spec.dtype,
+                    payload.len(),
+                    n * 24
+                )));
             }
             let mut s = Vec::with_capacity(n);
             let mut e = Vec::with_capacity(n);
@@ -319,7 +333,9 @@ impl Node {
                 &id,
                 "pong",
                 json!({"pong": {"impl": "jotnar-node", "v": PROTO_V,
-                                "backends": self.allowed, "mnemonics": 86}}),
+                                "backends": self.allowed,
+                                "mnemonics": crate::ops::registry().len(),
+                                "runtime_version": crate::protocol::runtime_version()}}),
                 &[],
             )),
             "program" => self.program(&id, &header, &payload),
@@ -491,7 +507,12 @@ impl Node {
             }
             specs.insert(name.to_string(), sj);
         }
-        Ok(Self::ok(id, "exec-ok", json!({"outputs": specs}), &payload))
+        Ok(Self::ok(
+            id,
+            "exec-ok",
+            json!({"outputs": specs, "runtime_version": runtime_version()}),
+            &payload,
+        ))
     }
 }
 
