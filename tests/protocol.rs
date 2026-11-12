@@ -325,6 +325,12 @@ fn node_receipt_is_canonical_and_excludes_timing() {
     assert_eq!(h1["receipt"], h2["receipt"]);
     assert_eq!(h1["receipt"]["threads"], 4);
     assert_eq!(h1["receipt"]["kernel"], "lattice-threaded");
+    let build = jotnar::BUILD_GIT_HASH;
+    assert!(!build.is_empty(), "build identity must not be empty");
+    assert_eq!(
+        h1["receipt"]["runtime_version"],
+        format!("{}+{}", env!("CARGO_PKG_VERSION"), build)
+    );
     let a = serde_json::to_vec(&h1["receipt"]).unwrap();
     let b = serde_json::to_vec(&h2["receipt"]).unwrap();
     assert_eq!(a, b, "receipt serialization must be canonical");

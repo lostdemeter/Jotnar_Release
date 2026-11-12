@@ -650,7 +650,14 @@ impl Node {
                 "lattice-scalar"
             }),
         );
-        receipt.insert("runtime_version".into(), json!(env!("CARGO_PKG_VERSION")));
+        receipt.insert(
+            "runtime_version".into(),
+            json!(format!(
+                "{}+{}",
+                env!("CARGO_PKG_VERSION"),
+                crate::BUILD_GIT_HASH
+            )),
+        );
         receipt.insert("sched_version".into(), json!(crate::runtime::SCHED_VERSION));
         receipt.insert("threads".into(), json!(exec.threads));
         receipt.insert(

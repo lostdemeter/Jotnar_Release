@@ -39,6 +39,9 @@ pub mod showcase;
 pub mod value;
 pub mod verilog;
 
+/// Short git HEAD resolved by `build.rs` (or `"unknown"` without git).
+pub const BUILD_GIT_HASH: &str = env!("JOTNAR_GIT_HASH");
+
 pub use error::{Error, Result};
 pub use ir::{BoundProgram, Config, InDecl, Instr, Program};
 pub use phi_core::t2;
