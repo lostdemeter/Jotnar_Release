@@ -4,6 +4,7 @@
 //! shape, or range; never silently coerce. Ops that are registered but not
 //! ported yet return [`crate::Error::Unimplemented`] (the Rust `NoPattern`).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -508,6 +509,32 @@ fn build_registry() -> Registry {
     );
 
     Registry { map: m }
+}
+
+thread_local! {
+    /// Per-execution thread budget. Each job sets this at its boundary; it is
+    /// not cross-job mutable state (jobs on different OS threads have
+    /// independent cells). Kernels read it instead of `CONFIG threads`.
+    static THREAD_BUDGET: Cell<usize> = const { Cell::new(1) };
+}
+
+/// Current job's execution thread budget (default 1: reference order).
+pub fn thread_budget() -> usize {
+    THREAD_BUDGET.with(|c| c.get())
+}
+
+/// Dispatch with a per-job thread budget. Restores the previous value even if
+/// the op fails, so a failed instruction cannot leak a budget.
+pub fn dispatch_with_threads(
+    name: &str,
+    args: &[Arg],
+    config: &Config,
+    threads: usize,
+) -> Result<Vec<Value>> {
+    let prev = THREAD_BUDGET.with(|c| c.replace(threads.max(1)));
+    let out = dispatch(name, args, config);
+    THREAD_BUDGET.with(|c| c.set(prev));
+    out
 }
 
 /// Dispatch one instruction. Arity/layout are the assembler's job; this is

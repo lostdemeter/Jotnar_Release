@@ -1,7 +1,10 @@
 # Runtime research: warm interpreter + network node
 
-Status: merged runtime research note. TCP transport is in place; serve mode
-is still open. The goal is twofold:
+Status: merged runtime research note. The warm `jotnar-repl`, TCP
+`jotnar-node`/`jotnar-ctl`, transport bench, and deterministic threading
+work are in place; see [`RUNTIME_THREADING.md`](RUNTIME_THREADING.md) for the
+model-blind determinism design. Application-scale measurements live in the
+companion depth-conversion repository, not here. The goal is twofold:
 (1) a small-footprint processor that takes Jotnar listings and processes
 them like an interpreted language locally, and (2) a network stack so
 the same processor can live on another machine, model-blind, and do work
@@ -17,15 +20,12 @@ This note records what the evidence says today, the candidate shapes for
 | assembler / verifier | `src/asm.rs` | IMPORT/DEF/CALL expansion, REPEAT/BREAK, `check`/`verify` |
 | reference interpreter | `src/runtime.rs` (`run`, `run_text`, `repeat`) | `run_text` reassembles every call; `run(&BoundProgram, &Feeds)` is the warm reuse path |
 | JSON payload codec | `src/payload.rs` | `{"streams": {...}}` with `F64/F32/I64/U8/Bool/T` |
-| model-blind node | `src/protocol.rs` (`Node`, `NodeHandle`) | in-process only, no sockets by design |
+| model-blind node | `src/protocol.rs` (`Node`, `NodeHandle`) | in-process boundary; TCP front end in `jotnar-node` |
 | frame codec | `src/protocol.rs` (`encode_frame`/`decode_frame`) | `u32BE \|\| JSON header \|\| payload`, `PROTO_V=1` |
 | CLI | `src/bin/jotnar.rs` | `check verify run emit-c build repeat ops`; one-shot: file + `--payload` → process → exit |
 
-The frame format is already TCP-ready: `showcase/protocol/README.md` says
-"Channels preserve the frame bytes and the model-blind boundary. A future
-TCP transport can replace the channel without changing `Node::handle`."
-The Open backlog (`docs/PORT_BACKLOG.md`, `docs/USAGE.md`) lists
-"TCP transport and serve mode" as not ported yet.
+The frame format is TCP-ready and now has a TCP front end: `showcase/runtime/`
+documents `jotnar-node` wrapping the same `Node::handle` boundary.
 
 ## 2. Measurements (release build, this machine)
 

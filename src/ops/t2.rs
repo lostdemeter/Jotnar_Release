@@ -68,11 +68,12 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             &tabs,
             m,
         )?),
-        "MATMUL" => one(phi_core::t2::matmul2(
+        "MATMUL" => one(phi_core::t2::matmul2_mt(
             triple(args, 0, name)?,
             triple(args, 1, name)?,
             &tabs,
             m,
+            super::thread_budget(),
         )?),
         "LAYERNORM" => one(phi_core::t2::layernorm(
             triple(args, 0, name)?,
@@ -83,12 +84,17 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             eps(config),
         )?),
         "GELU" => one(phi_core::t2::gelu(triple(args, 0, name)?, &tabs, m)?),
-        "SOFTMAX" | "SOFTMAX_WIDE" => one(phi_core::t2::softmax(triple(args, 0, name)?, &tabs, m)?),
+        "SOFTMAX" | "SOFTMAX_WIDE" => one(phi_core::t2::softmax_mt(
+            triple(args, 0, name)?,
+            &tabs,
+            m,
+            super::thread_budget(),
+        )?),
         "RELU" => one(phi_core::t2::relu_array(triple(args, 0, name)?)?),
         "CONV2D" => {
             let stride = arg_i64(args, 3, name, "stride")?;
             let pad = arg_i64(args, 4, name, "pad")?;
-            one(phi_core::t2::conv2d(
+            one(phi_core::t2::conv2d_mt(
                 triple(args, 0, name)?,
                 triple(args, 1, name)?,
                 triple(args, 2, name)?,
@@ -96,12 +102,13 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
                 pad,
                 &tabs,
                 m,
+                super::thread_budget(),
             )?)
         }
         "DECONV2D" => {
             let stride = arg_i64(args, 3, name, "stride")?;
             let pad = arg_i64(args, 4, name, "pad")?;
-            one(phi_core::t2::deconv2d(
+            one(phi_core::t2::deconv2d_mt(
                 triple(args, 0, name)?,
                 triple(args, 1, name)?,
                 triple(args, 2, name)?,
@@ -109,6 +116,7 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
                 pad,
                 &tabs,
                 m,
+                super::thread_budget(),
             )?)
         }
         "RESIZE2D" => {

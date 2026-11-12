@@ -30,7 +30,7 @@ fn usage() -> &'static str {
        jotnar-ctl [--addr ADDR] [--token SECRET] list\n\
        jotnar-ctl [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]\n\
        jotnar-ctl [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>\n\
-       jotnar-ctl [--addr ADDR] [--token SECRET] exec <handle> --payload <payload.json> --outputs a,b\n\
+       jotnar-ctl [--addr ADDR] [--token SECRET] exec <handle> --payload <payload.json> --outputs a,b [--threads N] [--policy reference|auto] [--receipt]\n\
        jotnar-ctl [--addr ADDR] [--token SECRET] drop <name>\n\
      \n\
      --addr defaults to 127.0.0.1:9999. --payload is the JSON shape from\n\
@@ -133,6 +133,9 @@ enum Plan {
         handle: String,
         payload: PathBuf,
         outputs: Vec<String>,
+        threads: Option<usize>,
+        policy: Option<String>,
+        receipt: bool,
     },
     Drop {
         name: String,
@@ -188,11 +191,14 @@ fn parse_plan(cmd: &str, mut args: Vec<String>) -> Result<Plan, String> {
                 return Err(format!("exec needs <handle>\n\n{}", usage()));
             }
             let handle = args.remove(0);
-            let (payload, outputs) = parse_exec_args(&args)?;
+            let (payload, outputs, threads, policy, receipt) = parse_exec_args(&args)?;
             Ok(Plan::Exec {
                 handle,
                 payload,
                 outputs,
+                threads,
+                policy,
+                receipt,
             })
         }
         "drop" => {
@@ -291,6 +297,9 @@ fn real_main() -> Result<(), String> {
             handle,
             payload: payload_file,
             outputs,
+            threads,
+            policy,
+            receipt,
         } => {
             let feeds = read_feeds(&payload_file)?;
             // Inline all inputs as segments.
@@ -305,10 +314,23 @@ fn real_main() -> Result<(), String> {
                 su(sj.as_object_mut(), "len", json!(bytes.len()));
                 inputs.insert(name.clone(), sj);
             }
-            let fields =
+            let mut fields =
                 json!({"handle": handle, "inputs": Json::Object(inputs), "outputs": outputs});
+            if let Some(o) = fields.as_object_mut() {
+                if let Some(t) = threads {
+                    o.insert("threads".into(), json!(t));
+                }
+                if let Some(p) = &policy {
+                    o.insert("thread_policy".into(), json!(p));
+                }
+            }
             let (h, resp) = roundtrip(&mut stream, 5, "exec", fields, &body, &token)?;
             ok_or_show(&h)?;
+            if receipt {
+                if let Some(r) = h.get("receipt") {
+                    eprintln!("{}", serde_json::to_string_pretty(r).unwrap());
+                }
+            }
             // Decode outputs to JSON streams where specs are present.
             let mut out_streams = serde_json::Map::new();
             if let Some(specs) = h.get("outputs").and_then(|x| x.as_object()) {
@@ -370,9 +392,14 @@ fn parse_payload_args(args: &[String]) -> Result<(PathBuf, String), String> {
     ))
 }
 
-fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+fn parse_exec_args(
+    args: &[String],
+) -> Result<(PathBuf, Vec<String>, Option<usize>, Option<String>, bool), String> {
     let mut file: Option<PathBuf> = None;
     let mut outputs: Option<Vec<String>> = None;
+    let mut threads: Option<usize> = None;
+    let mut policy: Option<String> = None;
+    let mut receipt = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -381,6 +408,27 @@ fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
                 let s = it.next().ok_or("--outputs needs a comma list")?;
                 outputs = Some(s.split(',').map(|s| s.trim().to_string()).collect());
             }
+            "--threads" => {
+                let s = it.next().ok_or("--threads needs a count")?;
+                let n = s
+                    .parse::<usize>()
+                    .map_err(|e| format!("bad --threads: {e}"))?;
+                if n == 0 {
+                    return Err("--threads must be >= 1".to_string());
+                }
+                threads = Some(n);
+            }
+            "--policy" => {
+                let s = it.next().ok_or("--policy needs a value")?;
+                if !matches!(
+                    s.as_str(),
+                    "reference" | "serial" | "auto" | "deterministic-auto"
+                ) {
+                    return Err(format!("bad --policy {s:?}"));
+                }
+                policy = Some(s.to_string());
+            }
+            "--receipt" => receipt = true,
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'")),
         }
@@ -388,5 +436,8 @@ fn parse_exec_args(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
     Ok((
         file.ok_or("--payload is required")?,
         outputs.ok_or("--outputs is required")?,
+        threads,
+        policy,
+        receipt,
     ))
 }

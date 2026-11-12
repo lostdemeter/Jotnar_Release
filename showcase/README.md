@@ -159,19 +159,28 @@ performance. Read the full claim in
 
 Warm execution without compiling: `jotnar-repl` assembles once locally,
 `jotnar-node` serves the same deterministic boundary over TCP, and
-`jotnar-bench` measures framed vs JSON transport head-to-head.
+`jotnar-bench` measures framed vs JSON transport head-to-head. The
+deterministic job-server research extends this boundary with per-job thread
+budgets, output-partitioned T2 kernels, exact-output receipts, and
+`jotnar-det`.
 
 ```sh
 cargo run --release --bin jotnar-repl -- showcase/language/saxpy.asm --outputs OUT
+cargo run --release --bin jotnar-det  -- <listing.asm> <payload.ndjson> \
+  --outputs OUT --threads 1,4,16 --repeat 2
 cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999 &
 cargo run --release --bin jotnar-ctl  -- --addr 127.0.0.1:9999 ping
 cargo run --release --bin jotnar-bench -- --jobs 2000
 ```
 
 Proves: warm local and remote execution share one deterministic
-boundary with no per-command compile step.
+boundary with no per-command compile step; the certified T2 kernels are
+hash-identical across the tested thread counts, repeats, and in-process
+concurrent jobs, and receipts name the build and partition.
 Does not prove: cross-backend float identity, TLS beyond loopback +
-token, or host-side placement (that lives in the controller).
+token, host-side placement (that lives in the controller), live serve,
+large-output/concurrent TCP, cancellation/timeouts, or a memory policy.
+See [`runtime/CLAIM_BOUNDARY.md`](runtime/CLAIM_BOUNDARY.md).
 
 ## Companion showcases
 

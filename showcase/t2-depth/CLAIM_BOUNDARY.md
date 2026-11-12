@@ -21,7 +21,7 @@ language repository makes:
   interpreter.
 - `CONFIG threads N` (1..=256; 0 typed) emits OpenMP over T2 `MATMUL` rows and
   produces identical T2 output.
-- **225/225** workspace tests, **26/26** Rust parity, `cargo fmt --check`
+- **231/231** workspace tests, **26/26** Rust parity, `cargo fmt --check`
   clean, `cargo test --test registry_docs` clean.
 
 ## What this repository does not certify

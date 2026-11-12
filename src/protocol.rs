@@ -18,8 +18,8 @@ use serde_json::{json, Value as Json};
 use crate::asm;
 use crate::error::{Error, Result};
 use crate::payload::Feeds;
-use crate::runtime;
-use crate::value::{Triple, Value};
+use crate::runtime::{self, ExecOptions, ThreadPolicy};
+use crate::value::{hash_bytes, Triple, Value};
 
 pub const PROTO_V: u64 = 1;
 
@@ -157,8 +157,36 @@ pub fn encode_stream(v: &Value) -> Result<(StreamSpec, Vec<u8>)> {
         )),
         Value::Triple(t) => {
             let n = t.s.len();
-            // Frozen T is 24 bytes per element, interleaved s/e/z as i64.
-            // This matches the decoder (and the pre-T2 wire contract).
+            // T2 carries a mantissa plane. Use a compact exact wire encoding
+            // (s:i8, e:i32, z:u8, m:i32 = 10 bytes/element) instead of
+            // widening every plane to i64.
+            if let Some(m) = &t.m {
+                let mut b = Vec::with_capacity(n * 10);
+                for x in t.s.iter() {
+                    b.push(*x as u8);
+                }
+                for x in t.e.iter() {
+                    b.extend_from_slice(&x.to_le_bytes());
+                }
+                for x in t.z.iter() {
+                    b.push(*x);
+                }
+                for x in m.iter() {
+                    b.extend_from_slice(&x.to_le_bytes());
+                }
+                return Ok((
+                    StreamSpec {
+                        kind: "T".into(),
+                        dtype: "t2".into(),
+                        shape: t.shape(),
+                    },
+                    b,
+                ));
+            }
+            // Frozen T keeps the pre-T2 wire contract: 24 bytes per
+            // element, interleaved s/e/z as i64. (The pre-T2 decoder read
+            // this layout; the old encoder wrote planes by mistake, which
+            // only happened to work for a single element.)
             let (ss, ee, zz) = (
                 t.s.as_slice().expect("standard-layout sign plane"),
                 t.e.as_slice().expect("standard-layout exponent plane"),
@@ -229,6 +257,41 @@ pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
                 payload.to_vec(),
             )?))
         }
+        ("T", "t2") => {
+            if payload.len() != n * 10 {
+                return Err(Error::runtime("protocol: T2 payload size"));
+            }
+            let mut s = Vec::with_capacity(n);
+            let mut e = Vec::with_capacity(n);
+            let mut z = Vec::with_capacity(n);
+            let mut m = Vec::with_capacity(n);
+            let mut off = 0usize;
+            for &b in &payload[off..off + n] {
+                s.push(b as i8);
+            }
+            off += n;
+            for c in payload[off..off + n * 4].chunks_exact(4) {
+                e.push(i32::from_le_bytes(c.try_into().unwrap()));
+            }
+            off += n * 4;
+            z.extend_from_slice(&payload[off..off + n]);
+            off += n;
+            for c in payload[off..off + n * 4].chunks_exact(4) {
+                m.push(i32::from_le_bytes(c.try_into().unwrap()));
+            }
+            Ok(Value::Triple(Triple::from_vecs_opt(
+                &spec.shape,
+                s,
+                e,
+                z,
+                Some(m),
+            )?))
+        }
+        // Frozen-T compatibility: the pre-T2 decoder accepted any dtype as
+        // long as the payload was the 24-byte-per-element i64x3 layout. Keep
+        // that fallback (after the explicit T2 arm) so old clients and
+        // hand-written `dtype: ""`/`"i64"` payloads still work; a wrong
+        // length still fails loud.
         ("T", _) => {
             if payload.len() != n * 24 {
                 return Err(Error::runtime(format!(
@@ -258,6 +321,8 @@ pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
 #[derive(Clone, Debug)]
 struct Program {
     bound: crate::ir::BoundProgram,
+    /// Canonical hash of the listing bytes as published.
+    hash: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -335,7 +400,7 @@ impl Node {
                 json!({"pong": {"impl": "jotnar-node", "v": PROTO_V,
                                 "backends": self.allowed,
                                 "mnemonics": crate::ops::registry().len(),
-                                "runtime_version": crate::protocol::runtime_version()}}),
+                                "runtime_version": runtime_version()}}),
                 &[],
             )),
             "program" => self.program(&id, &header, &payload),
@@ -386,7 +451,9 @@ impl Node {
         let listing = std::str::from_utf8(payload).map_err(|e| (e.to_string(), "malformed"))?;
         let bound = asm::assemble(listing, &asm::AsmOptions::new("."))
             .map_err(|e| (e.to_string(), "npattern"))?;
-        self.programs.insert(name.to_string(), Program { bound });
+        let hash = hash_bytes(listing.as_bytes());
+        self.programs
+            .insert(name.to_string(), Program { bound, hash });
         Ok(Self::ok(
             id,
             "program-ok",
@@ -457,6 +524,8 @@ impl Node {
             .get(handle)
             .ok_or((format!("no program {handle:?}"), "unknown-handle"))?;
         let mut feeds = Feeds::new();
+        let mut input_hashes: BTreeMap<String, String> = BTreeMap::new();
+        let mut blob_hashes: BTreeMap<String, String> = BTreeMap::new();
         let inputs = h
             .get("inputs")
             .and_then(|x| x.as_object())
@@ -467,7 +536,13 @@ impl Node {
                     .stores
                     .get(store)
                     .ok_or((format!("no store {store:?}"), "unknown-store"))?;
-                decode_stream(&s.spec, &s.payload).map_err(|e| (e.to_string(), "malformed"))?
+                let v =
+                    decode_stream(&s.spec, &s.payload).map_err(|e| (e.to_string(), "malformed"))?;
+                // Semantic content hash: independent of the wire dtype.
+                blob_hashes
+                    .entry(store.to_string())
+                    .or_insert_with(|| format!("{:016x}", v.exact_hash()));
+                v
             } else {
                 let off = refv.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 let len = refv.get("len").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -481,15 +556,46 @@ impl Node {
                 decode_stream(&spec, &payload[off..end])
                     .map_err(|e| (e.to_string(), "malformed"))?
             };
+            input_hashes.insert(stream.clone(), format!("{:016x}", v.exact_hash()));
             feeds.insert(stream.clone(), v);
         }
-        let got = runtime::run(&prog.bound, &feeds).map_err(|e| (e.to_string(), "node"))?;
+
+        // Additive execution policy. The default stays the 1-thread reference
+        // order; auto-threading must be requested explicitly. `threads`
+        // without a policy is a literal job budget.
+        let policy_name = h.get("thread_policy").and_then(|x| x.as_str());
+        let job_budget = h.get("threads").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let exec = match policy_name {
+            Some(s) => ThreadPolicy::parse(s)
+                .ok_or((format!("bad thread_policy {s:?}"), "malformed"))?
+                .resolve(job_budget),
+            None if job_budget > 0 => ExecOptions::new(job_budget),
+            None => ExecOptions::default(),
+        };
+
+        let profile_ops = h
+            .get("profile_ops")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let mut prof = crate::profile::Profile::new();
+        let got = if profile_ops {
+            let was = crate::profile::set_track_alloc(true);
+            let r = runtime::run_profiled(&prog.bound, &feeds, &exec, &mut prof);
+            crate::profile::set_track_alloc(was);
+            r
+        } else {
+            runtime::run_with_options(&prog.bound, &feeds, &exec)
+        };
+        let got = got.map_err(|e| (e.to_string(), "node"))?;
+
         let outs = h
             .get("outputs")
             .and_then(|x| x.as_array())
             .ok_or(("missing outputs".to_string(), "malformed"))?;
         let mut payload = Vec::new();
         let mut specs = serde_json::Map::new();
+        let mut output_hashes: BTreeMap<String, String> = BTreeMap::new();
+        let mut kinds: Vec<crate::value::Kind> = Vec::new();
         for name in outs {
             let name = name
                 .as_str()
@@ -497,6 +603,8 @@ impl Node {
             let v = got
                 .get(name)
                 .ok_or((format!("missing output {name}"), "arity"))?;
+            output_hashes.insert(name.to_string(), format!("{:016x}", v.exact_hash()));
+            kinds.push(v.kind());
             let (spec, bytes) = encode_stream(v).map_err(|e| (e.to_string(), "node"))?;
             let off = payload.len();
             payload.extend_from_slice(&bytes);
@@ -507,26 +615,116 @@ impl Node {
             }
             specs.insert(name.to_string(), sj);
         }
-        Ok(Self::ok(
-            id,
-            "exec-ok",
-            json!({"outputs": specs, "runtime_version": runtime_version()}),
-            &payload,
-        ))
+
+        // Derive a conservative determinism label; the controller may
+        // declare one explicitly. T2 (Triple with a mantissa) is exact-int.
+        let derived_profile = if kinds.iter().all(|k| {
+            matches!(
+                k,
+                crate::value::Kind::I | crate::value::Kind::U8 | crate::value::Kind::T
+            )
+        }) {
+            "exact-int"
+        } else if kinds.iter().all(|k| matches!(k, crate::value::Kind::F)) {
+            "float"
+        } else {
+            "mixed"
+        };
+        let determinism = h
+            .get("determinism")
+            .and_then(|x| x.as_str())
+            .unwrap_or(derived_profile);
+        let verdict = match determinism {
+            "exact-int" | "exact-float" => "exact",
+            "tolerance-float" => "declared",
+            _ => "unspecified",
+        };
+
+        // Canonical receipt: BTreeMap-backed JSON objects (sorted keys), no
+        // timing, no worker identity, no queue/cache state.
+        let mut receipt = serde_json::Map::new();
+        receipt.insert("program_hash".into(), json!(format!("{:016x}", prog.hash)));
+        receipt.insert("blob_hashes".into(), json!(blob_hashes));
+        receipt.insert("input_hashes".into(), json!(input_hashes));
+        receipt.insert("output_hashes".into(), json!(output_hashes));
+        receipt.insert("profile".into(), json!(determinism));
+        receipt.insert("backend".into(), json!("lattice"));
+        receipt.insert(
+            "kernel".into(),
+            json!(if exec.threads > 1 {
+                "lattice-threaded"
+            } else {
+                "lattice-scalar"
+            }),
+        );
+        receipt.insert("runtime_version".into(), json!(runtime_version()));
+        receipt.insert("sched_version".into(), json!(crate::runtime::SCHED_VERSION));
+        receipt.insert("threads".into(), json!(exec.threads));
+        receipt.insert(
+            "partition".into(),
+            json!({"kind": "contiguous-output-blocks",
+                   "threads": exec.threads,
+                   "sched_version": crate::runtime::SCHED_VERSION}),
+        );
+        receipt.insert("verdict".into(), json!(verdict));
+        if let Some(r) = h.get("reference") {
+            receipt.insert("reference".into(), r.clone());
+        }
+        if let Some(t) = h.get("tolerance") {
+            receipt.insert("tolerance".into(), t.clone());
+        }
+
+        let mut fields = json!({
+            "outputs": specs,
+            "threads": exec.threads,
+            "runtime_version": runtime_version(),
+            "receipt": receipt,
+        });
+        if profile_ops {
+            let ops: Vec<Json> = prof
+                .ops
+                .iter()
+                .map(|(name, p)| {
+                    json!({"op": name,
+                           "calls": p.calls,
+                           "wall_ms": p.wall.as_secs_f64() * 1e3,
+                           "alloc_bytes": p.alloc_bytes,
+                           "in_bytes": p.in_bytes,
+                           "out_bytes": p.out_bytes})
+                })
+                .collect();
+            if let Some(o) = fields.as_object_mut() {
+                // Advisory only: timing is deliberately outside the receipt.
+                o.insert("profile_ops".into(), json!(ops));
+            }
+        }
+        Ok(Self::ok(id, "exec-ok", fields, &payload))
     }
 }
 
 /// A node running on its own thread. One request at a time models the
 /// protocol's one-client-per-server rule; fan-out lives in the controller.
+///
+/// The request queue is bounded: a full queue applies backpressure to the
+/// caller instead of growing without limit. Program/store requests still
+/// share the single worker and therefore wait behind a long EXEC; the job
+/// server needs immutable `Arc` snapshots for those (next step).
 #[derive(Clone)]
 pub struct NodeHandle {
-    tx: Sender<(Vec<u8>, Sender<Vec<u8>>)>,
+    tx: mpsc::SyncSender<(Vec<u8>, Sender<Vec<u8>>)>,
 }
 
 impl NodeHandle {
+    /// Default bound for the in-process request queue.
+    pub const DEFAULT_QUEUE: usize = 64;
+
     pub fn spawn(id: usize, allowed: &[&str]) -> Self {
+        Self::spawn_bounded(id, allowed, Self::DEFAULT_QUEUE)
+    }
+
+    pub fn spawn_bounded(id: usize, allowed: &[&str], capacity: usize) -> Self {
         let allowed: Vec<String> = allowed.iter().map(|s| s.to_string()).collect();
-        let (tx, rx) = mpsc::channel::<(Vec<u8>, Sender<Vec<u8>>)>();
+        let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, Sender<Vec<u8>>)>(capacity.max(1));
         thread::spawn(move || {
             let mut node = Node::new(allowed);
             let _ = id;

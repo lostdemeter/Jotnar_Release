@@ -50,7 +50,100 @@ pub enum Value {
     None,
 }
 
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Canonical FNV-1a over bytes. Used for program/blob/input/output receipts.
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = FNV_OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 impl Value {
+    /// Exact byte size of the stream's arithmetic payload, used by the
+    /// profile/allocation budget. This is the volume an op materialises,
+    /// not the size of the JSON encoding.
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Value::F32(a) => a.len() * 4,
+            Value::F64(a) => a.len() * 8,
+            Value::I64(a) => a.len() * 8,
+            Value::U8(a) => a.len(),
+            Value::Bool(a) => a.len(),
+            Value::Triple(t) => {
+                let m = if t.m.is_some() { 4 } else { 0 };
+                t.s.len() * (1 + 4 + 1 + m)
+            }
+            Value::None => 0,
+        }
+    }
+
+    /// Fold the exact arithmetic bytes into an FNV-1a digest. Plane order is
+    /// part of the contract: s, e, z, then m when present. Used for
+    /// determinism receipts and regression tests.
+    pub fn hash_into(&self, h: &mut u64) {
+        fn fold(h: &mut u64, bytes: &[u8]) {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        fn fold_i64(h: &mut u64, v: i64) {
+            fold(h, &v.to_le_bytes());
+        }
+        match self {
+            Value::F32(a) => {
+                for &v in a.iter() {
+                    fold(h, &v.to_bits().to_le_bytes());
+                }
+            }
+            Value::F64(a) => {
+                for &v in a.iter() {
+                    fold(h, &v.to_bits().to_le_bytes());
+                }
+            }
+            Value::I64(a) => {
+                for &v in a.iter() {
+                    fold(h, &v.to_le_bytes());
+                }
+            }
+            Value::U8(a) => fold(h, a.as_slice().unwrap()),
+            Value::Bool(a) => {
+                for &v in a.iter() {
+                    fold(h, &[v as u8]);
+                }
+            }
+            Value::Triple(t) => {
+                for &v in t.s.iter() {
+                    fold(h, &[v as u8]);
+                }
+                for &v in t.e.iter() {
+                    fold_i64(h, v as i64);
+                }
+                for &v in t.z.iter() {
+                    fold(h, &[v]);
+                }
+                if let Some(m) = &t.m {
+                    for &v in m.iter() {
+                        fold_i64(h, v as i64);
+                    }
+                }
+            }
+            Value::None => {}
+        }
+    }
+
+    /// Canonical hash of the exact arithmetic bytes (planes, not JSON).
+    pub fn exact_hash(&self) -> u64 {
+        let mut h = FNV_OFFSET;
+        self.hash_into(&mut h);
+        h
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Value::F32(_) | Value::F64(_) => Kind::F,

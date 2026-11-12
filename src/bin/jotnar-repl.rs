@@ -24,17 +24,26 @@ use std::time::Instant;
 
 use jotnar::asm::{self, AsmOptions};
 use jotnar::payload::{self, Feeds};
+use jotnar::profile::{CountingAlloc, Profile};
+use jotnar::runtime::{self, ExecOptions};
 use serde_json::{json, Value as Json};
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
 
 fn usage() -> &'static str {
     "jotnar-repl - warm Jotnar interpreter (assemble once, run many)\n\
      \n\
      usage:\n\
        jotnar-repl <file.asm> [--stdlib DIR] [--outputs a,b] [--pretty] [--stats]\n\
+                   [--threads N] [--profile]\n\
      \n\
      Reads NDJSON payloads from stdin, one `{\"streams\": {...}}` per line,\n\
      writes one `{\"streams\": {...}}` (or `{\"error\": ...}`) per line on stdout.\n\
-     A line holding `{\"cmd\":\"exit\"}` or EOF terminates the process.\n"
+     A line holding `{\"cmd\":\"exit\"}` or EOF terminates the process.\n\
+     \n\
+     --threads N  per-job execution thread budget (default 1: reference order)\n\
+     --profile    print a per-op wall/allocation/output report to stderr\n"
 }
 
 struct Repl {
@@ -42,10 +51,23 @@ struct Repl {
     outputs: Option<Vec<String>>,
     pretty: bool,
     stats: bool,
+    threads: usize,
+    profile: bool,
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, bool), String> {
+fn parse_args() -> Result<
+    (
+        PathBuf,
+        Option<PathBuf>,
+        Option<Vec<String>>,
+        bool,
+        bool,
+        usize,
+        bool,
+    ),
+    String,
+> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
         return Err(usage().to_string());
@@ -55,6 +77,8 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, 
     let mut outputs: Option<Vec<String>> = None;
     let mut pretty = false;
     let mut stats = false;
+    let mut threads = 1usize;
+    let mut profile = false;
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -67,13 +91,23 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<Vec<String>>, bool, 
                 let s = it.next().ok_or("--outputs needs a comma list")?;
                 outputs = Some(s.split(',').map(|s| s.trim().to_string()).collect());
             }
+            "--threads" => {
+                let s = it.next().ok_or("--threads needs a count")?;
+                threads = s
+                    .parse::<usize>()
+                    .map_err(|e| format!("bad --threads: {e}"))?;
+                if threads == 0 {
+                    return Err("--threads must be >= 1".to_string());
+                }
+            }
+            "--profile" => profile = true,
             "--pretty" => pretty = true,
             "--stats" => stats = true,
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
     }
-    Ok((file, stdlib, outputs, pretty, stats))
+    Ok((file, stdlib, outputs, pretty, stats, threads, profile))
 }
 
 fn options_for(path: &std::path::Path, stdlib: Option<PathBuf>) -> AsmOptions {
@@ -102,10 +136,32 @@ fn run_line(repl: &Repl, input: &Json) -> Json {
         Ok(f) => f,
         Err(e) => return json!({"error": e.to_string()}),
     };
-    match jotnar::runtime::run(&repl.bound, &feeds) {
+    let exec = ExecOptions::new(repl.threads);
+    let mut prof = Profile::new();
+    let was_tracking = if repl.profile {
+        jotnar::profile::set_track_alloc(true)
+    } else {
+        false
+    };
+    let result = if repl.profile {
+        runtime::run_profiled(&repl.bound, &feeds, &exec, &mut prof)
+    } else {
+        runtime::run_with_options(&repl.bound, &feeds, &exec)
+    };
+    if repl.profile {
+        jotnar::profile::set_track_alloc(was_tracking);
+    }
+    match result {
         Ok(got) => {
             if repl.stats {
-                eprintln!("run {:.3}ms", start.elapsed().as_secs_f64() * 1e3);
+                eprintln!(
+                    "run {:.3}ms threads={}",
+                    start.elapsed().as_secs_f64() * 1e3,
+                    repl.threads
+                );
+            }
+            if repl.profile {
+                eprint!("{}", prof.report());
             }
             match payload::feeds_to_json(&got, repl.outputs.as_deref()) {
                 Ok(j) => j,
@@ -127,7 +183,7 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> Result<(), String> {
-    let (file, stdlib, outputs, pretty, stats) = parse_args()?;
+    let (file, stdlib, outputs, pretty, stats, threads, profile) = parse_args()?;
     let text = std::fs::read_to_string(&file)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let opts = options_for(&file, stdlib);
@@ -148,6 +204,8 @@ fn real_main() -> Result<(), String> {
         outputs,
         pretty,
         stats,
+        threads,
+        profile,
     };
 
     let stdin = std::io::stdin();

@@ -411,25 +411,37 @@ pub fn add_array(a: &Triple, b: &Triple, sub: bool, tabs: &Tables, m_bits: i64) 
     from_planes(&a.shape(), s, e, m, z)
 }
 
-/// 2-D MATMUL with a block-floating accumulator: each output dot product is
-/// aligned to its largest term exponent, so small terms are not crushed by a
-/// global fixed scale.
-pub fn matmul2(a: &Triple, b: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
-    let ash = a.shape();
-    let bsh = b.shape();
-    if ash.len() != 2 || bsh.len() != 2 || ash[1] != bsh[0] {
-        return Err(Error::runtime("T2 MATMUL needs 2-D (m,k)x(k,n)"));
-    }
-    let (m, k, n) = (ash[0], ash[1], bsh[1]);
-    let (as_, ae, am, az) = planes(a)?;
-    let (bs, be, bm, bz) = planes(b)?;
+/// Output-block kernel: rows `i0..i0+rows` of an `(m,k)x(k,n)` product,
+/// written into the corresponding block-local output slices.
+///
+/// Each output element is a pure function of `(i, j)`: the exponent scan and
+/// the accumulation run in ascending `t` order. That is the determinism
+/// contract — partitioning rows changes which thread computes an element, not
+/// how it is computed.
+#[allow(clippy::too_many_arguments)]
+fn matmul_block(
+    as_: &[i8],
+    ae: &[i32],
+    am: &[i32],
+    az: &[u8],
+    bs: &[i8],
+    be: &[i32],
+    bm: &[i32],
+    bz: &[u8],
+    (k, n): (usize, usize),
+    i0: usize,
+    rows: usize,
+    tabs: &Tables,
+    m_bits: i64,
+    os: &mut [i8],
+    oe: &mut [i32],
+    om: &mut [i32],
+    oz: &mut [u8],
+) {
     let scale = 1i128 << m_bits;
     let half = 1i128 << (2 * m_bits - 1);
-    let mut os = vec![1i8; m * n];
-    let mut oe = vec![BIAS as i32; m * n];
-    let mut om = vec![0i32; m * n];
-    let mut oz = vec![1u8; m * n];
-    for i in 0..m {
+    for ii in 0..rows {
+        let i = i0 + ii;
         for j in 0..n {
             let mut emax: Option<i64> = None;
             for t in 0..k {
@@ -462,13 +474,113 @@ pub fn matmul2(a: &Triple, b: &Triple, tabs: &Tables, m_bits: i64) -> Result<Tri
             }
             let acc = acc.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
             let r = from_fixed(acc, emax, tabs, m_bits);
-            let o = i * n + j;
+            let o = ii * n + j;
             os[o] = r.s;
             oe[o] = r.e;
             om[o] = r.m;
             oz[o] = r.z;
         }
     }
+}
+
+fn matmul_shape(ash: &[usize], bsh: &[usize]) -> Result<(usize, usize, usize)> {
+    if ash.len() != 2 || bsh.len() != 2 || ash[1] != bsh[0] {
+        return Err(Error::runtime("T2 MATMUL needs 2-D (m,k)x(k,n)"));
+    }
+    Ok((ash[0], ash[1], bsh[1]))
+}
+
+/// 2-D MATMUL with a block-floating accumulator: each output dot product is
+/// aligned to its largest term exponent, so small terms are not crushed by a
+/// global fixed scale.
+pub fn matmul2(a: &Triple, b: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
+    matmul2_mt(a, b, tabs, m_bits, 1)
+}
+
+/// Deterministic output-partitioned MATMUL.
+///
+/// Work is split into contiguous row blocks by a pure function of `m` and
+/// `threads`; every element keeps the serial accumulation order. Any thread
+/// count therefore produces bit-identical planes. `threads <= 1` takes the
+/// plain serial path.
+pub fn matmul2_mt(
+    a: &Triple,
+    b: &Triple,
+    tabs: &Tables,
+    m_bits: i64,
+    threads: usize,
+) -> Result<Triple> {
+    let (m, k, n) = matmul_shape(&a.shape(), &b.shape())?;
+    let (as_, ae, am, az) = planes(a)?;
+    let (bs, be, bm, bz) = planes(b)?;
+    let mut os = vec![1i8; m * n];
+    let mut oe = vec![BIAS as i32; m * n];
+    let mut om = vec![0i32; m * n];
+    let mut oz = vec![1u8; m * n];
+
+    let threads = threads.clamp(1, m.max(1));
+    if threads == 1 {
+        matmul_block(
+            as_,
+            ae,
+            am,
+            az,
+            bs,
+            be,
+            bm,
+            bz,
+            (k, n),
+            0,
+            m,
+            tabs,
+            m_bits,
+            &mut os,
+            &mut oe,
+            &mut om,
+            &mut oz,
+        );
+        return from_planes(&[m, n], os, oe, om, oz);
+    }
+
+    // Stable row partition: exactly the same blocks for a given (m, threads).
+    let rows_per = m.div_ceil(threads);
+    let block_len = rows_per * n;
+    std::thread::scope(|scope| {
+        let os_chunks = os.chunks_mut(block_len);
+        let oe_chunks = oe.chunks_mut(block_len);
+        let om_chunks = om.chunks_mut(block_len);
+        let oz_chunks = oz.chunks_mut(block_len);
+        for (block, (((os_c, oe_c), om_c), oz_c)) in os_chunks
+            .zip(oe_chunks)
+            .zip(om_chunks)
+            .zip(oz_chunks)
+            .enumerate()
+        {
+            let i0 = block * rows_per;
+            let rows = os_c.len() / n;
+            scope.spawn(move || {
+                matmul_block(
+                    as_,
+                    ae,
+                    am,
+                    az,
+                    bs,
+                    be,
+                    bm,
+                    bz,
+                    (k, n),
+                    i0,
+                    rows,
+                    tabs,
+                    m_bits,
+                    os_c,
+                    oe_c,
+                    om_c,
+                    oz_c,
+                );
+            });
+        }
+    });
     from_planes(&[m, n], os, oe, om, oz)
 }
 
@@ -648,24 +760,29 @@ pub fn gelu(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
 }
 
 /// Row softmax at BIAS scale (`SOFTMAX`/`SOFTMAX_WIDE` share the T2 path).
-pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
-    let sh = a.shape();
-    let d = *sh
-        .last()
-        .ok_or_else(|| Error::runtime("T2 SOFTMAX needs a last axis"))?;
-    let rows = a.numel() / d;
-    let (as_, ae, am, az) = planes(a)?;
-    let exp = lattice::exp_lut();
-    let (mut s, mut e, mut m, mut z) = (
-        vec![1i8; rows * d],
-        vec![BIAS as i32; rows * d],
-        vec![0i32; rows * d],
-        vec![1u8; rows * d],
-    );
-    let sh14 = tabs.f - 14;
-    for r in 0..rows {
-        let mut q = vec![0i64; d];
-        let mut s14 = vec![0i64; d];
+#[allow(clippy::too_many_arguments)]
+fn softmax_rows(
+    as_: &[i8],
+    ae: &[i32],
+    am: &[i32],
+    az: &[u8],
+    d: usize,
+    r0: usize,
+    nrows: usize,
+    sh14: i64,
+    exp: &[i64],
+    tabs: &Tables,
+    m_bits: i64,
+    os: &mut [i8],
+    oe: &mut [i32],
+    om: &mut [i32],
+    oz: &mut [u8],
+) {
+    let mut q = vec![0i64; d];
+    let mut s14 = vec![0i64; d];
+    let mut num = vec![0i64; d];
+    for rr in 0..nrows {
+        let r = r0 + rr;
         let mut vmax = i64::MIN;
         for j in 0..d {
             let i = r * d + j;
@@ -685,7 +802,6 @@ pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
                 vmax = s14[j];
             }
         }
-        let mut num = vec![0i64; d];
         let mut den: i128 = 0;
         for j in 0..d {
             let dd = (vmax - s14[j]).clamp(0, 262144);
@@ -696,14 +812,64 @@ pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
             den = 1;
         }
         for j in 0..d {
-            let i = r * d + j;
+            let k = rr * d + j;
             let c = trunc_div(num[j] as i128 * (1i128 << tabs.f), den) as i64;
             let out = from_fixed(c, BIAS, tabs, m_bits);
-            s[i] = out.s;
-            e[i] = out.e;
-            m[i] = out.m;
-            z[i] = out.z;
+            os[k] = out.s;
+            oe[k] = out.e;
+            om[k] = out.m;
+            oz[k] = out.z;
         }
+    }
+}
+
+pub fn softmax(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
+    softmax_mt(a, tabs, m_bits, 1)
+}
+
+/// Deterministic row-partitioned softmax. Each row keeps its own reduction
+/// order; rows are independent.
+pub fn softmax_mt(a: &Triple, tabs: &Tables, m_bits: i64, threads: usize) -> Result<Triple> {
+    let sh = a.shape();
+    let d = *sh
+        .last()
+        .ok_or_else(|| Error::runtime("T2 SOFTMAX needs a last axis"))?;
+    let rows = a.numel() / d;
+    let (as_, ae, am, az) = planes(a)?;
+    let exp = lattice::exp_lut();
+    let (mut s, mut e, mut m, mut z) = (
+        vec![1i8; rows * d],
+        vec![BIAS as i32; rows * d],
+        vec![0i32; rows * d],
+        vec![1u8; rows * d],
+    );
+    let sh14 = tabs.f - 14;
+    let threads = threads.clamp(1, rows.max(1));
+    let block_rows = rows.div_ceil(threads);
+    let block_len = block_rows * d;
+    if threads == 1 {
+        softmax_rows(
+            as_, ae, am, az, d, 0, rows, sh14, exp, tabs, m_bits, &mut s, &mut e, &mut m, &mut z,
+        );
+    } else {
+        std::thread::scope(|scope| {
+            for (block, (((os_c, oe_c), om_c), oz_c)) in s
+                .chunks_mut(block_len)
+                .zip(e.chunks_mut(block_len))
+                .zip(m.chunks_mut(block_len))
+                .zip(z.chunks_mut(block_len))
+                .enumerate()
+            {
+                let r0 = block * block_rows;
+                let nrows = os_c.len() / d;
+                scope.spawn(move || {
+                    softmax_rows(
+                        as_, ae, am, az, d, r0, nrows, sh14, exp, tabs, m_bits, os_c, oe_c, om_c,
+                        oz_c,
+                    );
+                });
+            }
+        });
     }
     from_planes(&sh, s, e, m, z)
 }
@@ -838,6 +1004,77 @@ pub fn relu_array(a: &Triple) -> Result<Triple> {
     from_planes(&a.shape(), s, e, m, z)
 }
 
+/// Compute a contiguous block of flattened HWC outputs for CONV2D.
+///
+/// The scratch term list is reused across output elements (the old kernel
+/// allocated one `Vec` per pixel), but the term order and the block-floating
+/// accumulation are unchanged, so results stay bit-identical.
+#[allow(clippy::too_many_arguments)]
+fn conv2d_block(
+    xs: &[i8],
+    xe: &[i32],
+    xm: &[i32],
+    xz: &[u8],
+    ws: &[i8],
+    we: &[i32],
+    wm: &[i32],
+    wz: &[u8],
+    bs: &[i8],
+    be: &[i32],
+    bm: &[i32],
+    bz: &[u8],
+    (h, ww, cin): (usize, usize, usize),
+    (cout, kh, kw): (usize, usize, usize),
+    (_ho, wo): (usize, usize),
+    stride: i64,
+    pad: i64,
+    oi0: usize,
+    tabs: &Tables,
+    m_bits: i64,
+    os: &mut [i8],
+    oe: &mut [i32],
+    om: &mut [i32],
+    oz: &mut [u8],
+) {
+    let mut terms: Vec<(T2, T2)> = Vec::with_capacity(kh * kw * cin);
+    for k in 0..os.len() {
+        let oi = oi0 + k;
+        let co = oi % cout;
+        let p = oi / cout;
+        let oy = p / wo;
+        let ox = p % wo;
+        terms.clear();
+        for ky in 0..kh {
+            let iy = oy as i64 * stride + ky as i64 - pad;
+            if iy < 0 || iy >= h as i64 {
+                continue;
+            }
+            for kx in 0..kw {
+                let ix = ox as i64 * stride + kx as i64 - pad;
+                if ix < 0 || ix >= ww as i64 {
+                    continue;
+                }
+                for ci in 0..cin {
+                    let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
+                    let wi = ((co * kh + ky) * kw + kx) * cin + ci;
+                    terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
+                }
+            }
+        }
+        let bias = t2_at(bs, be, bm, bz, co);
+        let r = accumulate(
+            &terms,
+            if bias.z == 0 { Some(bias) } else { None },
+            tabs,
+            m_bits,
+        );
+        os[k] = r.s;
+        oe[k] = r.e;
+        om[k] = r.m;
+        oz[k] = r.z;
+    }
+}
+
 /// T2 CONV2D on HWC, weight (Cout,kh,kw,Cin), bias (Cout).
 pub fn conv2d(
     x: &Triple,
@@ -847,6 +1084,22 @@ pub fn conv2d(
     pad: i64,
     tabs: &Tables,
     m_bits: i64,
+) -> Result<Triple> {
+    conv2d_mt(x, w, b, stride, pad, tabs, m_bits, 1)
+}
+
+/// Deterministic output-partitioned CONV2D. Output pixels are independent and
+/// the flattened index partition is a pure function of shape and threads.
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_mt(
+    x: &Triple,
+    w: &Triple,
+    b: &Triple,
+    stride: i64,
+    pad: i64,
+    tabs: &Tables,
+    m_bits: i64,
+    threads: usize,
 ) -> Result<Triple> {
     let xsh = x.shape();
     let wsh = w.shape();
@@ -867,47 +1120,156 @@ pub fn conv2d(
     let (xs, xe, xm, xz) = planes(x)?;
     let (ws, we, wm, wz) = planes(w)?;
     let (bs, be, bm, bz) = planes(b)?;
-    let mut os = vec![1i8; ho * wo * cout];
-    let mut oe = vec![BIAS as i32; ho * wo * cout];
-    let mut om = vec![0i32; ho * wo * cout];
-    let mut oz = vec![1u8; ho * wo * cout];
-    for co in 0..cout {
-        for oy in 0..ho {
-            for ox in 0..wo {
-                let mut terms: Vec<(T2, T2)> = Vec::new();
-                for ky in 0..kh {
-                    let iy = oy as i64 * stride + ky as i64 - pad;
-                    if iy < 0 || iy >= h as i64 {
-                        continue;
-                    }
-                    for kx in 0..kw {
-                        let ix = ox as i64 * stride + kx as i64 - pad;
-                        if ix < 0 || ix >= ww as i64 {
-                            continue;
-                        }
-                        for ci in 0..cin {
-                            let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
-                            let wi = ((co * kh + ky) * kw + kx) * cin + ci;
-                            terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
-                        }
-                    }
-                }
-                let bias = t2_at(bs, be, bm, bz, co);
-                let r = accumulate(
-                    &terms,
-                    if bias.z == 0 { Some(bias) } else { None },
-                    tabs,
-                    m_bits,
-                );
-                let oi = (oy * wo + ox) * cout + co;
-                os[oi] = r.s;
-                oe[oi] = r.e;
-                om[oi] = r.m;
-                oz[oi] = r.z;
+    let out_len = ho * wo * cout;
+    let mut os = vec![1i8; out_len];
+    let mut oe = vec![BIAS as i32; out_len];
+    let mut om = vec![0i32; out_len];
+    let mut oz = vec![1u8; out_len];
+    let threads = threads.clamp(1, out_len.max(1));
+    let block_len = out_len.div_ceil(threads);
+    if threads == 1 {
+        conv2d_block(
+            xs,
+            xe,
+            xm,
+            xz,
+            ws,
+            we,
+            wm,
+            wz,
+            bs,
+            be,
+            bm,
+            bz,
+            (h, ww, cin),
+            (cout, kh, kw),
+            (ho, wo),
+            stride,
+            pad,
+            0,
+            tabs,
+            m_bits,
+            &mut os,
+            &mut oe,
+            &mut om,
+            &mut oz,
+        );
+    } else {
+        std::thread::scope(|scope| {
+            for (block, (((os_c, oe_c), om_c), oz_c)) in os
+                .chunks_mut(block_len)
+                .zip(oe.chunks_mut(block_len))
+                .zip(om.chunks_mut(block_len))
+                .zip(oz.chunks_mut(block_len))
+                .enumerate()
+            {
+                let oi0 = block * block_len;
+                scope.spawn(move || {
+                    conv2d_block(
+                        xs,
+                        xe,
+                        xm,
+                        xz,
+                        ws,
+                        we,
+                        wm,
+                        wz,
+                        bs,
+                        be,
+                        bm,
+                        bz,
+                        (h, ww, cin),
+                        (cout, kh, kw),
+                        (ho, wo),
+                        stride,
+                        pad,
+                        oi0,
+                        tabs,
+                        m_bits,
+                        os_c,
+                        oe_c,
+                        om_c,
+                        oz_c,
+                    );
+                });
             }
-        }
+        });
     }
     from_planes(&[ho, wo, cout], os, oe, om, oz)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deconv2d_block(
+    xs: &[i8],
+    xe: &[i32],
+    xm: &[i32],
+    xz: &[u8],
+    ws: &[i8],
+    we: &[i32],
+    wm: &[i32],
+    wz: &[u8],
+    bs: &[i8],
+    be: &[i32],
+    bm: &[i32],
+    bz: &[u8],
+    (h, ww, cin): (usize, usize, usize),
+    (cout, kh, kw): (usize, usize, usize),
+    (_ho, wo): (usize, usize),
+    stride: i64,
+    pad: i64,
+    oi0: usize,
+    tabs: &Tables,
+    m_bits: i64,
+    os: &mut [i8],
+    oe: &mut [i32],
+    om: &mut [i32],
+    oz: &mut [u8],
+) {
+    let mut terms: Vec<(T2, T2)> = Vec::with_capacity(kh * kw * cin);
+    for k in 0..os.len() {
+        let oi = oi0 + k;
+        let co = oi % cout;
+        let p = oi / cout;
+        let oy = p / wo;
+        let ox = p % wo;
+        terms.clear();
+        for ky in 0..kh {
+            let n = oy as i64 + pad - ky as i64;
+            if n < 0 || n % stride != 0 {
+                continue;
+            }
+            let iy = n / stride;
+            if iy >= h as i64 {
+                continue;
+            }
+            for kx in 0..kw {
+                let n2 = ox as i64 + pad - kx as i64;
+                if n2 < 0 || n2 % stride != 0 {
+                    continue;
+                }
+                let ix = n2 / stride;
+                if ix >= ww as i64 {
+                    continue;
+                }
+                for ci in 0..cin {
+                    let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
+                    let wi = ((co * kh + ky) * kw + kx) * cin + ci;
+                    terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
+                }
+            }
+        }
+        let bias = t2_at(bs, be, bm, bz, co);
+        let r = accumulate(
+            &terms,
+            if bias.z == 0 { Some(bias) } else { None },
+            tabs,
+            m_bits,
+        );
+        os[k] = r.s;
+        oe[k] = r.e;
+        om[k] = r.m;
+        oz[k] = r.z;
+    }
 }
 
 /// T2 DECONV2D on HWC, weight (Cout,kh,kw,Cin), bias (Cout).
@@ -919,6 +1281,21 @@ pub fn deconv2d(
     pad: i64,
     tabs: &Tables,
     m_bits: i64,
+) -> Result<Triple> {
+    deconv2d_mt(x, w, b, stride, pad, tabs, m_bits, 1)
+}
+
+/// Deterministic output-partitioned DECONV2D (same partition rule as CONV2D).
+#[allow(clippy::too_many_arguments)]
+pub fn deconv2d_mt(
+    x: &Triple,
+    w: &Triple,
+    b: &Triple,
+    stride: i64,
+    pad: i64,
+    tabs: &Tables,
+    m_bits: i64,
+    threads: usize,
 ) -> Result<Triple> {
     let xsh = x.shape();
     let wsh = w.shape();
@@ -939,53 +1316,80 @@ pub fn deconv2d(
     let (xs, xe, xm, xz) = planes(x)?;
     let (ws, we, wm, wz) = planes(w)?;
     let (bs, be, bm, bz) = planes(b)?;
-    let mut os = vec![1i8; ho * wo * cout];
-    let mut oe = vec![BIAS as i32; ho * wo * cout];
-    let mut om = vec![0i32; ho * wo * cout];
-    let mut oz = vec![1u8; ho * wo * cout];
-    for co in 0..cout {
-        for oy in 0..ho {
-            for ox in 0..wo {
-                let mut terms: Vec<(T2, T2)> = Vec::new();
-                for ky in 0..kh {
-                    let n = oy as i64 + pad - ky as i64;
-                    if n < 0 || n % stride != 0 {
-                        continue;
-                    }
-                    let iy = n / stride;
-                    if iy >= h as i64 {
-                        continue;
-                    }
-                    for kx in 0..kw {
-                        let n2 = ox as i64 + pad - kx as i64;
-                        if n2 < 0 || n2 % stride != 0 {
-                            continue;
-                        }
-                        let ix = n2 / stride;
-                        if ix >= ww as i64 {
-                            continue;
-                        }
-                        for ci in 0..cin {
-                            let ai = ((iy as usize) * ww + ix as usize) * cin + ci;
-                            let wi = ((co * kh + ky) * kw + kx) * cin + ci;
-                            terms.push((t2_at(xs, xe, xm, xz, ai), t2_at(ws, we, wm, wz, wi)));
-                        }
-                    }
-                }
-                let bias = t2_at(bs, be, bm, bz, co);
-                let r = accumulate(
-                    &terms,
-                    if bias.z == 0 { Some(bias) } else { None },
-                    tabs,
-                    m_bits,
-                );
-                let oi = (oy * wo + ox) * cout + co;
-                os[oi] = r.s;
-                oe[oi] = r.e;
-                om[oi] = r.m;
-                oz[oi] = r.z;
+    let out_len = ho * wo * cout;
+    let mut os = vec![1i8; out_len];
+    let mut oe = vec![BIAS as i32; out_len];
+    let mut om = vec![0i32; out_len];
+    let mut oz = vec![1u8; out_len];
+    let threads = threads.clamp(1, out_len.max(1));
+    let block_len = out_len.div_ceil(threads);
+    if threads == 1 {
+        deconv2d_block(
+            xs,
+            xe,
+            xm,
+            xz,
+            ws,
+            we,
+            wm,
+            wz,
+            bs,
+            be,
+            bm,
+            bz,
+            (h, ww, cin),
+            (cout, kh, kw),
+            (ho, wo),
+            stride,
+            pad,
+            0,
+            tabs,
+            m_bits,
+            &mut os,
+            &mut oe,
+            &mut om,
+            &mut oz,
+        );
+    } else {
+        std::thread::scope(|scope| {
+            for (block, (((os_c, oe_c), om_c), oz_c)) in os
+                .chunks_mut(block_len)
+                .zip(oe.chunks_mut(block_len))
+                .zip(om.chunks_mut(block_len))
+                .zip(oz.chunks_mut(block_len))
+                .enumerate()
+            {
+                let oi0 = block * block_len;
+                scope.spawn(move || {
+                    deconv2d_block(
+                        xs,
+                        xe,
+                        xm,
+                        xz,
+                        ws,
+                        we,
+                        wm,
+                        wz,
+                        bs,
+                        be,
+                        bm,
+                        bz,
+                        (h, ww, cin),
+                        (cout, kh, kw),
+                        (ho, wo),
+                        stride,
+                        pad,
+                        oi0,
+                        tabs,
+                        m_bits,
+                        os_c,
+                        oe_c,
+                        om_c,
+                        oz_c,
+                    );
+                });
             }
-        }
+        });
     }
     from_planes(&[ho, wo, cout], os, oe, om, oz)
 }
