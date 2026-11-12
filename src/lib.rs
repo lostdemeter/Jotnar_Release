@@ -31,6 +31,7 @@ pub mod lattice;
 pub mod layout;
 pub mod ops;
 pub mod payload;
+pub mod profile;
 pub mod protocol;
 pub mod runtime;
 pub mod rv32;

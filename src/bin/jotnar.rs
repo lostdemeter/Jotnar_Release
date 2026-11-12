@@ -11,7 +11,7 @@ fn usage() -> &'static str {
      usage:\n\
        jotnar check  <file.asm> [--stdlib DIR]\n\
        jotnar verify <file.asm> [--stdlib DIR] [--json]\n\
-       jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--stdlib DIR]\n\
+       jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--threads N] [--stdlib DIR]\n\
        jotnar emit-c <file.asm> --payload FILE --outputs a,b [--out FILE.c] [--stdlib DIR]\n\
        jotnar emit-rust <file.asm> --payload FILE --outputs a,b [--out FILE.rs] [--stdlib DIR] (needs rustc)\n\
        jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR]\n\
@@ -32,6 +32,7 @@ struct Args {
     target: String,
     fp16: bool,
     grow: Option<Vec<String>>,
+    threads: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -57,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
             target: "c".to_string(),
             fp16: false,
             grow: None,
+            threads: 1,
         });
     }
     let file = if args.is_empty() {
@@ -77,6 +79,7 @@ fn parse_args() -> Result<Args, String> {
         target: "c".to_string(),
         fp16: false,
         grow: None,
+        threads: 1,
     };
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -101,6 +104,15 @@ fn parse_args() -> Result<Args, String> {
             "--name" => a.name = Some(it.next().ok_or("--name needs a value")?),
             "--target" => a.target = it.next().ok_or("--target needs a value")?,
             "--fp16" => a.fp16 = true,
+            "--threads" => {
+                let s = it.next().ok_or("--threads needs a count")?;
+                a.threads = s
+                    .parse::<usize>()
+                    .map_err(|e| format!("bad --threads: {e}"))?;
+                if a.threads == 0 {
+                    return Err("--threads must be >= 1".to_string());
+                }
+            }
             "--grow" => {
                 let s = it.next().ok_or("--grow needs a comma list")?;
                 a.grow = Some(s.split(',').map(|x| x.trim().to_string()).collect());
@@ -308,7 +320,9 @@ fn real_main() -> Result<(), String> {
                 .payload
                 .ok_or_else(|| format!("run: --payload is required\n\n{}", usage()))?;
             let payload = payload::read_payload(&payload_path).map_err(|e| e.to_string())?;
-            let feeds = jotnar::run_text(&text, &opts, &payload).map_err(|e| e.to_string())?;
+            let exec = jotnar::runtime::ExecOptions::new(args.threads);
+            let feeds = jotnar::runtime::run_text_with_options(&text, &opts, &payload, &exec)
+                .map_err(|e| e.to_string())?;
             let json = payload::feeds_to_json(&feeds, args.outputs.as_deref())
                 .map_err(|e| e.to_string())?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();

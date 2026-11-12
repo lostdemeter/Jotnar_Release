@@ -1,6 +1,7 @@
 //! The reference interpreter: execute a bound program over typed streams.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::asm::{self, AsmOptions};
 use crate::error::{Error, Result};
@@ -8,7 +9,31 @@ use crate::ir::{BoundInstr, BoundProgram};
 use crate::layout::{check_layouts, is_literal, layout_kind, UNKNOWN};
 use crate::ops;
 use crate::payload::Feeds;
+use crate::profile::{self, Profile};
 use crate::value::{Arg, Kind};
+
+/// Per-job execution options. The thread budget is deliberately separate from
+/// the listing's `CONFIG threads` (which is a compiled-target directive): the
+/// controller decides how many cores a job may use, the program stays
+/// portable. `threads == 1` is always the reference execution order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecOptions {
+    pub threads: usize,
+}
+
+impl ExecOptions {
+    pub fn new(threads: usize) -> Self {
+        Self {
+            threads: threads.max(1),
+        }
+    }
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self { threads: 1 }
+    }
+}
 
 fn find_end(prog: &[BoundInstr], i: usize) -> Result<usize> {
     let mut depth = 0i32;
@@ -148,8 +173,37 @@ fn check_shapes(mn: &str, args: &[Arg], line: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute a bound program.
+/// Execute a bound program with the reference (single-thread) order.
 pub fn run(bound: &BoundProgram, payload: &Feeds) -> Result<Feeds> {
+    run_impl(bound, payload, &ExecOptions::default(), None)
+}
+
+/// Execute a bound program with an explicit execution budget.
+pub fn run_with_options(
+    bound: &BoundProgram,
+    payload: &Feeds,
+    opts: &ExecOptions,
+) -> Result<Feeds> {
+    run_impl(bound, payload, opts, None)
+}
+
+/// Execute a bound program and record the per-op budget.
+pub fn run_profiled(
+    bound: &BoundProgram,
+    payload: &Feeds,
+    opts: &ExecOptions,
+    profile: &mut Profile,
+) -> Result<Feeds> {
+    run_impl(bound, payload, opts, Some(profile))
+}
+
+fn run_impl(
+    bound: &BoundProgram,
+    payload: &Feeds,
+    opts: &ExecOptions,
+    mut profile: Option<&mut Profile>,
+) -> Result<Feeds> {
+    let threads = opts.threads.max(1);
     let mut feeds: Feeds = Feeds::new();
     let mut layouts: HashMap<String, String> = HashMap::new();
     for decl in &bound.inputs {
@@ -277,7 +331,30 @@ pub fn run(bound: &BoundProgram, payload: &Feeds) -> Result<Feeds> {
         }
 
         check_shapes(&ins.mn, &vals, &ins.line)?;
-        let outs = ops::dispatch(&ins.mn, &vals, &bound.config)?;
+
+        let prof = profile.as_deref_mut();
+        let start = prof.is_some().then(Instant::now);
+        let alloc0 = if prof.is_some() {
+            profile::allocated()
+        } else {
+            0
+        };
+        let outs = ops::dispatch_with_threads(&ins.mn, &vals, &bound.config, threads)?;
+        if let Some(p) = prof {
+            let in_bytes = vals
+                .iter()
+                .filter_map(|a| a.value())
+                .map(|v| v.byte_len() as u64)
+                .sum();
+            let out_bytes = outs.iter().map(|v| v.byte_len() as u64).sum();
+            p.record(
+                &ins.mn,
+                start.map(|s| s.elapsed()).unwrap_or_default(),
+                profile::allocated().saturating_sub(alloc0),
+                in_bytes,
+                out_bytes,
+            );
+        }
         if outs.len() != ins.outs.len() {
             return Err(Error::asm(format!(
                 "line {} ({}): runtime arity break: {:?}",
@@ -304,6 +381,17 @@ pub fn run(bound: &BoundProgram, payload: &Feeds) -> Result<Feeds> {
 pub fn run_text(text: &str, opts: &AsmOptions, payload: &Feeds) -> Result<Feeds> {
     let bound = asm::assemble(text, opts)?;
     run(&bound, payload)
+}
+
+/// Parse, assemble, and execute a listing with an execution budget.
+pub fn run_text_with_options(
+    text: &str,
+    opts: &AsmOptions,
+    payload: &Feeds,
+    exec: &ExecOptions,
+) -> Result<Feeds> {
+    let bound = asm::assemble(text, opts)?;
+    run_with_options(&bound, payload, exec)
 }
 
 /// Run a listing `n` times, threading STATE streams (the `repeat()` path).
