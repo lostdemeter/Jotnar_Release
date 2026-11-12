@@ -26,8 +26,7 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let hash =
-        git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    let hash = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=JOTNAR_GIT_HASH={hash}");
 
     println!("cargo:rerun-if-changed=build.rs");
