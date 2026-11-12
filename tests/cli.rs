@@ -1,47 +1,40 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
 
 use serde_json::{json, Value as Json};
 
 use jotnar::protocol::{decode_frame, request};
 
-fn free_port() -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    format!("{}", l.local_addr().unwrap())
-}
-
-fn wait_for_port(addr: &str) -> bool {
-    for _ in 0..50 {
-        if TcpStream::connect(addr).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
-}
-
-/// Spawn a node on a fresh port, retrying if another test grabbed the
-/// just-freed port between `free_port()` and the node bind. This keeps the
-/// default parallel `cargo test --workspace` reliable.
+/// Spawn a node on an OS-assigned ephemeral port and read the resolved
+/// address from its startup line. This removes the free-port/bind race that
+/// made the default parallel CLI test run flaky.
 fn spawn_node(extra: &[&str]) -> (Child, String) {
     let bin = env!("CARGO_BIN_EXE_jotnar-node");
-    for _ in 0..20 {
-        let addr = free_port();
-        let mut child = Command::new(bin)
-            .arg("--bind")
-            .arg(&addr)
-            .args(extra)
-            .spawn()
-            .expect("spawn jotnar-node");
-        if wait_for_port(&addr) {
-            return (child, addr);
+    let mut child = Command::new(bin)
+        .arg("--bind")
+        .arg("127.0.0.1:0")
+        .args(extra)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jotnar-node");
+    let stderr = child.stderr.take().expect("node stderr");
+    let mut lines = BufReader::new(stderr).lines();
+    let addr = loop {
+        let line = match lines.next() {
+            Some(Ok(line)) => line,
+            Some(Err(e)) => panic!("node stderr: {e}"),
+            None => panic!("jotnar-node exited before listening"),
+        };
+        if let Some(rest) = line.split("listening on ").nth(1) {
+            if let Some(addr) = rest.split_whitespace().next() {
+                break addr.to_string();
+            }
         }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    panic!("jotnar-node did not listen after 20 fresh-port retries");
+    };
+    // Drain stderr so a chatty node can never block on a full pipe.
+    std::thread::spawn(move || for _ in lines {});
+    (child, addr)
 }
 
 #[test]
