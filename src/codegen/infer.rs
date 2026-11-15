@@ -277,7 +277,9 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 for (i, arg) in ins.args.iter().enumerate().skip(1) {
                     if streams.contains_key(arg) {
                         let s = get(&streams, arg)?;
-                        if s.kind != CKind::I || !same_dims(&s.shape, &x.shape) {
+                        if s.kind != CKind::I
+                            || !(same_dims(&s.shape, &x.shape) || s.shape.is_empty())
+                        {
                             return Err(Error::asm(format!(
                                 "{where_}: {} operand {i} must be I with shape {:?}, got {} {:?}",
                                 ins.mn,
@@ -334,7 +336,8 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     )));
                 }
                 if let Some(s) = streams.get(a(1)) {
-                    if s.kind != CKind::I || !same_dims(&s.shape, &x.shape) {
+                    if s.kind != CKind::I || !(same_dims(&s.shape, &x.shape) || s.shape.is_empty())
+                    {
                         return Err(Error::asm(format!(
                             "{where_}: {} operand 1 must be I with shape {:?}",
                             ins.mn, x.shape
@@ -354,7 +357,9 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 for i in 1..=2 {
                     if let Some(s) = streams.get(a(i)) {
-                        if s.kind != CKind::I || !same_dims(&s.shape, &c.shape) {
+                        if s.kind != CKind::I
+                            || !(same_dims(&s.shape, &c.shape) || s.shape.is_empty())
+                        {
                             return Err(Error::asm(format!(
                                 "{where_}: ISELECT operand {i} must be I with shape {:?}",
                                 c.shape
@@ -375,7 +380,8 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     )));
                 }
                 if let Some(s) = streams.get(a(1)) {
-                    if s.kind != CKind::I || !same_dims(&s.shape, &x.shape) {
+                    if s.kind != CKind::I || !(same_dims(&s.shape, &x.shape) || s.shape.is_empty())
+                    {
                         return Err(Error::asm(format!(
                             "{where_}: {} operand must be I with shape {:?}",
                             ins.mn, x.shape
@@ -788,6 +794,120 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     return Err(Error::asm(format!("{where_}: ATTN geometry mismatch")));
                 }
                 streams.insert(o, StreamInfo::f(vec![Some(1), Some((nh * dh) as usize)]));
+            }
+            "LUMA" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::F
+                    || x.shape.len() != 3
+                    || x.shape[2].is_none()
+                    || x.shape[2].unwrap() < 3
+                {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: LUMA needs F HWC with C>=3"
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(vec![x.shape[0], x.shape[1]]));
+            }
+            "STATIC" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::F
+                    || x.shape.len() != 3
+                    || x.shape[2].is_none()
+                    || x.shape[2].unwrap() < 2
+                {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: STATIC needs F HW2"
+                    )));
+                }
+                streams.insert(o, StreamInfo::i(vec![x.shape[0], x.shape[1]]));
+            }
+            "GAIN" => {
+                let lin = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                let e = get(&streams, a(2))?;
+                if lin.kind != CKind::F
+                    || lin.shape.len() != 3
+                    || lin.shape[2].is_none()
+                    || lin.shape[2].unwrap() < 3
+                    || y.kind != CKind::F
+                    || e.kind != CKind::T
+                    || y.shape != lin.shape[..2].to_vec()
+                    || e.shape != y.shape
+                {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: GAIN needs F HWC + F HW + T HW"
+                    )));
+                }
+                streams.insert(o, lin.clone());
+            }
+            "POOLAVG" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::T || x.shape.len() != 3 {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: POOLAVG needs T HWC"
+                    )));
+                }
+                streams.insert(o, StreamInfo::t(vec![x.shape[2]]));
+            }
+            "DECONV" => {
+                let x = get(&streams, a(0))?;
+                let w = get(&streams, a(1))?;
+                let stride = int_lit(a(2), &format!("{where_} stride"))?;
+                let pad = int_lit(a(3), &format!("{where_} pad"))?;
+                if x.kind != CKind::T
+                    || w.kind != CKind::T
+                    || x.shape.len() != 3
+                    || w.shape.len() != 4
+                {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: DECONV needs T x(H,W,C)+w(Cout,kh,kw,C)"
+                    )));
+                }
+                let (Some(h), Some(img_w), Some(cin)) = (x.shape[0], x.shape[1], x.shape[2]) else {
+                    return Err(Error::asm(format!("{where_}: DECONV needs static HWC")));
+                };
+                let (Some(cout), Some(kh), Some(kw), Some(wcin)) =
+                    (w.shape[0], w.shape[1], w.shape[2], w.shape[3])
+                else {
+                    return Err(Error::asm(format!("{where_}: DECONV needs static weights")));
+                };
+                if wcin != cin {
+                    return Err(Error::asm(format!(
+                        "{where_}: DECONV weight C {wcin} != input C {cin}"
+                    )));
+                }
+                if stride <= 0 || pad < 0 {
+                    return Err(Error::asm(format!("{where_}: DECONV bad stride/pad")));
+                }
+                let ho = (h as i64 - 1) * stride - 2 * pad + kh as i64;
+                let wo = (img_w as i64 - 1) * stride - 2 * pad + kw as i64;
+                if ho <= 0 || wo <= 0 {
+                    return Err(Error::asm(format!("{where_}: DECONV bad output size")));
+                }
+                streams.insert(
+                    o,
+                    StreamInfo::t(vec![Some(ho as usize), Some(wo as usize), Some(cout)]),
+                );
+            }
+            "PERMUTE3" => {
+                let x = get(&streams, a(0))?;
+                if x.kind != CKind::T || x.shape.len() != 3 {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: PERMUTE3 needs T 3D"
+                    )));
+                }
+                let mut perm: Vec<usize> = (1..=3)
+                    .map(|i| int_lit(a(i), &format!("{where_} perm")).map(|v| v as usize))
+                    .collect::<Result<_>>()?;
+                let mut sorted = perm.clone();
+                sorted.sort_unstable();
+                if sorted != [0, 1, 2] {
+                    return Err(Error::asm(format!(
+                        "{where_}: PERMUTE3 needs a permutation of (0,1,2), got {perm:?}"
+                    )));
+                }
+                let shape: Vec<Option<usize>> = perm.iter().map(|&i| x.shape[i]).collect();
+                streams.insert(o, StreamInfo::t(shape));
             }
             "RESHAPE2" | "RESHAPE3" => {
                 let x = get(&streams, a(0))?;
@@ -1243,4 +1363,117 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
         }
     }
     Ok(streams)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asm::{assemble, AsmOptions};
+    use crate::lattice;
+    use crate::value::array_from_vec;
+    use ndarray::{ArrayD, IxDyn};
+
+    fn f(shape: &[usize], vals: &[f64]) -> Value {
+        Value::F64(array_from_vec(shape, vals.to_vec()).unwrap())
+    }
+
+    fn t(shape: &[usize], vals: &[f64]) -> Value {
+        let a = ArrayD::from_shape_vec(IxDyn(shape), vals.to_vec()).unwrap();
+        Value::Triple(lattice::encode(&a))
+    }
+
+    fn feed(items: &[(&str, Value)]) -> Feeds {
+        let mut feeds = Feeds::new();
+        for (name, v) in items {
+            feeds.insert((*name).to_string(), v.clone());
+        }
+        feeds
+    }
+
+    fn infer(text: &str, feeds: &Feeds) -> HashMap<String, StreamInfo> {
+        let bound = assemble(text, &AsmOptions::default()).unwrap();
+        infer_shapes(&bound, feeds).unwrap()
+    }
+
+    #[test]
+    fn luma_static_and_gain_infer_their_shapes() {
+        let s = infer(
+            "IN X\nOUT = LUMA(X)\n",
+            &feed(&[("X", f(&[2, 3, 4], &vec![0.5; 24]))]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::F);
+        assert_eq!(s["OUT"].shape, vec![Some(2), Some(3)]);
+
+        let s = infer(
+            "IN X\nOUT = STATIC(X)\n",
+            &feed(&[("X", f(&[2, 3, 2], &vec![0.0; 12]))]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::I);
+        assert_eq!(s["OUT"].shape, vec![Some(2), Some(3)]);
+
+        let s = infer(
+            "IN LIN\nIN Y\nIN E\nOUT = GAIN(LIN, Y, E)\n",
+            &feed(&[
+                ("LIN", f(&[2, 3, 4], &vec![0.5; 24])),
+                ("Y", f(&[2, 3], &vec![0.5; 6])),
+                ("E", t(&[2, 3], &vec![1.0; 6])),
+            ]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::F);
+        assert_eq!(s["OUT"].shape, vec![Some(2), Some(3), Some(4)]);
+    }
+
+    #[test]
+    fn pool_deconv_and_permute_infer_their_shapes() {
+        let s = infer(
+            "IN X\nOUT = POOLAVG(X)\n",
+            &feed(&[("X", t(&[2, 3, 4], &vec![0.5; 24]))]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::T);
+        assert_eq!(s["OUT"].shape, vec![Some(4)]);
+
+        let s = infer(
+            "IN X\nIN W\nOUT = DECONV(X, W, 2, 1)\n",
+            &feed(&[
+                ("X", t(&[2, 3, 2], &vec![0.5; 12])),
+                ("W", t(&[5, 3, 3, 2], &vec![0.25; 90])),
+            ]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::T);
+        assert_eq!(s["OUT"].shape, vec![Some(3), Some(5), Some(5)]);
+
+        let s = infer(
+            "IN X\nOUT = PERMUTE3(X, 2, 0, 1)\n",
+            &feed(&[("X", t(&[2, 3, 4], &vec![0.5; 24]))]),
+        );
+        assert_eq!(s["OUT"].kind, CKind::T);
+        assert_eq!(s["OUT"].shape, vec![Some(4), Some(2), Some(3)]);
+    }
+
+    #[test]
+    fn scalar_stream_broadcasts_like_int_operand() {
+        let mut feeds = feed(&[(
+            "X",
+            Value::I64(array_from_vec(&[4], vec![1, 2, 3, 4]).unwrap()),
+        )]);
+        feeds.insert(
+            "S".to_string(),
+            Value::I64(array_from_vec(&[], vec![-3]).unwrap()),
+        );
+        let bound = assemble("IN X\nIN S\nOUT = IADD(X, S)\n", &AsmOptions::default()).unwrap();
+        let s = infer_shapes(&bound, &feeds).unwrap();
+        assert_eq!(s["OUT"].kind, CKind::I);
+        assert_eq!(s["OUT"].shape, vec![Some(4)]);
+    }
+
+    #[test]
+    fn new_rules_refuse_the_wrong_kind_or_permutation() {
+        let bound = assemble("IN X\nOUT = LUMA(X)\n", &AsmOptions::default()).unwrap();
+        let feeds = feed(&[("X", t(&[2, 3, 4], &vec![0.5; 24]))]);
+        assert!(infer_shapes(&bound, &feeds).is_err());
+
+        let bound = assemble("IN X\nOUT = PERMUTE3(X, 0, 0, 1)\n", &AsmOptions::default()).unwrap();
+        let feeds = feed(&[("X", t(&[2, 3, 4], &vec![0.5; 24]))]);
+        assert!(infer_shapes(&bound, &feeds).is_err());
+    }
 }

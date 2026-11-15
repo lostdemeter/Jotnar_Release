@@ -94,6 +94,94 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 #[test]
+fn gather_i_lowers_on_c() {
+    let listing = "IN T AS I:HW\nIN IDS AS I:SEQ\nOUT = GATHER(T, IDS)\n";
+    let table = value(&[4, 2], &[10, 11, 20, 21, 30, 31, 40, 41]);
+    let ids = value(&[3], &[3, 0, 2]);
+    let feeds = feeds(&[("T", table.clone()), ("IDS", ids.clone())]);
+    let interp = jotnar::run_text(listing, &opts(), &feeds).unwrap();
+    let want = i64_array(interp.get("OUT").unwrap());
+    assert_eq!(want, vec![40, 41, 10, 11, 30, 31]);
+
+    let art = compile_program(
+        listing,
+        &CompileOptions {
+            target: Target::C,
+            outputs: vec!["OUT".to_string()],
+            asm: opts(),
+            use_fp16: false,
+        },
+        feeds,
+    )
+    .expect("compile GATHER I");
+    let dir = temp_dir("gather-i");
+    let exe = build(&art.source, &dir, "gather_i", Target::C).expect("build GATHER I");
+    let t_path = dir.join("t.bin");
+    let ids_path = dir.join("ids.bin");
+    let out_path = dir.join("out.bin");
+    write_i64(&t_path, &[10, 11, 20, 21, 30, 31, 40, 41]);
+    write_i64(&ids_path, &[3, 0, 2]);
+    let status = Command::new(&exe)
+        .arg(&t_path)
+        .arg(&ids_path)
+        .arg(&out_path)
+        .status()
+        .expect("run GATHER I");
+    assert!(status.success());
+    let got: Vec<i64> = fs::read(&out_path)
+        .unwrap()
+        .chunks(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got, want);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scalar_stream_broadcasts_on_c() {
+    let listing = "IN X AS I:SEQ\nIN S AS I\nOUT = IADD(X, S)\n";
+    let x = value(&[4], &[1, 2, 3, 4]);
+    let s = value(&[], &[-3]);
+    let feeds = feeds(&[("X", x), ("S", s)]);
+    let interp = jotnar::run_text(listing, &opts(), &feeds).unwrap();
+    let want = i64_array(interp.get("OUT").unwrap());
+    assert_eq!(want, vec![-2, -1, 0, 1]);
+
+    let art = compile_program(
+        listing,
+        &CompileOptions {
+            target: Target::C,
+            outputs: vec!["OUT".to_string()],
+            asm: opts(),
+            use_fp16: false,
+        },
+        feeds,
+    )
+    .expect("compile scalar broadcast");
+    let dir = temp_dir("scalar-broadcast");
+    let exe = build(&art.source, &dir, "scalar_broadcast", Target::C).expect("build scalar");
+    let x_path = dir.join("x.bin");
+    let s_path = dir.join("s.bin");
+    let out_path = dir.join("out.bin");
+    write_i64(&x_path, &[1, 2, 3, 4]);
+    write_i64(&s_path, &[-3]);
+    let status = Command::new(&exe)
+        .arg(&x_path)
+        .arg(&s_path)
+        .arg(&out_path)
+        .status()
+        .expect("run scalar broadcast");
+    assert!(status.success());
+    let got: Vec<i64> = fs::read(&out_path)
+        .unwrap()
+        .chunks(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got, want);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn imatmul_and_ireduce_sum_are_exact() {
     let a = value(&[3, 3], &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let b = value(&[3, 3], &[1; 9]);

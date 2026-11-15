@@ -104,6 +104,21 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Res
     pattern_c(mn, outs, args, ctx)
 }
 
+/// One integer operand term: a literal, a scalar stream (`[0]`), or an
+/// elementwise stream (`[e_i]`). Mirrors `ops::int_operand`, which broadcasts
+/// a 0-d stream.
+fn int_term(ctx: &Ctx, x: &str, pos: usize, mn: &str) -> Result<String> {
+    if ctx.streams.contains_key(x) {
+        if ctx.s(x)?.shape.is_empty() {
+            Ok(format!("{x}[0]"))
+        } else {
+            Ok(format!("{x}[e_i]"))
+        }
+    } else {
+        Ok(c_i64(int_lit(x, &format!("{mn} operand {pos}"))?))
+    }
+}
+
 pub(crate) fn pattern_c(mn: &str, outs: &[String], args: &[String], ctx: &mut Ctx) -> Result<Pat> {
     match mn {
         "GATHER" => {
@@ -157,7 +172,23 @@ for (int64_t g_i = 0; g_i < {ids}_N; ++g_i)
                         None,
                     ))
                 }
-                CKind::I => Err(Error::unimplemented("GATHER table must be T/F (v0.2)")),
+                CKind::I => {
+                    let body = r#"/* {o} = GATHER({t}, {ids}) materialized rows */
+for (int64_t g_i = 0; g_i < {ids}_N; ++g_i)
+  memcpy(&{o}[g_i * {w}], &{t}[{ids}[g_i] * {w}], {w} * sizeof(int64_t));"#;
+                    Ok((
+                        fill(
+                            body,
+                            &[
+                                ("o", o.into()),
+                                ("t", t.into()),
+                                ("ids", ids.into()),
+                                ("w", w.to_string()),
+                            ],
+                        ),
+                        None,
+                    ))
+                }
             }
         }
         "GATHER3" => {
@@ -503,13 +534,7 @@ for (int64_t g_i = 0; g_i < {co}; ++g_i) {
         "IADD" | "ISUB" | "IMUL" | "IMAD" | "IDIV" | "IMOD" | "IDIVU" | "IMODU" | "ISAR" => {
             let (a, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;
-            let term = |x: &str, pos: usize| -> Result<String> {
-                if ctx.streams.contains_key(x) {
-                    Ok(format!("{x}[e_i]"))
-                } else {
-                    Ok(c_i64(int_lit(x, &format!("{mn} operand {pos}"))?))
-                }
-            };
+            let term = |x: &str, pos: usize| -> Result<String> { int_term(ctx, x, pos, mn) };
             let tb = term(&args[1], 1)?;
             if mn == "ISAR" {
                 if !ctx.streams.contains_key(&args[1]) {
@@ -670,11 +695,7 @@ for (int64_t i_i = 0; i_i < {m}; ++i_i) {
         "IXOR" | "IAND" | "IOR" => {
             let (a, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;
-            let tb = if ctx.streams.contains_key(&args[1]) {
-                format!("{}[e_i]", args[1])
-            } else {
-                c_i64(int_lit(&args[1], &format!("{mn} operand 1"))?)
-            };
+            let tb = int_term(ctx, &args[1], 1, mn)?;
             let op = match mn {
                 "IXOR" => "^",
                 "IAND" => "&",
@@ -701,11 +722,7 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
         "IEQ" | "ILT" | "IMAX" | "SADD" => {
             let (a, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;
-            let tb = if ctx.streams.contains_key(&args[1]) {
-                format!("{}[e_i]", args[1])
-            } else {
-                c_i64(int_lit(&args[1], &format!("{mn} operand 1"))?)
-            };
+            let tb = int_term(ctx, &args[1], 1, mn)?;
             let body = match mn {
                 "IEQ" => format!(
                     "  {o}[e_i] = (int64_t)(({a}[e_i]) == ({tb}));"
@@ -744,13 +761,7 @@ for (int64_t e_i = 0; e_i < {co}; ++e_i)
                 outs[0].as_str(),
             );
             let co = ctx.elems(o)?;
-            let sel = |x: &str, pos: usize| -> Result<String> {
-                if ctx.streams.contains_key(x) {
-                    Ok(format!("{x}[e_i]"))
-                } else {
-                    Ok(c_i64(int_lit(x, &format!("ISELECT operand {pos}"))?))
-                }
-            };
+            let sel = |x: &str, pos: usize| -> Result<String> { int_term(ctx, x, pos, "ISELECT") };
             let ta = sel(a, 1)?;
             let tb = sel(b, 2)?;
             Ok((
