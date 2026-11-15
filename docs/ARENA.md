@@ -5,6 +5,11 @@ Base: `d98dfe2`. 311/311 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
+These are runtime ideas ported from the goose experiments: caller-owned
+reusable storage, flat payloads with an admission witness, and allocation
+budgets enforced by the runtime. Jotnar keeps its listing language and
+interpreter; the arena is an opt-in realization of the same graph.
+
 Three runtime-internal layers, no change to the listing language:
 
 1. **Flat payloads / admission** (`src/flat.rs`, `src/arena.rs`, `src/wire.rs`)
@@ -128,10 +133,11 @@ the C and Rust backends too — worth doing independently.
 
 A T2 `ADD` over 1024 elements cost 271,510 bytes; a frozen-T `ADD` cost 62,430.
 **`Tables::new(24)` alone was 213,176 bytes and was rebuilt per instruction**
-(78% of the T2 op). Caching it (`src/ops/t2.rs`, thread-local by `f`) dropped
-the T2 op to 58,334 bytes (−78%) and the two-op job from 517,504 to 91,152.
+(78% of the T2 op). A 15-line thread-local cache (split into a separate
+runtime-fixes PR) drops the T2 op to 58,334 bytes (−78%) and the two-op job
+from 517,504 to 91,152.
 
-After that fix, arena T2 storage would buy ~50 allocations/op and ~18 KB
+After that cache, arena T2 storage would buy ~50 allocations/op and ~18 KB
 resident — at the cost of a second kind system (`is_t2()` is a runtime property
 that propagates through 11 ops, while `infer_shapes` only knows `CKind::T`) and
 a duplicated exact-arithmetic implementation on the path defined by
@@ -198,8 +204,9 @@ bit-exactness. Not worth it.
 5. **`GATHER` I support is interpreter+arena only** — the C emitter still
    refuses an I table (`GATHER table must be T/F (v0.2)`).
 
-`IASSEMBLE`'s debug panic is fixed: the interpreter now truncates the low 64
-bits (`v as i64`) instead of computing `v - 2^64` in `u128`.
+`IASSEMBLE`'s debug `u128` underflow and its parity test are split into the
+separate runtime-fixes branch. This PR keeps only the arena's release-semantics
+coverage, so it does not depend on that fix.
 
 ## Numbers
 
@@ -212,4 +219,4 @@ bits (`v as i64`) instead of computing `v - 2^64` in `u128`.
 | Warm node job | 837 → 140 allocations |
 | EXEC reply | 254 → 139 |
 | Arena steady state | 0 allocations |
-| T2 `ADD` | 271,510 → 58,334 bytes |
+| T2 `ADD` | 271,510 → 58,334 bytes (cache in follow-up) |
