@@ -92,7 +92,7 @@ fn roundtrip(
             header.get("v").cloned().unwrap_or(json!("?"))
         ));
     }
-    Ok((header, payload))
+    Ok((header, payload.to_vec()))
 }
 
 fn ok_or_show(header: &Json) -> Result<(), String> {

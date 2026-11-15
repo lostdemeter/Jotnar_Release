@@ -1,6 +1,7 @@
 //! The reference interpreter: execute a bound program over typed streams.
 
 use std::collections::HashMap;
+use std::cell::Cell;
 use std::time::Instant;
 
 use crate::asm::{self, AsmOptions};
@@ -234,6 +235,22 @@ pub fn run_with_options(
 }
 
 /// Execute a bound program and record the per-op budget.
+/// Run with an allocation ceiling. The witness covers this call only, so a
+/// caller can gate the interpreter without also counting its own framing.
+pub fn run_budgeted(
+    bound: &BoundProgram,
+    payload: &Feeds,
+    opts: &ExecOptions,
+    alloc_max: u64,
+) -> Result<Feeds> {
+    let scope = crate::profile::JobScope::begin();
+    let got = run_with_options(bound, payload, opts);
+    let witness = scope.finish();
+    let out = got?;
+    witness.check(alloc_max)?;
+    Ok(out)
+}
+
 pub fn run_profiled(
     bound: &BoundProgram,
     payload: &Feeds,
@@ -243,6 +260,35 @@ pub fn run_profiled(
     run_impl(bound, payload, opts, Some(profile))
 }
 
+thread_local! {
+    static ARENA_HITS: Cell<u64> = const { Cell::new(0) };
+    static ARENA_FALLBACKS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Arena-path diagnostics: (runs taken, fallbacks while enabled), this thread.
+pub fn arena_stats() -> (u64, u64) {
+    (
+        ARENA_HITS.with(|c| c.get()),
+        ARENA_FALLBACKS.with(|c| c.get()),
+    )
+}
+
+/// Try the arena path. `None` means "not applicable, use the interpreter":
+/// the listing uses something unported, the shapes are not inferable, or a
+/// feature (threads, profiling) is outside the arena's current scope.
+fn run_arena(bound: &BoundProgram, payload: &Feeds) -> Option<Result<Feeds>> {
+    let names = crate::stream_arena::outputs_of(bound);
+    let plan = crate::stream_arena::Plan::compile(bound, payload, &names).ok()?;
+    let mut arena = crate::stream_arena::StreamArena::new();
+    arena.reserve_words(plan.words());
+    let mut out = Feeds::new();
+    match plan.run_feeds(&mut arena, payload, &mut out) {
+        Ok(()) => Some(Ok(out)),
+        // A runtime failure is real: do not silently re-run it elsewhere.
+        Err(e) => Some(Err(e)),
+    }
+}
+
 fn run_impl(
     bound: &BoundProgram,
     payload: &Feeds,
@@ -250,6 +296,17 @@ fn run_impl(
     mut profile: Option<&mut Profile>,
 ) -> Result<Feeds> {
     let threads = opts.threads.max(1);
+    if profile.is_none() && threads == 1 && crate::stream_arena::enabled() {
+        match run_arena(bound, payload) {
+            Some(r) => {
+                ARENA_HITS.with(|c| c.set(c.get() + 1));
+                return r;
+            }
+            None => {
+                ARENA_FALLBACKS.with(|c| c.set(c.get() + 1));
+            }
+        }
+    }
     let mut feeds: Feeds = Feeds::new();
     let mut layouts: HashMap<String, String> = HashMap::new();
     for decl in &bound.inputs {

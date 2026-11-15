@@ -204,7 +204,7 @@ fn node_roundtrip(addr: &str, frame: &[u8]) -> (Json, Vec<u8>) {
     stream.read_exact(&mut body).unwrap();
     let mut full = hdr.to_vec();
     full.extend_from_slice(&body);
-    decode_frame(&full).unwrap()
+    decode_frame(&full).map(|(h, p)| (h, p.to_vec())).unwrap()
 }
 
 #[test]

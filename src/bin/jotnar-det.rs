@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use jotnar::asm::{self, AsmOptions};
 use jotnar::ir::BoundProgram;
 use jotnar::payload::{self, Feeds};
-use jotnar::profile::CountingAlloc;
+use jotnar::profile::{CountingAlloc, JobScope};
 use jotnar::runtime::{self, ExecOptions};
 use jotnar::value::Value;
 use serde_json::Value as Json;
@@ -80,6 +80,8 @@ fn usage() -> &'static str {
        --concurrency 1,2,8  concurrent jobs to test (default 1)\n\
        --job-threads N      thread budget inside concurrent jobs (default 4)\n\
        --stagger-ms N       delay job i by i*N ms to vary completion order\n\
+       --alloc-gate N       fail if a warm run makes more than N allocations;\n\
+                            also proves the gate can reject N-1\n\
      \n\
      Exit status is 1 on any exact hash mismatch.\n"
 }
@@ -93,6 +95,7 @@ struct Args {
     concurrency: Vec<usize>,
     job_threads: usize,
     stagger_ms: u64,
+    alloc_gate: Option<u64>,
 }
 
 fn parse_list(s: &str, what: &str) -> Result<Vec<usize>, String> {
@@ -132,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
         concurrency: vec![1],
         job_threads: 4,
         stagger_ms: 0,
+        alloc_gate: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -170,6 +174,13 @@ fn parse_args() -> Result<Args, String> {
                 out.stagger_ms = s
                     .parse::<u64>()
                     .map_err(|e| format!("bad --stagger-ms: {e}"))?;
+            }
+            "--alloc-gate" => {
+                let n = args.next().ok_or("--alloc-gate needs a count")?;
+                out.alloc_gate = Some(
+                    n.parse::<u64>()
+                        .map_err(|e| format!("bad --alloc-gate: {e}"))?,
+                );
             }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
@@ -276,6 +287,44 @@ fn real_main() -> Result<(), String> {
             r.wall.as_secs_f64()
         );
         reference.push(r.hash);
+    }
+
+    // Allocation gate: a steady-state number that can fail the run. The
+    // self-check re-runs with `steady - 1` and requires a rejection, so the
+    // harness cannot report OK from a gate that never says no.
+    if let Some(max) = args.alloc_gate {
+        let mut worst = 0u64;
+        for (i, p) in payloads.iter().enumerate() {
+            let _ = runtime::run_with_options(&bound, p, &ExecOptions::new(1))
+                .map_err(|e| e.to_string())?;
+            let scope = JobScope::begin();
+            let _ = runtime::run_with_options(&bound, p, &ExecOptions::new(1))
+                .map_err(|e| e.to_string())?;
+            let w = scope.finish();
+            println!(
+                "alloc payload={i} steady={} bytes={} ceiling={max}",
+                w.allocs, w.bytes
+            );
+            worst = worst.max(w.allocs);
+            if w.allocs > max {
+                eprintln!("ALLOC FAIL payload={i}: {} > {max}", w.allocs);
+                failed = true;
+            }
+            if w.allocs > 0 {
+                let probe = w.allocs - 1;
+                match runtime::run_budgeted(&bound, p, &ExecOptions::new(1), probe) {
+                    Err(_) => println!("alloc payload={i} self-check=OK (ceiling {probe} rejects)"),
+                    Ok(_) => {
+                        eprintln!("ALLOC SELF-CHECK FAILED payload={i}: ceiling {probe} admitted");
+                        failed = true;
+                    }
+                }
+            }
+        }
+        println!(
+            "alloc: worst_steady={worst} gate={max} {}",
+            if worst <= max { "OK" } else { "FAIL" }
+        );
     }
 
     let mut threads = args.threads.clone();

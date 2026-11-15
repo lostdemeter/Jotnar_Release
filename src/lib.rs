@@ -22,10 +22,12 @@
 //! * [`runtime`] — the interpreter (`run`/`run_text`/`repeat`).
 //! * [`payload`] — portable JSON payloads for the CLI and differential tests.
 
+pub mod arena;
 pub mod asm;
 pub mod builder;
 pub mod codegen;
 pub mod error;
+pub mod flat;
 pub mod ir;
 pub mod lattice;
 pub mod layout;
@@ -34,10 +36,12 @@ pub mod payload;
 pub mod profile;
 pub mod protocol;
 pub mod runtime;
+pub mod stream_arena;
 pub mod rv32;
 pub mod showcase;
 pub mod value;
 pub mod verilog;
+pub mod wire;
 
 /// Short git HEAD resolved by `build.rs` (or `"unknown"` without git).
 pub const BUILD_GIT_HASH: &str = env!("JOTNAR_GIT_HASH");

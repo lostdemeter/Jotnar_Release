@@ -10,23 +10,36 @@
 //! not bump the version. Unknown message types are `error/unknown-type`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use serde_json::{json, Value as Json};
 
 use crate::asm;
 use crate::error::{Error, Result};
+use crate::arena::JobArena;
+use crate::flat::{Admission, Convention};
 use crate::payload::Feeds;
+use crate::profile::JobScope;
+use crate::wire::FrameBuf;
 use crate::runtime::{self, ExecOptions, ThreadPolicy};
-use crate::value::{hash_bytes, Triple, Value};
+use crate::value::{hash_bytes, Value};
 
 pub const PROTO_V: u64 = 1;
 
 /// Build identity for protocol responses. Deterministic for a given binary:
 /// package version plus the short git HEAD resolved by `build.rs`.
+/// Build identity, allocation-free: both halves are `'static`.
+pub const RUNTIME_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("JOTNAR_GIT_HASH")
+);
+
 pub fn runtime_version() -> String {
-    format!("{}+{}", env!("CARGO_PKG_VERSION"), crate::BUILD_GIT_HASH)
+    RUNTIME_VERSION.to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -67,19 +80,28 @@ impl StreamSpec {
     }
 }
 
+/// Serialize a frame into `out`, reusing its capacity.
+///
+/// The header is streamed with `serde_json::to_writer` (no intermediate
+/// `to_vec`), the length prefix is patched last, and the payload is appended
+/// in place. After the buffer has grown once, a steady-state reply allocates
+/// nothing here.
+pub fn encode_frame_into(out: &mut Vec<u8>, header: &Json, payload: &[u8]) -> Result<()> {
+    let mut f = crate::wire::FrameBuf::begin(out);
+    {
+        let mut w = f.json();
+        w.value(header)?;
+    }
+    f.end(payload)
+}
+
 pub fn encode_frame(header: &Json, payload: &[u8]) -> Result<Vec<u8>> {
-    let h = serde_json::to_vec(header)?;
-    let mut body = h;
-    body.push(b'\n');
-    body.extend_from_slice(payload);
-    let n = body.len() as u32;
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&n.to_be_bytes());
-    out.extend_from_slice(&body);
+    let mut out = Vec::new();
+    encode_frame_into(&mut out, header, payload)?;
     Ok(out)
 }
 
-pub fn decode_frame(frame: &[u8]) -> Result<(Json, Vec<u8>)> {
+pub fn decode_frame<'a>(frame: &'a [u8]) -> Result<(Json, &'a [u8])> {
     if frame.len() < 4 {
         return Err(Error::runtime("protocol: frame too short"));
     }
@@ -102,7 +124,8 @@ pub fn decode_frame(frame: &[u8]) -> Result<(Json, Vec<u8>)> {
     if header.get("id").is_none() || header.get("type").is_none() {
         return Err(Error::runtime("protocol: header needs id + type"));
     }
-    Ok((header, body[pos + 1..].to_vec()))
+    // Borrowed: the payload is a slice of the input frame, not a copy.
+    Ok((header, &body[pos + 1..]))
 }
 
 /// Build an error frame without a `Node` (for transport-level rejects
@@ -114,208 +137,16 @@ pub fn error_frame(id: &Json, code: &str, msg: impl Into<String>) -> Vec<u8> {
 }
 
 pub fn encode_stream(v: &Value) -> Result<(StreamSpec, Vec<u8>)> {
-    match v {
-        Value::F64(a) => Ok((
-            StreamSpec {
-                kind: "F".into(),
-                dtype: "f64".into(),
-                shape: a.shape().to_vec(),
-            },
-            a.iter().flat_map(|x| x.to_le_bytes()).collect(),
-        )),
-        Value::F32(a) => Ok((
-            StreamSpec {
-                kind: "F".into(),
-                dtype: "f32".into(),
-                shape: a.shape().to_vec(),
-            },
-            a.iter().flat_map(|x| x.to_le_bytes()).collect(),
-        )),
-        Value::I64(a) => Ok((
-            StreamSpec {
-                kind: "I".into(),
-                dtype: "i64".into(),
-                shape: a.shape().to_vec(),
-            },
-            a.iter().flat_map(|x| x.to_le_bytes()).collect(),
-        )),
-        Value::U8(a) => Ok((
-            StreamSpec {
-                kind: "I".into(),
-                dtype: "u8".into(),
-                shape: a.shape().to_vec(),
-            },
-            a.iter().copied().collect(),
-        )),
-        Value::Bool(a) => Ok((
-            StreamSpec {
-                kind: "I".into(),
-                dtype: "i64".into(),
-                shape: a.shape().to_vec(),
-            },
-            a.iter().flat_map(|x| (*x as i64).to_le_bytes()).collect(),
-        )),
-        Value::Triple(t) => {
-            let n = t.s.len();
-            // T2 carries a mantissa plane. Use a compact exact wire encoding
-            // (s:i8, e:i32, z:u8, m:i32 = 10 bytes/element) instead of
-            // widening every plane to i64.
-            if let Some(m) = &t.m {
-                let mut b = Vec::with_capacity(n * 10);
-                for x in t.s.iter() {
-                    b.push(*x as u8);
-                }
-                for x in t.e.iter() {
-                    b.extend_from_slice(&x.to_le_bytes());
-                }
-                for x in t.z.iter() {
-                    b.push(*x);
-                }
-                for x in m.iter() {
-                    b.extend_from_slice(&x.to_le_bytes());
-                }
-                return Ok((
-                    StreamSpec {
-                        kind: "T".into(),
-                        dtype: "t2".into(),
-                        shape: t.shape(),
-                    },
-                    b,
-                ));
-            }
-            // Frozen T keeps the pre-T2 wire contract: 24 bytes per
-            // element, interleaved s/e/z as i64. (The pre-T2 decoder read
-            // this layout; the old encoder wrote planes by mistake, which
-            // only happened to work for a single element.)
-            let (ss, ee, zz) = (
-                t.s.as_slice().expect("standard-layout sign plane"),
-                t.e.as_slice().expect("standard-layout exponent plane"),
-                t.z.as_slice().expect("standard-layout zero plane"),
-            );
-            let mut b = Vec::with_capacity(n * 24);
-            for i in 0..n {
-                b.extend_from_slice(&(ss[i] as i64).to_le_bytes());
-                b.extend_from_slice(&(ee[i] as i64).to_le_bytes());
-                b.extend_from_slice(&(zz[i] as i64).to_le_bytes());
-            }
-            Ok((
-                StreamSpec {
-                    kind: "T".into(),
-                    dtype: "i64x3".into(),
-                    shape: t.shape(),
-                },
-                b,
-            ))
-        }
-        Value::None => Err(Error::runtime("protocol: cannot encode None")),
-    }
+    // The wire codec lives in `flat`, next to the target codec, so both use
+    // one size table and one admission gate.
+    let p = crate::flat::encode(v, crate::flat::Convention::Wire)?;
+    Ok((p.spec, p.bytes))
 }
 
 pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
-    let n: usize = spec.shape.iter().product();
-    match (spec.kind.as_str(), spec.dtype.as_str()) {
-        ("F", "f64") => {
-            if payload.len() != n * 8 {
-                return Err(Error::runtime("protocol: f64 payload size"));
-            }
-            let mut v = Vec::with_capacity(n);
-            for c in payload.chunks_exact(8) {
-                v.push(f64::from_le_bytes([
-                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                ]));
-            }
-            Ok(Value::F64(crate::value::array_from_vec(&spec.shape, v)?))
-        }
-        ("F", "f32") => {
-            if payload.len() != n * 4 {
-                return Err(Error::runtime("protocol: f32 payload size"));
-            }
-            let mut v = Vec::with_capacity(n);
-            for c in payload.chunks_exact(4) {
-                v.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-            }
-            Ok(Value::F32(crate::value::array_from_vec(&spec.shape, v)?))
-        }
-        ("I", "i64") => {
-            if payload.len() != n * 8 {
-                return Err(Error::runtime("protocol: i64 payload size"));
-            }
-            let mut v = Vec::with_capacity(n);
-            for c in payload.chunks_exact(8) {
-                v.push(i64::from_le_bytes([
-                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                ]));
-            }
-            Ok(Value::I64(crate::value::array_from_vec(&spec.shape, v)?))
-        }
-        ("I", "u8") => {
-            if payload.len() != n {
-                return Err(Error::runtime("protocol: u8 payload size"));
-            }
-            Ok(Value::U8(crate::value::array_from_vec(
-                &spec.shape,
-                payload.to_vec(),
-            )?))
-        }
-        ("T", "t2") => {
-            if payload.len() != n * 10 {
-                return Err(Error::runtime("protocol: T2 payload size"));
-            }
-            let mut s = Vec::with_capacity(n);
-            let mut e = Vec::with_capacity(n);
-            let mut z = Vec::with_capacity(n);
-            let mut m = Vec::with_capacity(n);
-            let mut off = 0usize;
-            for &b in &payload[off..off + n] {
-                s.push(b as i8);
-            }
-            off += n;
-            for c in payload[off..off + n * 4].chunks_exact(4) {
-                e.push(i32::from_le_bytes(c.try_into().unwrap()));
-            }
-            off += n * 4;
-            z.extend_from_slice(&payload[off..off + n]);
-            off += n;
-            for c in payload[off..off + n * 4].chunks_exact(4) {
-                m.push(i32::from_le_bytes(c.try_into().unwrap()));
-            }
-            Ok(Value::Triple(Triple::from_vecs_opt(
-                &spec.shape,
-                s,
-                e,
-                z,
-                Some(m),
-            )?))
-        }
-        // Frozen-T compatibility: the pre-T2 decoder accepted any dtype as
-        // long as the payload was the 24-byte-per-element i64x3 layout. Keep
-        // that fallback (after the explicit T2 arm) so old clients and
-        // hand-written `dtype: ""`/`"i64"` payloads still work; a wrong
-        // length still fails loud.
-        ("T", _) => {
-            if payload.len() != n * 24 {
-                return Err(Error::runtime(format!(
-                    "protocol: unsupported T/{:?} payload size {} (expected {})",
-                    spec.dtype,
-                    payload.len(),
-                    n * 24
-                )));
-            }
-            let mut s = Vec::with_capacity(n);
-            let mut e = Vec::with_capacity(n);
-            let mut z = Vec::with_capacity(n);
-            for i in 0..n {
-                let b = &payload[i * 24..];
-                s.push(i64::from_le_bytes(b[0..8].try_into().unwrap()) as i8);
-                e.push(i64::from_le_bytes(b[8..16].try_into().unwrap()) as i32);
-                z.push(i64::from_le_bytes(b[16..24].try_into().unwrap()) as u8);
-            }
-            Ok(Value::Triple(Triple::from_vecs(&spec.shape, s, e, z)?))
-        }
-        (k, d) => Err(Error::runtime(format!(
-            "protocol: unsupported stream {k}/{d}"
-        ))),
-    }
+    let (admitted, _witness) = crate::flat::FlatPayload::new(spec.clone(), payload.to_vec())
+        .admit(crate::flat::Convention::Wire)?;
+    admitted.decode()
 }
 
 #[derive(Clone, Debug)]
@@ -327,8 +158,19 @@ struct Program {
 
 #[derive(Clone, Debug)]
 struct Stored {
-    spec: StreamSpec,
+    /// What the node checked when the blob was written.
+    admission: Admission,
     payload: Vec<u8>,
+}
+
+impl Stored {
+    fn spec(&self) -> StreamSpec {
+        StreamSpec {
+            kind: self.admission.kind.clone(),
+            dtype: self.admission.dtype.clone(),
+            shape: self.admission.shape.clone(),
+        }
+    }
 }
 
 /// A model-blind node.
@@ -337,6 +179,12 @@ pub struct Node {
     pub token: Option<String>,
     pub programs: HashMap<String, Program>,
     pub stores: HashMap<String, Stored>,
+    /// Boundary storage for one job at a time, reset per EXEC.
+    arena: JobArena,
+    /// Stream storage for the arena execution path.
+    stream_arena: crate::stream_arena::StreamArena,
+    /// Per-program compiled plans, keyed by handle.
+    plans: HashMap<String, crate::stream_arena::PlanCache>,
 }
 
 impl Node {
@@ -346,6 +194,9 @@ impl Node {
             token: None,
             programs: HashMap::new(),
             stores: HashMap::new(),
+            arena: JobArena::new(),
+            stream_arena: crate::stream_arena::StreamArena::new(),
+            plans: HashMap::new(),
         }
     }
 
@@ -363,13 +214,13 @@ impl Node {
         self
     }
 
-    fn err(id: &Json, code: &str, msg: impl Into<String>) -> Vec<u8> {
+    fn err_into(out: &mut Vec<u8>, id: &Json, code: &str, msg: impl Into<String>) {
         let h = json!({"v": PROTO_V, "id": id, "type": "error", "ok": false,
                        "error": {"code": code, "msg": msg.into()}});
-        encode_frame(&h, &[]).unwrap()
+        encode_frame_into(out, &h, &[]).expect("frame writer");
     }
 
-    fn ok(id: &Json, typ: &str, fields: Json, payload: &[u8]) -> Vec<u8> {
+    fn ok_into(out: &mut Vec<u8>, id: &Json, typ: &'static str, fields: Json, payload: &[u8]) {
         let mut h = fields;
         if let Some(o) = h.as_object_mut() {
             o.insert("v".into(), json!(PROTO_V));
@@ -377,49 +228,74 @@ impl Node {
             o.insert("type".into(), json!(typ));
             o.insert("ok".into(), json!(true));
         }
-        encode_frame(&h, payload).unwrap()
+        encode_frame_into(out, &h, payload).expect("frame writer");
     }
 
-    pub fn handle(&mut self, frame: &[u8]) -> Vec<u8> {
+    /// Write one reply into `out`, reusing its capacity.
+    ///
+    /// The steady state allocates nothing for framing: the header is streamed
+    /// into the buffer and the payload is appended in place. What remains is
+    /// the header `Value` tree itself.
+    pub fn handle_into(&mut self, frame: &[u8], out: &mut Vec<u8>) {
+        out.clear();
         let (header, payload) = match decode_frame(frame) {
             Ok(x) => x,
-            Err(e) => return Self::err(&json!(0), "malformed", e.to_string()),
+            Err(e) => {
+                Self::err_into(out, &json!(0), "malformed", e.to_string());
+                return;
+            }
         };
-        let id = header.get("id").cloned().unwrap_or(json!(0));
+        let zero = json!(0);
+        let id = header.get("id").unwrap_or(&zero);
         if let Some(want) = &self.token {
             let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
             if want.trim().is_empty() || got != want.as_str() {
-                return Self::err(&id, "unauthorized", "bad or missing auth token");
+                Self::err_into(out, id, "unauthorized", "bad or missing auth token");
+                return;
             }
         }
         let typ = header.get("type").and_then(|x| x.as_str()).unwrap_or("");
         let result = match typ {
-            "ping" => Ok(Self::ok(
-                &id,
-                "pong",
-                json!({"pong": {"impl": "jotnar-node", "v": PROTO_V,
-                                "backends": self.allowed,
-                                "mnemonics": crate::ops::registry().len(),
-                                "runtime_version": runtime_version()}}),
-                &[],
-            )),
-            "program" => self.program(&id, &header, &payload),
-            "store" => self.store(&id, &header, &payload),
-            "drop" => self.drop(&id, &header),
-            "list" => Ok(Self::ok(
-                &id,
-                "list-ok",
-                json!({"programs": self.programs.keys().cloned().collect::<Vec<_>>(),
-                       "stores": self.stores.keys().cloned().collect::<Vec<_>>()}),
-                &[],
-            )),
-            "exec" => self.exec(&id, &header, &payload),
+            "ping" => {
+                Self::ok_into(
+                    out,
+                    id,
+                    "pong",
+                    json!({"pong": {"impl": "jotnar-node", "v": PROTO_V,
+                                    "backends": self.allowed,
+                                    "mnemonics": crate::ops::registry().len(),
+                                    "runtime_version": RUNTIME_VERSION}}),
+                    &[],
+                );
+                Ok(())
+            }
+            "program" => self.program(id, &header, payload, out),
+            "store" => self.store(id, &header, payload, out),
+            "drop" => self.drop(id, &header, out),
+            "list" => {
+                Self::ok_into(
+                    out,
+                    id,
+                    "list-ok",
+                    json!({"programs": self.programs.keys().cloned().collect::<Vec<_>>(),
+                           "stores": self.stores.keys().cloned().collect::<Vec<_>>()}),
+                    &[],
+                );
+                Ok(())
+            }
+            "exec" => self.exec(id, &header, payload, out),
             _ => Err((format!("no such message {typ:?}"), "unknown-type")),
         };
-        match result {
-            Ok(f) => f,
-            Err((msg, code)) => Self::err(&id, code, msg),
+        if let Err((msg, code)) = result {
+            Self::err_into(out, id, code, msg);
         }
+    }
+
+    /// Convenience wrapper that allocates the reply buffer.
+    pub fn handle(&mut self, frame: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.handle_into(frame, &mut out);
+        out
     }
 
     fn program(
@@ -427,7 +303,8 @@ impl Node {
         id: &Json,
         h: &Json,
         payload: &[u8],
-    ) -> std::result::Result<Vec<u8>, (String, &'static str)> {
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), (String, &'static str)> {
         let name = h
             .get("name")
             .and_then(|x| x.as_str())
@@ -436,7 +313,7 @@ impl Node {
             .get("backend")
             .and_then(|x| x.as_str())
             .unwrap_or("lattice");
-        if !self.allowed.contains(&backend.to_string()) {
+        if !self.allowed.iter().any(|a| a == backend) {
             return Err((
                 format!("backend {backend:?} unavailable"),
                 "backend-unavailable",
@@ -454,12 +331,8 @@ impl Node {
         let hash = hash_bytes(listing.as_bytes());
         self.programs
             .insert(name.to_string(), Program { bound, hash });
-        Ok(Self::ok(
-            id,
-            "program-ok",
-            json!({"handle": name, "replaced": false}),
-            &[],
-        ))
+        Self::ok_into(out, id, "program-ok", json!({"handle": name, "replaced": false}), &[]);
+        Ok(())
     }
 
     fn store(
@@ -467,7 +340,8 @@ impl Node {
         id: &Json,
         h: &Json,
         payload: &[u8],
-    ) -> std::result::Result<Vec<u8>, (String, &'static str)> {
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), (String, &'static str)> {
         let name = h
             .get("name")
             .and_then(|x| x.as_str())
@@ -477,36 +351,41 @@ impl Node {
                 .ok_or(("missing stream".to_string(), "malformed"))?,
         )
         .map_err(|e| (e.to_string(), "malformed"))?;
-        // Validate now, not at EXEC.
-        decode_stream(&spec, payload).map_err(|e| (e.to_string(), "malformed"))?;
+        // Admit now, not at EXEC: the witness is kept beside the bytes.
+        let bytes = payload.to_vec();
+        let (_, admission) = crate::flat::FlatPayload::new(spec, bytes.clone())
+            .admit(Convention::Wire)
+            .map_err(|e| (e.to_string(), "malformed"))?;
+        let layout = admission.layout();
+        let hash = format!("{:016x}", admission.hash);
         self.stores.insert(
             name.to_string(),
             Stored {
-                spec,
-                payload: payload.to_vec(),
+                admission,
+                payload: bytes,
             },
         );
-        Ok(Self::ok(
+        Self::ok_into(
+            out,
             id,
             "store-ok",
-            json!({"name": name, "bytes": payload.len()}),
+            json!({"name": name, "bytes": payload.len(), "layout": layout, "hash": hash}),
             &[],
-        ))
+        );
+        Ok(())
     }
 
     fn drop(
         &mut self,
         id: &Json,
         h: &Json,
-    ) -> std::result::Result<Vec<u8>, (String, &'static str)> {
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), (String, &'static str)> {
         let name = h.get("name").and_then(|x| x.as_str()).unwrap_or("");
         let removed = self.stores.remove(name).is_some() | self.programs.remove(name).is_some();
-        Ok(Self::ok(
-            id,
-            "drop-ok",
-            json!({"name": name, "missing": !removed}),
-            &[],
-        ))
+        self.plans.remove(name);
+        Self::ok_into(out, id, "drop-ok", json!({"name": name, "missing": !removed}), &[]);
+        Ok(())
     }
 
     fn exec(
@@ -514,7 +393,8 @@ impl Node {
         id: &Json,
         h: &Json,
         payload: &[u8],
-    ) -> std::result::Result<Vec<u8>, (String, &'static str)> {
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), (String, &'static str)> {
         let handle = h
             .get("handle")
             .and_then(|x| x.as_str())
@@ -523,9 +403,13 @@ impl Node {
             .programs
             .get(handle)
             .ok_or((format!("no program {handle:?}"), "unknown-handle"))?;
+        // A job is a scope: one store to reuse boundary storage, and one
+        // allocation measurement around the whole job.
+        self.arena.reset();
+        let scope = JobScope::begin();
         let mut feeds = Feeds::new();
-        let mut input_hashes: BTreeMap<String, String> = BTreeMap::new();
-        let mut blob_hashes: BTreeMap<String, String> = BTreeMap::new();
+        let mut input_hashes: Vec<(&str, u64)> = Vec::new();
+        let mut blob_hashes: Vec<(&str, u64)> = Vec::new();
         let inputs = h
             .get("inputs")
             .and_then(|x| x.as_object())
@@ -536,12 +420,12 @@ impl Node {
                     .stores
                     .get(store)
                     .ok_or((format!("no store {store:?}"), "unknown-store"))?;
-                let v =
-                    decode_stream(&s.spec, &s.payload).map_err(|e| (e.to_string(), "malformed"))?;
+                let v = decode_stream(&s.spec(), &s.payload)
+                    .map_err(|e| (e.to_string(), "malformed"))?;
                 // Semantic content hash: independent of the wire dtype.
-                blob_hashes
-                    .entry(store.to_string())
-                    .or_insert_with(|| format!("{:016x}", v.exact_hash()));
+                if !blob_hashes.iter().any(|(n, _)| *n == store) {
+                    blob_hashes.push((store, v.exact_hash()));
+                }
                 v
             } else {
                 let off = refv.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -556,7 +440,7 @@ impl Node {
                 decode_stream(&spec, &payload[off..end])
                     .map_err(|e| (e.to_string(), "malformed"))?
             };
-            input_hashes.insert(stream.clone(), format!("{:016x}", v.exact_hash()));
+            input_hashes.push((stream.as_str(), v.exact_hash()));
             feeds.insert(stream.clone(), v);
         }
 
@@ -583,6 +467,21 @@ impl Node {
             let r = runtime::run_profiled(&prog.bound, &feeds, &exec, &mut prof);
             crate::profile::set_track_alloc(was);
             r
+        } else if exec.threads == 1 && crate::stream_arena::enabled() {
+            // Warm path: reuse the compiled plan and the stream arena.
+            if !self.plans.contains_key(handle) {
+                self.plans
+                    .insert(handle.to_string(), crate::stream_arena::PlanCache::new());
+            }
+            let cache = self.plans.get_mut(handle).expect("just inserted");
+            match cache.get(&prog.bound, &feeds) {
+                Some(plan) => {
+                    let mut out = Feeds::new();
+                    plan.run_feeds(&mut self.stream_arena, &feeds, &mut out)
+                        .map(|()| out)
+                }
+                None => runtime::run_with_options(&prog.bound, &feeds, &exec),
+            }
         } else {
             runtime::run_with_options(&prog.bound, &feeds, &exec)
         };
@@ -592,9 +491,10 @@ impl Node {
             .get("outputs")
             .and_then(|x| x.as_array())
             .ok_or(("missing outputs".to_string(), "malformed"))?;
-        let mut payload = Vec::new();
-        let mut specs = serde_json::Map::new();
-        let mut output_hashes: BTreeMap<String, String> = BTreeMap::new();
+        // Collected as plain tuples, not a `Json` tree: the header is streamed
+        // below, so nothing here needs to allocate a map node or a hex String.
+        let mut specs: Vec<(&str, StreamSpec, usize, usize)> = Vec::new();
+        let mut output_hashes: Vec<(&str, u64)> = Vec::new();
         let mut kinds: Vec<crate::value::Kind> = Vec::new();
         for name in outs {
             let name = name
@@ -603,17 +503,32 @@ impl Node {
             let v = got
                 .get(name)
                 .ok_or((format!("missing output {name}"), "arity"))?;
-            output_hashes.insert(name.to_string(), format!("{:016x}", v.exact_hash()));
+            output_hashes.push((name, v.exact_hash()));
             kinds.push(v.kind());
-            let (spec, bytes) = encode_stream(v).map_err(|e| (e.to_string(), "node"))?;
-            let off = payload.len();
-            payload.extend_from_slice(&bytes);
-            let mut sj = spec.json();
-            if let Some(o) = sj.as_object_mut() {
-                o.insert("off".into(), json!(off));
-                o.insert("len".into(), json!(bytes.len()));
-            }
-            specs.insert(name.to_string(), sj);
+            // Write the image straight into the job arena: no transient Vec.
+            let n = crate::flat::body_len(v, Convention::Wire)
+                .map_err(|e| (e.to_string(), "node"))?;
+            let off = self
+                .arena
+                .alloc(n)
+                .map_err(|e| (e.to_string(), "node"))?;
+            let spec = crate::flat::write_into(v, Convention::Wire, self.arena.slice_mut(off, n))
+                .map_err(|e| (e.to_string(), "node"))?;
+            specs.push((name, spec, off, n));
+        }
+        // `serde_json::Map` is a `BTreeMap`, so canonical frames sort keys.
+        specs.sort_by_key(|(n, ..)| *n);
+        output_hashes.sort_by_key(|(n, _)| *n);
+        input_hashes.sort_by_key(|(n, _)| *n);
+        blob_hashes.sort_by_key(|(n, _)| *n);
+
+        // Close the job scope after the last boundary write, then hold the
+        // job to its declared ceiling (if the controller set one).
+        let alloc_witness = scope.finish();
+        if let Some(max) = h.get("alloc_max").and_then(|x| x.as_u64()) {
+            alloc_witness
+                .check(max)
+                .map_err(|e| (e.to_string(), "alloc-budget"))?;
         }
 
         // Derive a conservative determinism label; the controller may
@@ -639,48 +554,12 @@ impl Node {
             "tolerance-float" => "declared",
             _ => "unspecified",
         };
-
-        // Canonical receipt: BTreeMap-backed JSON objects (sorted keys), no
-        // timing, no worker identity, no queue/cache state.
-        let mut receipt = serde_json::Map::new();
-        receipt.insert("program_hash".into(), json!(format!("{:016x}", prog.hash)));
-        receipt.insert("blob_hashes".into(), json!(blob_hashes));
-        receipt.insert("input_hashes".into(), json!(input_hashes));
-        receipt.insert("output_hashes".into(), json!(output_hashes));
-        receipt.insert("profile".into(), json!(determinism));
-        receipt.insert("backend".into(), json!("lattice"));
-        receipt.insert(
-            "kernel".into(),
-            json!(if exec.threads > 1 {
-                "lattice-threaded"
-            } else {
-                "lattice-scalar"
-            }),
-        );
-        receipt.insert("runtime_version".into(), json!(runtime_version()));
-        receipt.insert("sched_version".into(), json!(crate::runtime::SCHED_VERSION));
-        receipt.insert("threads".into(), json!(exec.threads));
-        receipt.insert(
-            "partition".into(),
-            json!({"kind": "contiguous-output-blocks",
-                   "threads": exec.threads,
-                   "sched_version": crate::runtime::SCHED_VERSION}),
-        );
-        receipt.insert("verdict".into(), json!(verdict));
-        if let Some(r) = h.get("reference") {
-            receipt.insert("reference".into(), r.clone());
-        }
-        if let Some(t) = h.get("tolerance") {
-            receipt.insert("tolerance".into(), t.clone());
-        }
-
-        let mut fields = json!({
-            "outputs": specs,
-            "threads": exec.threads,
-            "runtime_version": runtime_version(),
-            "receipt": receipt,
-        });
-        if profile_ops {
+        let threads = exec.threads;
+        // Diagnostic-only extensions: built as `Json` because they are opt-in
+        // and are not on the steady-state path.
+        let diagnostic = if profile_ops {
+            let mut aw = alloc_witness.json();
+            aw["arena_detail"] = self.arena.json();
             let ops: Vec<Json> = prof
                 .ops
                 .iter()
@@ -693,12 +572,112 @@ impl Node {
                            "out_bytes": p.out_bytes})
                 })
                 .collect();
-            if let Some(o) = fields.as_object_mut() {
-                // Advisory only: timing is deliberately outside the receipt.
-                o.insert("profile_ops".into(), json!(ops));
+            Some((aw, ops))
+        } else {
+            None
+        };
+
+        // Canonical receipt and reply, streamed straight into the frame. Keys
+        // are emitted in sorted order to match `serde_json::Map`.
+        let mut f = FrameBuf::begin(out);
+        {
+            let mut w = f.json();
+            w.begin_object();
+            if let Some((aw, _)) = &diagnostic {
+                w.kv_value("alloc_witness", aw)
+                    .map_err(|e| (e.to_string(), "node"))?;
             }
+            w.key("id");
+            w.value(id).map_err(|e| (e.to_string(), "node"))?;
+            w.kv_bool("ok", true);
+            w.key("outputs");
+            w.begin_object();
+            for (name, spec, off, n) in &specs {
+                w.key(name);
+                w.begin_object();
+                w.kv_str("dtype", &spec.dtype);
+                w.kv_str("kind", &spec.kind);
+                w.kv_uint("len", *n as u64);
+                w.kv_uint("off", *off as u64);
+                w.key("shape");
+                w.begin_array();
+                for d in &spec.shape {
+                    w.uint(*d as u64);
+                }
+                w.end_array();
+                w.end_object();
+            }
+            w.end_object();
+            if let Some((_, ops)) = &diagnostic {
+                w.key("profile_ops");
+                w.value(&Json::Array(ops.clone()))
+                    .map_err(|e| (e.to_string(), "node"))?;
+            }
+            w.key("receipt");
+            w.begin_object();
+            {
+                w.key("arena");
+                w.begin_object();
+                w.kv_uint("used", self.arena.used() as u64);
+                w.end_object();
+                w.kv_str("backend", "lattice");
+                w.key("blob_hashes");
+                w.begin_object();
+                for (n, h) in &blob_hashes {
+                    w.kv_hex16(n, *h);
+                }
+                w.end_object();
+                w.key("input_hashes");
+                w.begin_object();
+                for (n, h) in &input_hashes {
+                    w.kv_hex16(n, *h);
+                }
+                w.end_object();
+                w.kv_str(
+                    "kernel",
+                    if threads > 1 {
+                        "lattice-threaded"
+                    } else {
+                        "lattice-scalar"
+                    },
+                );
+                w.key("output_hashes");
+                w.begin_object();
+                for (n, h) in &output_hashes {
+                    w.kv_hex16(n, *h);
+                }
+                w.end_object();
+                w.key("partition");
+                w.begin_object();
+                w.kv_str("kind", "contiguous-output-blocks");
+                w.kv_uint("sched_version", crate::runtime::SCHED_VERSION);
+                w.kv_uint("threads", threads as u64);
+                w.end_object();
+                w.kv_str("profile", determinism);
+                w.kv_hex16("program_hash", prog.hash);
+                if let Some(r) = h.get("reference") {
+                    w.kv_value("reference", r)
+                        .map_err(|e| (e.to_string(), "node"))?;
+                }
+                w.kv_str("runtime_version", RUNTIME_VERSION);
+                w.kv_uint("sched_version", crate::runtime::SCHED_VERSION);
+                w.kv_uint("threads", threads as u64);
+                if let Some(t) = h.get("tolerance") {
+                    w.kv_value("tolerance", t)
+                        .map_err(|e| (e.to_string(), "node"))?;
+                }
+                w.kv_str("verdict", verdict);
+            }
+            w.end_object();
+            w.kv_str("runtime_version", RUNTIME_VERSION);
+            w.kv_uint("threads", threads as u64);
+            w.kv_str("type", "exec-ok");
+            w.kv_uint("v", PROTO_V);
+            w.end_object();
         }
-        Ok(Self::ok(id, "exec-ok", fields, &payload))
+        f.end(self.arena.used_slice())
+            .map_err(|e| (e.to_string(), "node"))?;
+        Ok(())
     }
 }
 
@@ -709,9 +688,20 @@ impl Node {
 /// caller instead of growing without limit. Program/store requests still
 /// share the single worker and therefore wait behind a long EXEC; the job
 /// server needs immutable `Arc` snapshots for those (next step).
+/// One unit of work: the request frame, the reply channel, and the caller's
+/// reply buffer (moved, filled by the worker, moved back).
+type Job = (Vec<u8>, Sender<Vec<u8>>, Vec<u8>);
+
+#[derive(Default)]
+struct WorkerStats {
+    allocs: AtomicU64,
+    replies: AtomicU64,
+}
+
 #[derive(Clone)]
 pub struct NodeHandle {
-    tx: mpsc::SyncSender<(Vec<u8>, Sender<Vec<u8>>)>,
+    tx: mpsc::SyncSender<Job>,
+    stats: Arc<WorkerStats>,
 }
 
 impl NodeHandle {
@@ -724,25 +714,59 @@ impl NodeHandle {
 
     pub fn spawn_bounded(id: usize, allowed: &[&str], capacity: usize) -> Self {
         let allowed: Vec<String> = allowed.iter().map(|s| s.to_string()).collect();
-        let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, Sender<Vec<u8>>)>(capacity.max(1));
+        let (tx, rx) = mpsc::sync_channel::<Job>(capacity.max(1));
+        let stats = Arc::new(WorkerStats::default());
+        let worker = stats.clone();
         thread::spawn(move || {
             let mut node = Node::new(allowed);
             let _ = id;
-            while let Ok((frame, reply)) = rx.recv() {
-                let out = node.handle(&frame);
-                let _ = reply.send(out);
+            // The worker writes into the buffer the caller sent, so a caller
+            // that reuses its buffer gives the worker zero allocations per
+            // reply. No pool and no copy: ownership travels with the job.
+            while let Ok((frame, reply, mut buf)) = rx.recv() {
+                let scope = JobScope::begin();
+                node.handle_into(&frame, &mut buf);
+                let w = scope.finish();
+                worker.allocs.fetch_add(w.allocs, Ordering::Relaxed);
+                worker.replies.fetch_add(1, Ordering::Relaxed);
+                let _ = reply.send(buf);
             }
         });
-        NodeHandle { tx }
+        NodeHandle { tx, stats }
     }
 
+    /// Convenience: the reply buffer is allocated here and owned by the
+    /// caller, so the worker still does not allocate one.
     pub fn request(&self, frame: Vec<u8>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.request_into(frame, &mut out)?;
+        Ok(out)
+    }
+
+    /// Send a job and write its reply into `out`, reusing `out`'s capacity.
+    ///
+    /// The buffer is moved into the worker and back, so a reused `out` makes
+    /// the whole round trip allocation-free after the first request.
+    pub fn request_into(&self, frame: Vec<u8>, out: &mut Vec<u8>) -> Result<()> {
         let (tx, rx) = mpsc::channel();
+        let buf = std::mem::take(out);
         self.tx
-            .send((frame, tx))
+            .send((frame, tx, buf))
             .map_err(|_| Error::runtime("node thread is gone"))?;
-        rx.recv()
-            .map_err(|_| Error::runtime("node thread dropped the response"))
+        *out = rx
+            .recv()
+            .map_err(|_| Error::runtime("node thread dropped the response"))?;
+        Ok(())
+    }
+
+    /// Allocations observed on the worker thread, cumulative.
+    pub fn worker_allocs(&self) -> u64 {
+        self.stats.allocs.load(Ordering::Relaxed)
+    }
+
+    /// Replies produced by the worker, cumulative.
+    pub fn worker_replies(&self) -> u64 {
+        self.stats.replies.load(Ordering::Relaxed)
     }
 }
 

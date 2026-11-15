@@ -1,0 +1,10 @@
+IN X
+t0 = IADD(X, X)
+t1 = IADD(t0, X)
+t2 = IADD(t1, X)
+t3 = IADD(t2, X)
+t4 = IADD(t3, X)
+t5 = IADD(t4, X)
+t6 = IADD(t5, X)
+t7 = IADD(t6, X)
+OUT = IADD(t7, X)
