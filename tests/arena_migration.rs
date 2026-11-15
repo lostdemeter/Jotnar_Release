@@ -94,23 +94,20 @@ fn arena_and_interpreter_agree() {
             "IN X\nR = RELU(X)\nI = F2I(R)\nOUT = I2F(I)\n",
             f_feeds(&[-1.5, 0.0, 2.5, -3.0, 7.75]),
         ),
-        (
-            "IN X\nOUT = RESIZE2D(X, 3, 2, 0)\n",
-            {
-                let mut f = Feeds::new();
-                f.insert(
-                    "X".to_string(),
-                    Value::F64(
-                        jotnar::value::array_from_vec(
-                            &[2, 2, 2],
-                            (0..8).map(|i| i as f64 * 0.25).collect(),
-                        )
-                        .unwrap(),
-                    ),
-                );
-                f
-            },
-        ),
+        ("IN X\nOUT = RESIZE2D(X, 3, 2, 0)\n", {
+            let mut f = Feeds::new();
+            f.insert(
+                "X".to_string(),
+                Value::F64(
+                    jotnar::value::array_from_vec(
+                        &[2, 2, 2],
+                        (0..8).map(|i| i as f64 * 0.25).collect(),
+                    )
+                    .unwrap(),
+                ),
+            );
+            f
+        }),
         (
             "IN X\nOUT = RESHAPE2(X, 4, 2)\n",
             feeds(&[("X", (0..8).collect(), vec![2, 4])]),
@@ -132,37 +129,32 @@ fn arena_and_interpreter_agree() {
                 f.insert(
                     "W".to_string(),
                     Value::F64(
-                        jotnar::value::array_from_vec(&[4], vec![1.0, 0.5, -1.0, 2.0])
-                            .unwrap(),
+                        jotnar::value::array_from_vec(&[4], vec![1.0, 0.5, -1.0, 2.0]).unwrap(),
                     ),
                 );
                 f.insert(
                     "B".to_string(),
                     Value::F64(
-                        jotnar::value::array_from_vec(&[4], vec![0.25, -0.25, 0.0, 1.0])
-                            .unwrap(),
+                        jotnar::value::array_from_vec(&[4], vec![0.25, -0.25, 0.0, 1.0]).unwrap(),
                     ),
                 );
                 f
             },
         ),
-        (
-            "IN X\nV, I = TOPK(X, 3)\n",
-            {
-                let mut f = Feeds::new();
-                f.insert(
-                    "X".to_string(),
-                    Value::F64(
-                        jotnar::value::array_from_vec(
-                            &[2, 5],
-                            vec![1.0, 3.0, 3.0, 2.0, 3.0, -1.0, 5.0, 0.0, 5.0, 4.0],
-                        )
-                        .unwrap(),
-                    ),
-                );
-                f
-            },
-        ),
+        ("IN X\nV, I = TOPK(X, 3)\n", {
+            let mut f = Feeds::new();
+            f.insert(
+                "X".to_string(),
+                Value::F64(
+                    jotnar::value::array_from_vec(
+                        &[2, 5],
+                        vec![1.0, 3.0, 3.0, 2.0, 3.0, -1.0, 5.0, 0.0, 5.0, 4.0],
+                    )
+                    .unwrap(),
+                ),
+            );
+            f
+        }),
     ];
     for (text, f) in cases {
         let (hits, fallbacks) = compare(text, &f);
@@ -194,8 +186,7 @@ fn every_soak_fixture_exercises_the_path_it_claims() {
     let dir = Path::new("tests/fixtures");
     for &(base, on_arena) in cases {
         let text = std::fs::read_to_string(dir.join(format!("{base}.asm"))).unwrap();
-        let feeds =
-            jotnar::payload::read_payload(&dir.join(format!("{base}.ndjson"))).unwrap();
+        let feeds = jotnar::payload::read_payload(&dir.join(format!("{base}.ndjson"))).unwrap();
         let bound = assemble(&text, &AsmOptions::new(dir)).unwrap();
         set_enabled(Some(true));
         let before = arena_stats();
@@ -223,9 +214,7 @@ fn unported_listing_falls_back_to_the_interpreter() {
     let mut f = Feeds::new();
     f.insert(
         "X".to_string(),
-        Value::F64(
-            jotnar::value::array_from_vec(&[2, 2, 3], vec![0.25f64; 12]).unwrap(),
-        ),
+        Value::F64(jotnar::value::array_from_vec(&[2, 2, 3], vec![0.25f64; 12]).unwrap()),
     );
     let (hits, fallbacks) = compare("IN X\nOUT = LUMA(X)\n", &f);
     assert_eq!(hits, 0, "arena should not handle a listing it cannot plan");
@@ -271,7 +260,6 @@ fn arena_reduces_allocations_end_to_end() {
     assert!(arena.allocs < interp.allocs, "arena should allocate less");
 }
 
-
 /// The warm path: a node compiles each program's plan once and reuses the
 /// stream arena across jobs.
 #[test]
@@ -288,7 +276,11 @@ fn node_warm_path_avoids_plan_compilation() {
 
     let frame = |kind: &str| {
         let mut payload = Vec::new();
-        payload.extend(std::iter::repeat(1i64).take(256).flat_map(|v| v.to_le_bytes()));
+        payload.extend(
+            std::iter::repeat(1i64)
+                .take(256)
+                .flat_map(|v| v.to_le_bytes()),
+        );
         jotnar::protocol::request(
             2,
             "exec",
@@ -326,8 +318,7 @@ fn node_warm_path_avoids_plan_compilation() {
         node.handle(&f);
     }
     let scope = JobScope::begin();
-    let warm = node
-        .handle(&f);
+    let warm = node.handle(&f);
     let arena = scope.finish();
     set_enabled(None);
 
@@ -337,10 +328,12 @@ fn node_warm_path_avoids_plan_compilation() {
         "node warm: interpreter {} allocs / {} bytes, arena {} allocs / {} bytes",
         interp.allocs, interp.bytes, arena.allocs, arena.bytes
     );
-    assert!(arena.allocs < interp.allocs / 2, "cached path should be much cheaper");
+    assert!(
+        arena.allocs < interp.allocs / 2,
+        "cached path should be much cheaper"
+    );
     assert_eq!(NodeHandle::DEFAULT_QUEUE, 64);
 }
-
 
 /// The size cap must send an oversized working set back to the interpreter,
 /// not fail the job.

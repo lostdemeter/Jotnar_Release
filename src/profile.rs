@@ -234,7 +234,6 @@ impl Drop for JobScope {
     }
 }
 
-
 /// Total bytes requested since the process started (0 when tracking is off).
 pub fn allocated() -> u64 {
     ALLOCATED_BYTES.load(Ordering::Relaxed)
@@ -245,9 +244,7 @@ pub fn allocated() -> u64 {
 /// The authoritative switch is thread-local; [`TRACK_ALLOC`] is a mirror for
 /// callers that only want to know whether anything is tracking.
 pub fn set_track_alloc(on: bool) -> bool {
-    let prev = TRACK_LOCAL
-        .try_with(|c| c.replace(on))
-        .unwrap_or(false);
+    let prev = TRACK_LOCAL.try_with(|c| c.replace(on)).unwrap_or(false);
     TRACK_ALLOC.store(on, Ordering::Relaxed);
     prev
 }

@@ -52,7 +52,7 @@ has no inference rule).
 
 ## Coverage
 
-53 kernels. Registry is 92 entries.
+53 kernels. Registry is 94 entries.
 
 | Group | Total | Ported |
 |---|---:|---:|
@@ -63,6 +63,7 @@ has no inference rule).
 | T | 6 | 0 (excluded) |
 | `$X` | 4 | 3 |
 | U8 | 1 | 0 (excluded) |
+| No layout signature (`ATTN`, `BMMV`) | 2 | 0 |
 
 Ported: 4 elementwise-shift/3-op groups (19), reductions (2), encoder (1),
 matmul (1), index/window/find/gather/scatter/pack/CRC (8), F: RELU, F2I, I2F,
@@ -204,7 +205,7 @@ bits (`v as i64`) instead of computing `v - 2^64` in `u128`.
 
 | Metric | Value |
 |---|---|
-| Tests | 310 (off and on) |
+| Tests | 311 (off and on) |
 | Kernels | 53 |
 | Arena unit tests / migration tests | 35 / 6 |
 | Soak fixtures | 12 |

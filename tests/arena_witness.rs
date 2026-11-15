@@ -116,7 +116,10 @@ fn job_witness_is_cold_then_warm() {
     // The boundary itself is clean on the warm path: the interior interpreter
     // allocations are what remain.
     assert_eq!(w2["arena_detail"]["warm"], true);
-    assert_eq!(w1["receipt"]["arena"]["used"], w2["receipt"]["arena"]["used"]);
+    assert_eq!(
+        w1["receipt"]["arena"]["used"],
+        w2["receipt"]["arena"]["used"]
+    );
     assert_eq!(w1["receipt"], w2["receipt"], "receipt must stay canonical");
 }
 
@@ -151,7 +154,10 @@ fn interior_allocations_are_measured() {
     println!("steady-state job: {allocs} allocations, {bytes} bytes requested");
     // Pin the current reality rather than pretend it is zero. Three ops over
     // one element is small; larger listings scale with op count.
-    assert!(allocs >= 3, "expected per-op interior allocations, got {allocs}");
+    assert!(
+        allocs >= 3,
+        "expected per-op interior allocations, got {allocs}"
+    );
 }
 
 /// Separate the interpreter's own allocation cost from protocol/JSON framing.
@@ -165,8 +171,14 @@ fn interpreter_interior_cost_in_isolation() {
 
     let bound = assemble(LISTING, &AsmOptions::default()).unwrap();
     let mut feeds = jotnar::payload::Feeds::new();
-    feeds.insert("X".to_string(), Value::I64(array_from_vec(&[1], vec![7]).unwrap()));
-    feeds.insert("S".to_string(), Value::I64(array_from_vec(&[1], vec![3]).unwrap()));
+    feeds.insert(
+        "X".to_string(),
+        Value::I64(array_from_vec(&[1], vec![7]).unwrap()),
+    );
+    feeds.insert(
+        "S".to_string(),
+        Value::I64(array_from_vec(&[1], vec![3]).unwrap()),
+    );
     let opts = ExecOptions::default();
 
     for _ in 0..3 {
@@ -240,7 +252,11 @@ fn handle_into_breakdown() {
     assert!(w_recv.allocs <= w_fresh.allocs, "reuse must not cost more");
     assert_eq!(
         node.handle(&exec),
-        { let mut v = Vec::new(); node.handle_into(&exec, &mut v); v },
+        {
+            let mut v = Vec::new();
+            node.handle_into(&exec, &mut v);
+            v
+        },
         "handle and handle_into must produce identical frames"
     );
 }
@@ -288,19 +304,27 @@ fn chain_listing(n: usize) -> String {
 fn run_chain(n: usize) -> (u64, u64, u64, u64, u64, i64) {
     let mut node = jotnar::protocol::Node::new(vec!["lattice".into()]);
     let p = jotnar::protocol::request(
-        1, "program",
+        1,
+        "program",
         json!({"name": "c", "backend": "lattice"}),
         chain_listing(n).as_bytes(),
-    ).unwrap();
+    )
+    .unwrap();
     node.handle(&p);
     let mut payload = Vec::new();
-    payload.extend(std::iter::repeat(3i64).take(1024).flat_map(|v| v.to_le_bytes()));
+    payload.extend(
+        std::iter::repeat(3i64)
+            .take(1024)
+            .flat_map(|v| v.to_le_bytes()),
+    );
     let spec = json!({"kind": "I", "dtype": "i64", "shape": [1024], "off": 0, "len": 8192});
     let exec = jotnar::protocol::request(
-        2, "exec",
+        2,
+        "exec",
         json!({"handle": "c", "inputs": {"X": spec}, "outputs": ["OUT"], "profile_ops": true}),
         &payload,
-    ).unwrap();
+    )
+    .unwrap();
     let (h1, _) = jotnar::protocol::decode_frame(&node.handle(&exec)).unwrap();
     let (h2, _) = jotnar::protocol::decode_frame(&node.handle(&exec)).unwrap();
     let w1 = &h1["alloc_witness"];

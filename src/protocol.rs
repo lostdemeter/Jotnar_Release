@@ -17,26 +17,22 @@ use std::thread;
 
 use serde_json::{json, Value as Json};
 
+use crate::arena::JobArena;
 use crate::asm;
 use crate::error::{Error, Result};
-use crate::arena::JobArena;
 use crate::flat::{Admission, Convention};
 use crate::payload::Feeds;
 use crate::profile::JobScope;
-use crate::wire::FrameBuf;
 use crate::runtime::{self, ExecOptions, ThreadPolicy};
 use crate::value::{hash_bytes, Value};
+use crate::wire::FrameBuf;
 
 pub const PROTO_V: u64 = 1;
 
 /// Build identity for protocol responses. Deterministic for a given binary:
 /// package version plus the short git HEAD resolved by `build.rs`.
 /// Build identity, allocation-free: both halves are `'static`.
-pub const RUNTIME_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "+",
-    env!("JOTNAR_GIT_HASH")
-);
+pub const RUNTIME_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("JOTNAR_GIT_HASH"));
 
 pub fn runtime_version() -> String {
     RUNTIME_VERSION.to_string()
@@ -331,7 +327,13 @@ impl Node {
         let hash = hash_bytes(listing.as_bytes());
         self.programs
             .insert(name.to_string(), Program { bound, hash });
-        Self::ok_into(out, id, "program-ok", json!({"handle": name, "replaced": false}), &[]);
+        Self::ok_into(
+            out,
+            id,
+            "program-ok",
+            json!({"handle": name, "replaced": false}),
+            &[],
+        );
         Ok(())
     }
 
@@ -384,7 +386,13 @@ impl Node {
         let name = h.get("name").and_then(|x| x.as_str()).unwrap_or("");
         let removed = self.stores.remove(name).is_some() | self.programs.remove(name).is_some();
         self.plans.remove(name);
-        Self::ok_into(out, id, "drop-ok", json!({"name": name, "missing": !removed}), &[]);
+        Self::ok_into(
+            out,
+            id,
+            "drop-ok",
+            json!({"name": name, "missing": !removed}),
+            &[],
+        );
         Ok(())
     }
 
@@ -506,12 +514,9 @@ impl Node {
             output_hashes.push((name, v.exact_hash()));
             kinds.push(v.kind());
             // Write the image straight into the job arena: no transient Vec.
-            let n = crate::flat::body_len(v, Convention::Wire)
-                .map_err(|e| (e.to_string(), "node"))?;
-            let off = self
-                .arena
-                .alloc(n)
-                .map_err(|e| (e.to_string(), "node"))?;
+            let n =
+                crate::flat::body_len(v, Convention::Wire).map_err(|e| (e.to_string(), "node"))?;
+            let off = self.arena.alloc(n).map_err(|e| (e.to_string(), "node"))?;
             let spec = crate::flat::write_into(v, Convention::Wire, self.arena.slice_mut(off, n))
                 .map_err(|e| (e.to_string(), "node"))?;
             specs.push((name, spec, off, n));

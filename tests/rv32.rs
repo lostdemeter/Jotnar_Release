@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use jotnar::rv32::Rv32;
 
 #[test]
@@ -43,12 +41,15 @@ fn framebuffer_png_roundtrip() {
     // Write two RGBA words into the framebuffer.
     cpu.write32(jotnar::rv32::FB_ADDR, 0x00112233);
     cpu.write32(jotnar::rv32::FB_ADDR + 4, 0x44556677);
-    let p = Path::new("/tmp/opencode/rv32_test_fb.png");
-    jotnar::rv32::save_fb_png(cpu.framebuffer(), p).unwrap();
-    let got = jotnar::rv32::read_fb_png(p).unwrap();
+    let dir = std::env::temp_dir().join(format!("jotnar_rv32_fb_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("rv32_test_fb.png");
+    jotnar::rv32::save_fb_png(cpu.framebuffer(), &p).unwrap();
+    let got = jotnar::rv32::read_fb_png(&p).unwrap();
     for i in 0..2 {
         assert_eq!(&got[i * 4..i * 4 + 3], &cpu.framebuffer()[i * 4..i * 4 + 3]);
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

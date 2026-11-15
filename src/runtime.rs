@@ -1,7 +1,7 @@
 //! The reference interpreter: execute a bound program over typed streams.
 
-use std::collections::HashMap;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::asm::{self, AsmOptions};

@@ -392,11 +392,7 @@ pub fn op_rmsnorm(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
         .get_f64("eps_rms")
         .ok_or_else(|| Error::runtime("RMSNORM: needs CONFIG eps_rms"))?;
     Ok(vec![Value::F64(norm_rows_f64(
-        &x,
-        &w,
-        None,
-        eps,
-        "RMSNORM",
+        &x, &w, None, eps, "RMSNORM",
     )?)])
 }
 

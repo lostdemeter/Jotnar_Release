@@ -82,7 +82,10 @@ fn node_alloc_budget_is_enforced() {
 fn runtime_budget_rejects_and_admits() {
     let bound = assemble(LISTING, &AsmOptions::default()).unwrap();
     let mut feeds = Feeds::new();
-    feeds.insert("X".to_string(), Value::I64(array_from_vec(&[1], vec![6]).unwrap()));
+    feeds.insert(
+        "X".to_string(),
+        Value::I64(array_from_vec(&[1], vec![6]).unwrap()),
+    );
     let opts = ExecOptions::default();
 
     let scope = JobScope::begin();
@@ -91,7 +94,10 @@ fn runtime_budget_rejects_and_admits() {
     println!("steady interpreter allocations: {steady}");
     assert!(steady > 0, "the interpreter still allocates per op");
 
-    assert!(run_budgeted(&bound, &feeds, &opts, 0).is_err(), "0 must reject");
+    assert!(
+        run_budgeted(&bound, &feeds, &opts, 0).is_err(),
+        "0 must reject"
+    );
     run_budgeted(&bound, &feeds, &opts, steady).expect("steady ceiling must admit");
 }
 
@@ -121,7 +127,10 @@ fn warm_job_allocation_count_is_a_fixed_point() {
     // Fixed point alone catches drift, not a constant increase. The band is
     // the committed strictness: ~107 today, with room for allocator noise but
     // not for a new per-op allocation.
-    assert!(first <= 170, "job allocation count grew to {first} (band: <=170)");
+    assert!(
+        first <= 170,
+        "job allocation count grew to {first} (band: <=170)"
+    );
 }
 
 /// The worker writes into the caller's buffer, so the transport adds *nothing*
@@ -217,7 +226,10 @@ fn det_alloc_gate_says_yes_and_no() {
         String::from_utf8_lossy(&ok.stderr)
     );
     let out = String::from_utf8_lossy(&ok.stdout);
-    assert!(out.contains("self-check=OK"), "gate never proved it can reject:\n{out}");
+    assert!(
+        out.contains("self-check=OK"),
+        "gate never proved it can reject:\n{out}"
+    );
 
     let no = run("0");
     assert!(!no.status.success(), "ceiling 0 should fail the run");
@@ -302,12 +314,18 @@ fn stream_arena_reuses_the_graph_working_set() {
         arena_w.allocs as f64 / n as f64
     );
 
-    assert_eq!(arena_w.allocs, 0, "the arena path must not allocate per job");
+    assert_eq!(
+        arena_w.allocs, 0,
+        "the arena path must not allocate per job"
+    );
     assert_eq!(arena.used_words(), plan.words());
     let rate = interp.allocs as f64 / n as f64;
     assert!(rate > 5.0, "interpreter should still churn: {rate}");
     // Committed band: 24.2 today. A new per-op allocation would push this over.
-    assert!(rate <= 32.0, "per-mnemonic allocations grew to {rate:.1} (band: <=32)");
+    assert!(
+        rate <= 32.0,
+        "per-mnemonic allocations grew to {rate:.1} (band: <=32)"
+    );
 }
 
 /// The case that decides whether the arena scales past elementwise ops: a

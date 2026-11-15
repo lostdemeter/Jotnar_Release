@@ -152,13 +152,12 @@ impl FlatPayload {
     /// Element count of `shape`, rejecting overflow.
     fn elems(&self) -> Result<usize> {
         self.spec.shape.iter().try_fold(1usize, |acc, &d| {
-            acc.checked_mul(d)
-                .ok_or_else(|| {
-                    Error::runtime(format!(
-                        "flat: shape {:?} overflows an element count",
-                        self.spec.shape
-                    ))
-                })
+            acc.checked_mul(d).ok_or_else(|| {
+                Error::runtime(format!(
+                    "flat: shape {:?} overflows an element count",
+                    self.spec.shape
+                ))
+            })
         })
     }
 
@@ -241,8 +240,12 @@ impl Admitted {
         let n = self.admission.elems;
         let shape = &self.spec.shape;
         match (self.enc, self.spec.kind.as_str()) {
-            (Encoding::Scalar(8), "F") => Ok(Value::F64(array_from_vec(shape, le_f64(&self.bytes))?)),
-            (Encoding::Scalar(8), "I") => Ok(Value::I64(array_from_vec(shape, le_i64(&self.bytes))?)),
+            (Encoding::Scalar(8), "F") => {
+                Ok(Value::F64(array_from_vec(shape, le_f64(&self.bytes))?))
+            }
+            (Encoding::Scalar(8), "I") => {
+                Ok(Value::I64(array_from_vec(shape, le_i64(&self.bytes))?))
+            }
             (Encoding::Scalar(4), "F") => Ok(Value::F32(array_from_vec(
                 shape,
                 self.bytes
@@ -250,16 +253,18 @@ impl Admitted {
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect(),
             )?)),
-            (Encoding::Scalar(1), "I") => {
-                Ok(Value::U8(array_from_vec(shape, self.bytes.clone())?))
-            }
+            (Encoding::Scalar(1), "I") => Ok(Value::U8(array_from_vec(shape, self.bytes.clone())?)),
             (Encoding::T2, "T") => {
                 let s: Vec<i8> = self.bytes[..n].iter().map(|b| *b as i8).collect();
                 let e = le_i32(&self.bytes[n..n * 5]);
                 let z = self.bytes[n * 5..n * 6].to_vec();
                 let m = le_i32(&self.bytes[n * 6..n * 10]);
                 Ok(Value::Triple(Triple::from_vecs_opt(
-                    shape, s, e, z, Some(m),
+                    shape,
+                    s,
+                    e,
+                    z,
+                    Some(m),
                 )?))
             }
             (Encoding::FrozenT, "T") => {
@@ -316,9 +321,9 @@ fn plan(v: &Value, convention: Convention) -> Result<(StreamSpec, usize)> {
             convention.as_str()
         ))
     })?;
-    let want = elems.checked_mul(enc.width()).ok_or_else(|| {
-        Error::runtime(format!("flat: {elems} elements overflow a byte count"))
-    })?;
+    let want = elems
+        .checked_mul(enc.width())
+        .ok_or_else(|| Error::runtime(format!("flat: {elems} elements overflow a byte count")))?;
     Ok((spec, want))
 }
 
@@ -451,7 +456,8 @@ fn le_i32(b: &[u8]) -> Vec<i32> {
 mod tests {
     use super::*;
 
-    fn spec(kind: &str, dtype: &str, shape: &[usize]) -> StreamSpec {        StreamSpec {
+    fn spec(kind: &str, dtype: &str, shape: &[usize]) -> StreamSpec {
+        StreamSpec {
             kind: kind.into(),
             dtype: dtype.into(),
             shape: shape.to_vec(),
@@ -462,7 +468,8 @@ mod tests {
         a.bytes / a.elems.max(1)
     }
 
-    fn roundtrip(v: Value, c: Convention) {        let p = encode(&v, c).unwrap();
+    fn roundtrip(v: Value, c: Convention) {
+        let p = encode(&v, c).unwrap();
         let (adm, witness) = p.admit(c).unwrap();
         let back = adm.decode().unwrap();
         assert_eq!(
@@ -471,7 +478,10 @@ mod tests {
             "roundtrip {}",
             c.as_str()
         );
-        assert_eq!(witness.bytes, adm.spec().shape.iter().product::<usize>() * width_of(&witness));
+        assert_eq!(
+            witness.bytes,
+            adm.spec().shape.iter().product::<usize>() * width_of(&witness)
+        );
     }
 
     #[test]
@@ -486,14 +496,8 @@ mod tests {
         // The bytes are a different convention, so admitting one as the other
         // is a typed error, not a silent misread.
         assert!(wire.clone().admit(Convention::Target).is_err());
-        assert_eq!(
-            wire.admit(Convention::Wire).unwrap().1.layout(),
-            "F:2"
-        );
-        assert_eq!(
-            target.admit(Convention::Target).unwrap().1.layout(),
-            "F:2"
-        );
+        assert_eq!(wire.admit(Convention::Wire).unwrap().1.layout(), "F:2");
+        assert_eq!(target.admit(Convention::Target).unwrap().1.layout(), "F:2");
     }
 
     #[test]
@@ -579,7 +583,9 @@ mod parity_probe {
             dtype: "f64".into(),
             shape: vec![1usize << 32, 1usize << 32],
         };
-        let e = crate::protocol::decode_stream(&s, &[]).unwrap_err().to_string();
+        let e = crate::protocol::decode_stream(&s, &[])
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("overflows"), "{e}");
     }
 }
@@ -592,16 +598,25 @@ mod wire_frozen {
     /// hand-computed expectations, independent of the encoder.
     #[test]
     fn t2_plane_major_bytes() {
-        let t = Triple::from_vecs_opt(&[2], vec![-1i8, 2], vec![3i32, -4], vec![5u8, 6],
-                                      Some(vec![7i32, -8])).unwrap();
+        let t = Triple::from_vecs_opt(
+            &[2],
+            vec![-1i8, 2],
+            vec![3i32, -4],
+            vec![5u8, 6],
+            Some(vec![7i32, -8]),
+        )
+        .unwrap();
         let p = encode(&Value::Triple(t), Convention::Wire).unwrap();
         assert_eq!(p.spec.dtype, "t2");
-        assert_eq!(p.bytes, vec![
-            0xFF, 0x02,                                     // s: i8 plane
-            0x03, 0x00, 0x00, 0x00, 0xFC, 0xFF, 0xFF, 0xFF, // e: i32 LE plane
-            0x05, 0x06,                                     // z: u8 plane
-            0x07, 0x00, 0x00, 0x00, 0xF8, 0xFF, 0xFF, 0xFF, // m: i32 LE plane
-        ]);
+        assert_eq!(
+            p.bytes,
+            vec![
+                0xFF, 0x02, // s: i8 plane
+                0x03, 0x00, 0x00, 0x00, 0xFC, 0xFF, 0xFF, 0xFF, // e: i32 LE plane
+                0x05, 0x06, // z: u8 plane
+                0x07, 0x00, 0x00, 0x00, 0xF8, 0xFF, 0xFF, 0xFF, // m: i32 LE plane
+            ]
+        );
     }
 
     #[test]
@@ -619,9 +634,15 @@ mod wire_frozen {
 
     #[test]
     fn f32_wire_is_four_bytes() {
-        let p = encode(&Value::F32(array_from_vec(&[2], vec![1.5f32, -2.0]).unwrap()),
-                       Convention::Wire).unwrap();
-        assert_eq!(p.bytes, vec![0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0x00, 0xC0]);
+        let p = encode(
+            &Value::F32(array_from_vec(&[2], vec![1.5f32, -2.0]).unwrap()),
+            Convention::Wire,
+        )
+        .unwrap();
+        assert_eq!(
+            p.bytes,
+            vec![0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0x00, 0xC0]
+        );
     }
 }
 
@@ -634,9 +655,13 @@ mod receipt_shape {
         let p = encode(
             &Value::F64(array_from_vec(&[2, 3], vec![0.0; 6]).unwrap()),
             Convention::Target,
-        ).unwrap();
+        )
+        .unwrap();
         let (adm, w) = p.admit(Convention::Target).unwrap();
-        println!("admitted = {}", serde_json::to_string_pretty(&w.json()).unwrap());
+        println!(
+            "admitted = {}",
+            serde_json::to_string_pretty(&w.json()).unwrap()
+        );
         assert_eq!(adm.admission(), &w);
         assert_eq!(w.elems, 6);
         assert_eq!(w.bytes, 48);

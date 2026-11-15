@@ -67,7 +67,9 @@ fn default_max_bytes() -> usize {
 /// the node. Compilation refuses anything above this cap and the caller falls
 /// back to the interpreter.
 pub fn max_bytes() -> usize {
-    MAX_BYTES.with(|c| c.get()).unwrap_or_else(default_max_bytes)
+    MAX_BYTES
+        .with(|c| c.get())
+        .unwrap_or_else(default_max_bytes)
 }
 
 /// Override the arena size cap for this thread. Returns the previous override.
@@ -409,7 +411,9 @@ fn scalar(head: &[i64], a: Arg) -> Result<i64> {
 
 fn shift(s: i64, op: &str) -> Result<u32> {
     if !(0..=63).contains(&s) {
-        return Err(Error::runtime(format!("{op}: shift must be 0..63, got {s}")));
+        return Err(Error::runtime(format!(
+            "{op}: shift must be 0..63, got {s}"
+        )));
     }
     Ok(s as u32)
 }
@@ -579,9 +583,7 @@ fn k_imatmul(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
     let (m, k) = (ad[0], ad[1]);
     let (k2, n) = (bd[0], bd[1]);
     if k != k2 {
-        return Err(Error::runtime(format!(
-            "IMATMUL: inner dims {k} vs {k2}"
-        )));
+        return Err(Error::runtime(format!("IMATMUL: inner dims {k} vs {k2}")));
     }
     if out.len() != m * n {
         return Err(Error::runtime(format!(
@@ -595,9 +597,7 @@ fn k_imatmul(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
         for j in 0..n {
             let mut acc: i64 = 0;
             for t in 0..k {
-                acc = acc.wrapping_add(
-                    head[ao + i * k + t].wrapping_mul(head[bo + t * n + j]),
-                );
+                acc = acc.wrapping_add(head[ao + i * k + t].wrapping_mul(head[bo + t * n + j]));
             }
             out[i * n + j] = acc;
         }
@@ -851,7 +851,9 @@ fn k_resize2d(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
     }
     let (ho, wo) = (ho as usize, wo as usize);
     if out.len() != ho * wo * ch {
-        return Err(Error::runtime("RESIZE2D: output size does not match shapes"));
+        return Err(Error::runtime(
+            "RESIZE2D: output size does not match shapes",
+        ));
     }
     let (xo, _) = off_len(a[0])?;
     let xf = &head[xo..];
@@ -949,7 +951,9 @@ fn conv_args<'a>(
     let (w_off, _) = off_len(a[1])?;
     let (bo, _) = off_len(a[2])?;
     if out.len() % cout != 0 {
-        return Err(Error::runtime(format!("{op}: output size does not match Cout")));
+        return Err(Error::runtime(format!(
+            "{op}: output size does not match Cout"
+        )));
     }
     Ok(ConvArgs {
         h,
@@ -993,11 +997,8 @@ fn k_conv2d(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
                             continue;
                         }
                         for ci in 0..g.cin {
-                            acc += f64_of(
-                                g.xf[(iy as usize * g.w + ix as usize) * g.cin + ci],
-                            ) * f64_of(
-                                g.wf[((co * g.kh + ky) * g.kw + kx) * g.cin + ci],
-                            );
+                            acc += f64_of(g.xf[(iy as usize * g.w + ix as usize) * g.cin + ci])
+                                * f64_of(g.wf[((co * g.kh + ky) * g.kw + kx) * g.cin + ci]);
                         }
                     }
                 }
@@ -1014,11 +1015,15 @@ fn k_deconv2d(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
     let ho = (g.h as i64 - 1) * g.stride - 2 * g.pad + g.kh as i64;
     let wo = (g.w as i64 - 1) * g.stride - 2 * g.pad + g.kw as i64;
     if ho <= 0 || wo <= 0 {
-        return Err(Error::runtime(format!("DECONV2D: bad output size {ho}x{wo}")));
+        return Err(Error::runtime(format!(
+            "DECONV2D: bad output size {ho}x{wo}"
+        )));
     }
     let (ho, wo) = (ho as usize, wo as usize);
     if out.len() != ho * wo * g.cout {
-        return Err(Error::runtime("DECONV2D: output size does not match shapes"));
+        return Err(Error::runtime(
+            "DECONV2D: output size does not match shapes",
+        ));
     }
     // Arena memory is reused, not fresh: the interpreter starts from zeros.
     out.fill(0);
@@ -1040,9 +1045,7 @@ fn k_deconv2d(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
                             out[idx] = word_of(
                                 f64_of(out[idx])
                                     + f64_of(g.xf[(iy * g.w + ix) * g.cin + ci])
-                                        * f64_of(
-                                            g.wf[((co * g.kh + ky) * g.kw + kx) * g.cin + ci],
-                                        ),
+                                        * f64_of(g.wf[((co * g.kh + ky) * g.kw + kx) * g.cin + ci]),
                             );
                         }
                     }
@@ -1116,8 +1119,7 @@ fn k_concat(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
         let b_from = bo + o * b_len;
         let dst = o * (na + nb) * inner;
         out[dst..dst + a_len].copy_from_slice(&head[a_from..a_from + a_len]);
-        out[dst + a_len..dst + a_len + b_len]
-            .copy_from_slice(&head[b_from..b_from + b_len]);
+        out[dst + a_len..dst + a_len + b_len].copy_from_slice(&head[b_from..b_from + b_len]);
     }
     Ok(())
 }
@@ -1177,9 +1179,8 @@ fn k_fmatmul(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
                 let aik = f64_of(head[ao + (bi * m + i) * k + kk]);
                 for j in 0..n {
                     let idx = (bi * m + i) * n + j;
-                    out[idx] = word_of(
-                        f64_of(out[idx]) + aik * f64_of(head[bo + (bb * k + kk) * n + j]),
-                    );
+                    out[idx] =
+                        word_of(f64_of(out[idx]) + aik * f64_of(head[bo + (bb * k + kk) * n + j]));
                 }
             }
         }
@@ -1198,7 +1199,9 @@ fn k_layernorm(c: &mut Ctx, a: &[Arg], cfg: &crate::ir::Config) -> Result<()> {
     }
     let d = *xd.last().unwrap();
     if d == 0 || out.len() % d != 0 {
-        return Err(Error::runtime("LAYERNORM: output size does not match the last axis"));
+        return Err(Error::runtime(
+            "LAYERNORM: output size does not match the last axis",
+        ));
     }
     let x = slot(head, a[0])?;
     let w = slot(head, a[1])?;
@@ -1228,9 +1231,7 @@ fn k_layernorm(c: &mut Ctx, a: &[Arg], cfg: &crate::ir::Config) -> Result<()> {
         }
         let rs = 1.0 / (ss / d as f64 + eps).sqrt();
         for j in 0..d {
-            out[r * d + j] = word_of(
-                (f64_of(row[j]) - mu) * rs * f64_of(w[j]) + f64_of(b[j]),
-            );
+            out[r * d + j] = word_of((f64_of(row[j]) - mu) * rs * f64_of(w[j]) + f64_of(b[j]));
         }
     }
     Ok(())
@@ -1247,7 +1248,9 @@ fn k_rmsnorm(c: &mut Ctx, a: &[Arg], cfg: &crate::ir::Config) -> Result<()> {
     }
     let d = *xd.last().unwrap();
     if d == 0 || out.len() % d != 0 {
-        return Err(Error::runtime("RMSNORM: output size does not match the last axis"));
+        return Err(Error::runtime(
+            "RMSNORM: output size does not match the last axis",
+        ));
     }
     let x = slot(head, a[0])?;
     let w = slot(head, a[1])?;
@@ -1292,7 +1295,9 @@ fn k_rotary(c: &mut Ctx, a: &[Arg], cfg: &crate::ir::Config) -> Result<()> {
         )));
     }
     if d == 0 || out.len() % d != 0 {
-        return Err(Error::runtime("ROTARY: output size does not match the head dim"));
+        return Err(Error::runtime(
+            "ROTARY: output size does not match the head dim",
+        ));
     }
     let x = slot(head, a[0])?;
     let pos = slot(head, a[1])?;
@@ -1355,8 +1360,7 @@ fn k_conv(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
             for ky in 0..kh {
                 let iy = (oy as i64 + ky as i64 - rh as i64).clamp(0, h as i64 - 1) as usize;
                 for kx in 0..kw {
-                    let ix =
-                        (ox as i64 + kx as i64 - rw as i64).clamp(0, w as i64 - 1) as usize;
+                    let ix = (ox as i64 + kx as i64 - rw as i64).clamp(0, w as i64 - 1) as usize;
                     acc += f64_of(x[iy * w + ix]) * f64_of(k[ky * kw + kx]);
                 }
             }
@@ -1692,7 +1696,9 @@ fn k_varint(c: &mut Ctx, a: &[Arg], _: &crate::ir::Config) -> Result<()> {
             c as usize
         }
         Arg::ConstF(_) => {
-            return Err(Error::runtime("stream arena: IVARINT start is not an integer"))
+            return Err(Error::runtime(
+                "stream arena: IVARINT start is not an integer",
+            ))
         }
         Arg::Slot { off, .. } => head[off] as usize,
     };
@@ -1735,7 +1741,10 @@ impl PlanCache {
             .inputs
             .iter()
             .map(|d| {
-                let shape = feeds.get(&d.name).and_then(|v| v.shape()).unwrap_or_default();
+                let shape = feeds
+                    .get(&d.name)
+                    .and_then(|v| v.shape())
+                    .unwrap_or_default();
                 (d.name.clone(), shape)
             })
             .collect()
@@ -1805,15 +1814,14 @@ fn operand(slots: &HashMap<String, Slot>, name: &str) -> Result<Arg> {
         if let Ok(v) = name.trim().parse::<i64>() {
             Ok(Arg::Const(v))
         } else {
-            let x = name.trim().parse::<f64>().map_err(|e| {
-                Error::asm(format!("stream arena: bad literal {name:?}: {e}"))
-            })?;
+            let x = name
+                .trim()
+                .parse::<f64>()
+                .map_err(|e| Error::asm(format!("stream arena: bad literal {name:?}: {e}")))?;
             Ok(Arg::ConstF(x))
         }
     } else {
-        Err(Error::asm(format!(
-            "stream arena: use-before-def {name:?}"
-        )))
+        Err(Error::asm(format!("stream arena: use-before-def {name:?}")))
     }
 }
 
@@ -1850,9 +1858,9 @@ impl Plan {
         let mut shape_data: Vec<usize> = Vec::new();
 
         let take = |name: &str, words: &mut usize, shape_data: &mut Vec<usize>| -> Result<Slot> {
-            let s = streams.get(name).ok_or_else(|| {
-                Error::asm(format!("stream arena: no shape for {name:?}"))
-            })?;
+            let s = streams
+                .get(name)
+                .ok_or_else(|| Error::asm(format!("stream arena: no shape for {name:?}")))?;
             let is_f = match s.kind {
                 CKind::I => false,
                 CKind::F => true,
@@ -1868,9 +1876,9 @@ impl Plan {
                     Error::asm(format!("stream arena: {name:?} has a dynamic shape"))
                 })?);
             }
-            let len = s.elems().ok_or_else(|| {
-                Error::asm(format!("stream arena: {name:?} has a dynamic shape"))
-            })?;
+            let len = s
+                .elems()
+                .ok_or_else(|| Error::asm(format!("stream arena: {name:?} has a dynamic shape")))?;
             let dim_start = shape_data.len();
             shape_data.extend_from_slice(&dims);
             let off = *words;
@@ -1918,9 +1926,9 @@ impl Plan {
                     ins.mn
                 )));
             }
-            let def = registry.get(&ins.mn).ok_or_else(|| {
-                Error::asm(format!("stream arena: unknown mnemonic {}", ins.mn))
-            })?;
+            let def = registry
+                .get(&ins.mn)
+                .ok_or_else(|| Error::asm(format!("stream arena: unknown mnemonic {}", ins.mn)))?;
             if ins.args.len() != def.arity_in || ins.outs.len() != def.arity_out {
                 return Err(Error::asm(format!(
                     "stream arena: {} arity mismatch (listing {} in / {} out, registry {} / {})",
@@ -2030,12 +2038,7 @@ impl Plan {
     /// Materialize every resulting stream as a `Value`, which is the shape the
     /// interpreter returns. Only the inputs and the final outputs allocate;
     /// every intermediate lives in the arena.
-    pub fn run_feeds(
-        &self,
-        arena: &mut StreamArena,
-        feeds: &Feeds,
-        out: &mut Feeds,
-    ) -> Result<()> {
+    pub fn run_feeds(&self, arena: &mut StreamArena, feeds: &Feeds, out: &mut Feeds) -> Result<()> {
         self.execute(arena, feeds)?;
         out.clear();
         let words = arena.words();
@@ -2061,9 +2064,9 @@ impl Plan {
         }
         for (name, slot) in &self.inputs {
             let (off, len) = (slot.off, slot.len);
-            let v = feeds.get(name).ok_or_else(|| {
-                Error::runtime(format!("stream arena: missing input {name:?}"))
-            })?;
+            let v = feeds
+                .get(name)
+                .ok_or_else(|| Error::runtime(format!("stream arena: missing input {name:?}")))?;
             let words = arena.words_mut();
             let dst = &mut words[off..off + len];
             match (v, slot.is_f) {
@@ -2202,7 +2205,10 @@ mod tests {
             let mut arena = StreamArena::new();
             arena.reserve_words(plan.words());
             let mut out = Vec::new();
-            assert!(plan.run(&mut arena, &f, &mut out).is_err(), "{text} should fail");
+            assert!(
+                plan.run(&mut arena, &f, &mut out).is_err(),
+                "{text} should fail"
+            );
             assert!(
                 crate::runtime::run_with_options(
                     &bound,
@@ -2238,10 +2244,7 @@ mod tests {
     #[test]
     fn byte_and_index_ops_match_interpreter() {
         let x: Vec<i64> = (0..8).collect();
-        parity_with(
-            "IN X\nOUT = IGET(X, 3)\n",
-            &feeds_n(&[("X", &x, &[8])]),
-        );
+        parity_with("IN X\nOUT = IGET(X, 3)\n", &feeds_n(&[("X", &x, &[8])]));
         parity_with(
             "IN X\nOUT = IWINDOW(X, 2, 4)\n",
             &feeds_n(&[("X", &x, &[8])]),
@@ -2451,7 +2454,11 @@ mod tests {
         // Stride 2 with padding: the accumulate-and-zero path.
         let f = feeds_f(&[
             ("X", &[1.0, -2.0, 0.5, 3.0], &[2, 2, 1]),
-            ("W", &[0.5, 1.0, -1.0, 2.0, 0.25, 0.75, 1.5, -0.5, 1.0], &[1, 3, 3, 1]),
+            (
+                "W",
+                &[0.5, 1.0, -1.0, 2.0, 0.25, 0.75, 1.5, -0.5, 1.0],
+                &[1, 3, 3, 1],
+            ),
             ("B", &[-0.5], &[1]),
         ]);
         parity_with("IN X\nIN W\nIN B\nOUT = DECONV2D(X, W, B, 2, 1)\n", &f);
@@ -2459,7 +2466,15 @@ mod tests {
 
     #[test]
     fn float_paths_match_interpreter() {
-        let vals = [-2.5f64, -0.0, 0.0, 1.5, 3.25, f64::INFINITY, f64::NEG_INFINITY];
+        let vals = [
+            -2.5f64,
+            -0.0,
+            0.0,
+            1.5,
+            3.25,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
         let f = f_feeds(&vals);
         assert_eq!(
             arena_bytes("IN X\nOUT = RELU(X)\n", &f, "OUT"),
@@ -2497,14 +2512,12 @@ mod tests {
         arena.reserve_words(plan.words());
         let mut out = Vec::new();
         assert!(plan.run(&mut arena, &f, &mut out).is_err());
-        assert!(
-            crate::runtime::run_with_options(
-                &bound,
-                &f,
-                &crate::runtime::ExecOptions::default()
-            )
-            .is_err()
-        );
+        assert!(crate::runtime::run_with_options(
+            &bound,
+            &f,
+            &crate::runtime::ExecOptions::default()
+        )
+        .is_err());
     }
 
     fn mat_feeds(a: &[i64], ash: &[usize], b: &[i64], bsh: &[usize]) -> Feeds {
@@ -2531,16 +2544,13 @@ mod tests {
     #[test]
     fn matmul_matches_interpreter() {
         // 2x2 * 2x2
-        let got = mat_parity(
-            &[1, 2, 3, 4],
-            &[2, 2],
-            &[5, 6, 7, 8],
-            &[2, 2],
-        );
+        let got = mat_parity(&[1, 2, 3, 4], &[2, 2], &[5, 6, 7, 8], &[2, 2]);
         let want: Vec<i64> = vec![19, 22, 43, 50];
         assert_eq!(
             got,
-            want.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()
+            want.iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
         );
 
         // 2x3 * 3x2 — the output shape differs from both operands.
@@ -2553,17 +2563,14 @@ mod tests {
         let want: Vec<i64> = vec![58, 64, 139, 154];
         assert_eq!(
             got,
-            want.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()
+            want.iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
         );
 
         // Wrapping at every multiply and add, like the scalar graph it replaces.
         let big = i64::MAX / 2 + 1;
-        mat_parity(
-            &[big, -big, big, 1],
-            &[2, 2],
-            &[big, 1, -big, 2],
-            &[2, 2],
-        );
+        mat_parity(&[big, -big, big, 1], &[2, 2], &[big, 1, -big, 2], &[2, 2]);
     }
 
     #[test]
@@ -2783,19 +2790,12 @@ mod tests {
         let x = [-1.5, 0.25, 2.0, -0.75, 3.5, -2.0, 0.0, 1.25];
         let w = [1.0, 0.5, -1.0, 2.0];
         let b = [0.25, -0.25, 0.0, 1.0];
-        let f = feeds_f(&[
-            ("X", &x, &[2, 4]),
-            ("W", &w, &[4]),
-            ("B", &b, &[4]),
-        ]);
+        let f = feeds_f(&[("X", &x, &[2, 4]), ("W", &w, &[4]), ("B", &b, &[4])]);
         parity_with(
             "CONFIG eps_ln 1e-6\nIN X\nIN W\nIN B\nOUT = LAYERNORM(X, W, B)\n",
             &f,
         );
-        parity_with(
-            "CONFIG eps_rms 1e-6\nIN X\nIN W\nOUT = RMSNORM(X, W)\n",
-            &f,
-        );
+        parity_with("CONFIG eps_rms 1e-6\nIN X\nIN W\nOUT = RMSNORM(X, W)\n", &f);
         // Rank > 2: the norm is over the last axis only.
         let x3: Vec<f64> = (0..16).map(|i| (i as f64 - 8.0) * 0.25).collect();
         parity_with(
@@ -2820,7 +2820,12 @@ mod tests {
 
     #[test]
     fn float_matmul_matches_interpreter() {
-        let f = f_mat(&[1.0, 2.0, 3.0, 4.0], &[2, 2], &[5.0, 6.0, 7.0, 8.0], &[2, 2]);
+        let f = f_mat(
+            &[1.0, 2.0, 3.0, 4.0],
+            &[2, 2],
+            &[5.0, 6.0, 7.0, 8.0],
+            &[2, 2],
+        );
         parity_with("IN A\nIN B\nOUT = MATMUL(A, B)\n", &f);
 
         // 3-D batched.
@@ -2965,12 +2970,8 @@ mod tests {
     fn fails_both(text: &str, f: &Feeds) {
         let bound = assemble(text, &AsmOptions::default()).unwrap();
         assert!(
-            crate::runtime::run_with_options(
-                &bound,
-                f,
-                &crate::runtime::ExecOptions::default()
-            )
-            .is_err(),
+            crate::runtime::run_with_options(&bound, f, &crate::runtime::ExecOptions::default())
+                .is_err(),
             "interpreter should reject {text:?}"
         );
         if let Ok(plan) = Plan::compile(&bound, f, &["OUT".to_string()]) {
@@ -3051,13 +3052,59 @@ mod tests {
     fn every_kernel_names_a_registered_mnemonic() {
         let reg = crate::ops::registry();
         for mn in [
-            "IADD", "ISUB", "IMUL", "IDIV", "IMOD", "IDIVU", "IMODU", "IAND", "IOR", "IXOR",
-            "IEQ", "ILT", "IMAX", "SADD", "ISAR", "ISHL", "ISHR", "IMAD", "ISELECT",
-            "IREDUCE_SUM", "ISUM", "IVARINT", "IMATMUL", "IGET", "IWINDOW", "IFIND",
-            "IGATHER1", "ISCATTER1", "IASSEMBLE", "ICRC32", "ICRC32C", "SLICE", "RELU", "F2I", "I2F", "CONCAT", "RESIZE2D", "CONV2D", "DECONV2D",
-            "RESHAPE2", "RESHAPE3", "LAYERNORM", "RMSNORM", "ROTARY", "MATMUL",
-            "BATCH_MATMUL", "CONV", "INTERP", "GATHER", "GATHER3", "SCATTER",
-            "ARGMAX", "TOPK",
+            "IADD",
+            "ISUB",
+            "IMUL",
+            "IDIV",
+            "IMOD",
+            "IDIVU",
+            "IMODU",
+            "IAND",
+            "IOR",
+            "IXOR",
+            "IEQ",
+            "ILT",
+            "IMAX",
+            "SADD",
+            "ISAR",
+            "ISHL",
+            "ISHR",
+            "IMAD",
+            "ISELECT",
+            "IREDUCE_SUM",
+            "ISUM",
+            "IVARINT",
+            "IMATMUL",
+            "IGET",
+            "IWINDOW",
+            "IFIND",
+            "IGATHER1",
+            "ISCATTER1",
+            "IASSEMBLE",
+            "ICRC32",
+            "ICRC32C",
+            "SLICE",
+            "RELU",
+            "F2I",
+            "I2F",
+            "CONCAT",
+            "RESIZE2D",
+            "CONV2D",
+            "DECONV2D",
+            "RESHAPE2",
+            "RESHAPE3",
+            "LAYERNORM",
+            "RMSNORM",
+            "ROTARY",
+            "MATMUL",
+            "BATCH_MATMUL",
+            "CONV",
+            "INTERP",
+            "GATHER",
+            "GATHER3",
+            "SCATTER",
+            "ARGMAX",
+            "TOPK",
         ] {
             assert!(reg.get(mn).is_some(), "{mn} is not in the registry");
             assert!(kernel_for(mn).is_some(), "{mn} has no kernel");

@@ -1076,11 +1076,11 @@ pub fn op_interp(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
                 let wx = fsx - x0 as f64;
                 let x1 = (x0 + 1).min(w - 1);
                 for cc in 0..c {
-                    out[(oy * wo + ox) * c + cc] = (1.0 - wy) * (1.0 - wx)
-                        * xf[(y0 * w + x0) * c + cc]
-                        + (1.0 - wy) * wx * xf[(y0 * w + x1) * c + cc]
-                        + wy * (1.0 - wx) * xf[(y1 * w + x0) * c + cc]
-                        + wy * wx * xf[(y1 * w + x1) * c + cc];
+                    out[(oy * wo + ox) * c + cc] =
+                        (1.0 - wy) * (1.0 - wx) * xf[(y0 * w + x0) * c + cc]
+                            + (1.0 - wy) * wx * xf[(y0 * w + x1) * c + cc]
+                            + wy * (1.0 - wx) * xf[(y1 * w + x0) * c + cc]
+                            + wy * wx * xf[(y1 * w + x1) * c + cc];
                 }
             }
         }

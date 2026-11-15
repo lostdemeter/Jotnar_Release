@@ -235,12 +235,9 @@ fn conv_matches_interpreter() {
     let ks = [0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0];
     let f = feeds(&[("X", fvalue(&[3, 4], &xs)), ("K", fvalue(&[3, 3], &ks))]);
     let bound = jotnar::asm::assemble(listing, &AsmOptions::new(".")).unwrap();
-    let interp = jotnar::runtime::run_with_options(
-        &bound,
-        &f,
-        &jotnar::runtime::ExecOptions::default(),
-    )
-    .expect("run interpreter conv");
+    let interp =
+        jotnar::runtime::run_with_options(&bound, &f, &jotnar::runtime::ExecOptions::default())
+            .expect("run interpreter conv");
     let ivals = match &interp["OUT"] {
         Value::F64(a) => a.as_slice().expect("contiguous").to_vec(),
         other => panic!("expected F64, got {:?}", other.kind()),
