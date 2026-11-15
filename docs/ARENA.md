@@ -1,7 +1,7 @@
 # Stream arena
 
 Status: **opt-in, default off, 53 kernels.**
-Base: `d98dfe2`. 312/312 tests with `JOTNAR_ARENA` off and on.
+Base: `d98dfe2`. 320/320 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
@@ -90,8 +90,7 @@ arithmetic (including `MATMUL`'s `ikj` accumulation order and the C norms'
 reciprocal-sqrt form). `TOPK` was moved from `sort_by` to the C emitter's
 single-pass insertion so ties, NaN ordering, and allocation are identical on
 both paths. `SCATTER` remains F-only in `infer_shapes`; the task note's "F/I"
-was wrong. `GATHER` now supports F and I in the interpreter and arena; the C
-emitter still refuses I, which is a separate backend gap.
+was wrong. `GATHER` now supports F and I in the interpreter, arena, and C emitter.
 
 ### Backend support for the last fourteen
 
@@ -107,7 +106,7 @@ the kind with a typed error rather than guessing.
 | `MATMUL`, `BATCH_MATMUL` | T/F | F | F | F |
 | `CONV` | T/F | F | F | F |
 | `INTERP` | T/F | F | — | F |
-| `GATHER` | T/F/I | T/F | — | F/I |
+| `GATHER` | T/F/I | T/F/I | — | F/I |
 | `GATHER3` | T/F | T/F | — | F |
 | `SCATTER` | F | F | — | F |
 | `ARGMAX` | T/F/I | T/F | — | F/I |
@@ -118,11 +117,12 @@ columns are pre-existing contracts and remain the cross-target check. `GATHER`
 I is the one intentional asymmetry: the interpreter and arena accept it, the C
 emitter does not yet.
 
-### Blocked on missing `infer_shapes` rules (not arena work)
+### Rules added, arena kernels not yet
 
-`LUMA`, `PERMUTE3`, `DECONV`, `POOLAVG`, `GAIN`, `STATIC` have no inference
-rule at all, so they can never be planned. Adding those rules unblocks them for
-the C and Rust backends too — worth doing independently.
+`LUMA`, `PERMUTE3`, `DECONV`, `POOLAVG`, `GAIN`, `STATIC` now have
+`infer_shapes` rules. They are still not arena kernels: `PERMUTE3`, `DECONV`,
+and `POOLAVG` are T-only, `STATIC` returns Bool, and `GAIN` returns F32. `LUMA`
+is the only F-to-F candidate left.
 
 ### Excluded by design
 
@@ -193,15 +193,11 @@ bit-exactness. Not worth it.
 
 ## Known defects found along the way
 
-1. **`LUMA` has no inference rule** — blocks the op for every backend.
-2. **Scalar broadcast mismatch** — `infer_shapes` rejects `IADD(X, scalar)`
-   while `op_iadd` supports it.
-3. **T2 tables per thread** — 213 KB each; a process-wide `Arc` is better once
-   many workers exist.
-4. **One-shot plan compilation** — `jotnar-det`/`jotnar-bench` recompile per
-   call; move the cache into `BoundProgram` or those callers.
-5. **`GATHER` I support is interpreter+arena only** — the C emitter still
-   refuses an I table (`GATHER table must be T/F (v0.2)`).
+1. **Arena default stays off** — pending a hit-rate report from the runtime app.
+2. **Six rule-enabled ops have no arena kernel** — see "Rules added, arena
+   kernels not yet"; only `LUMA` is F-to-F.
+3. **`jotnar-bench` still compiles its one-shot reference plan** — `jotnar-det`
+   now uses `WarmRunner`, but the bench reference path does not.
 
 `IASSEMBLE`'s debug `u128` underflow is fixed: the interpreter truncates the
 low 64 bits (`v as i64`) instead of computing `v - 2^64` in `u128`. The
@@ -211,9 +207,9 @@ eight-byte sign-bit case has an interpreter test.
 
 | Metric | Value |
 |---|---|
-| Tests | 312 (off and on) |
+| Tests | 320 (off and on) |
 | Kernels | 53 |
-| Arena unit tests / migration tests | 35 / 6 |
+| Arena unit tests / migration tests | 36 / 6 |
 | Soak fixtures | 12 |
 | Warm node job | 837 → 140 allocations |
 | EXEC reply | 254 → 139 |
