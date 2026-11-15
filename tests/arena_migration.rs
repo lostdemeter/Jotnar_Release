@@ -111,6 +111,58 @@ fn arena_and_interpreter_agree() {
                 f
             },
         ),
+        (
+            "IN X\nOUT = RESHAPE2(X, 4, 2)\n",
+            feeds(&[("X", (0..8).collect(), vec![2, 4])]),
+        ),
+        (
+            "CONFIG eps_ln 1e-6\nIN X\nIN W\nIN B\nOUT = LAYERNORM(X, W, B)\n",
+            {
+                let mut f = Feeds::new();
+                f.insert(
+                    "X".to_string(),
+                    Value::F64(
+                        jotnar::value::array_from_vec(
+                            &[2, 4],
+                            vec![-1.5, 0.25, 2.0, -0.75, 3.5, -2.0, 0.0, 1.25],
+                        )
+                        .unwrap(),
+                    ),
+                );
+                f.insert(
+                    "W".to_string(),
+                    Value::F64(
+                        jotnar::value::array_from_vec(&[4], vec![1.0, 0.5, -1.0, 2.0])
+                            .unwrap(),
+                    ),
+                );
+                f.insert(
+                    "B".to_string(),
+                    Value::F64(
+                        jotnar::value::array_from_vec(&[4], vec![0.25, -0.25, 0.0, 1.0])
+                            .unwrap(),
+                    ),
+                );
+                f
+            },
+        ),
+        (
+            "IN X\nV, I = TOPK(X, 3)\n",
+            {
+                let mut f = Feeds::new();
+                f.insert(
+                    "X".to_string(),
+                    Value::F64(
+                        jotnar::value::array_from_vec(
+                            &[2, 5],
+                            vec![1.0, 3.0, 3.0, 2.0, 3.0, -1.0, 5.0, 0.0, 5.0, 4.0],
+                        )
+                        .unwrap(),
+                    ),
+                );
+                f
+            },
+        ),
     ];
     for (text, f) in cases {
         let (hits, fallbacks) = compare(text, &f);

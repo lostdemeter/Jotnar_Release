@@ -1,7 +1,7 @@
 # Stream arena — handoff
 
-Status: **opt-in, working, uncommitted branch `feat/stream-arena`.**
-Base: `d98dfe2`. 301/301 tests with `JOTNAR_ARENA` off and on.
+Status: **opt-in, working, on branch `feat/stream-arena`.**
+Base: `d98dfe2`. 310/310 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
@@ -17,7 +17,7 @@ Three runtime-internal layers, no change to the listing language:
 3. **Stream arena** (`src/stream_arena.rs`, `src/runtime.rs`, `src/protocol.rs`)
    `Plan` compiled once from `infer_shapes`, one `Vec<i64>` of 64-bit words that
    holds I streams (`i64`) and F streams (`f64` bits), offsets instead of
-   pointers, one-store reset, 39 kernels.
+   pointers, one-store reset, 53 kernels.
 
 T streams are **not** arena-backed; see "Why T2 is excluded".
 
@@ -46,33 +46,40 @@ interpreter. A **runtime** failure is returned, never silently re-run.
 
 ## Coverage
 
-39 kernels. Registry is 92 entries.
+53 kernels. Registry is 92 entries.
 
 | Group | Total | Ported |
 |---|---:|---:|
 | I-first | 34 | 32 |
 | F-first | 6 | 1 |
-| Generic `$A` | 27 | 3 |
-| Unconstrained `*` | 14 | 3 |
+| Generic `$A` | 27 | 6 |
+| Unconstrained `*` | 14 | 11 |
 | T | 6 | 0 (excluded) |
-| `$X` | 4 | 0 |
+| `$X` | 4 | 3 |
 | U8 | 1 | 0 (excluded) |
 
 Ported: 4 elementwise-shift/3-op groups (19), reductions (2), encoder (1),
 matmul (1), index/window/find/gather/scatter/pack/CRC (8), F: RELU, F2I, I2F,
-CONCAT, SLICE, RESIZE2D, CONV2D, DECONV2D.
+CONCAT, SLICE, RESIZE2D, CONV2D, DECONV2D, then the last 14:
+`RESHAPE2`/`RESHAPE3`, `LAYERNORM`/`RMSNORM`/`ROTARY`, `MATMUL`/`BATCH_MATMUL`,
+`CONV`/`INTERP`, `GATHER`/`GATHER3`/`SCATTER`, `ARGMAX`, `TOPK`.
 
-### Remaining, plannable now (14)
+### The reference gap that had to be fixed first
 
-Ordered by risk:
+`infer_shapes` and the C/Rust emitters accepted F for ten of those fourteen,
+but the interpreter's implementations still called `arg_triple` and refused F:
+`RESHAPE2`, `RESHAPE3`, `LAYERNORM`, `RMSNORM`, `ROTARY`, `MATMUL`,
+`BATCH_MATMUL`, `CONV`, `INTERP`, `GATHER`. Porting only the arena would have
+made those listings succeed with `JOTNAR_ARENA=1` and fail with it off — the
+fallback and soak invariant is exactly that this cannot happen.
 
-1. `RESHAPE2`, `RESHAPE3` — pure bit-copy; output dims from literals.
-2. `LAYERNORM`, `RMSNORM`, `ROTARY` — F row-wise; `Config` carries eps.
-3. `MATMUL`, `BATCH_MATMUL` — F analogue of `IMATMUL`; accumulation order matters.
-4. `CONV`, `INTERP` — F, coordinate-transformed (same pattern as `RESIZE2D`).
-5. `GATHER` (I), `GATHER3`, `SCATTER` — index ops; `GATHER3` is F/T.
-6. `ARGMAX` — F/I; returns I indices (mixed kinds).
-7. `TOPK` — F; **the riskiest**: tie-breaking and sort order must match exactly.
+The interpreter now has F paths for all ten, mirroring the existing C emitter
+arithmetic (including `MATMUL`'s `ikj` accumulation order and the C norms'
+reciprocal-sqrt form). `TOPK` was moved from `sort_by` to the C emitter's
+single-pass insertion so ties, NaN ordering, and allocation are identical on
+both paths. `SCATTER` remains F-only in `infer_shapes`; the task note's "F/I"
+was wrong. `GATHER` now supports F and I in the interpreter and arena; the C
+emitter still refuses I, which is a separate backend gap.
 
 ### Blocked on missing `infer_shapes` rules (not arena work)
 
@@ -104,6 +111,18 @@ bit-exactness. Not worth it.
   `f64::from_bits`/`to_bits`. No `unsafe`, no second buffer.
 - **Fallback only on plan failure.** A runtime error is surfaced, so the arena
   cannot hide a divergence.
+- **The arena never widens the language.** If a kind has no interpreter path,
+  add the interpreter path first; otherwise the same listing succeeds or fails
+  depending on `JOTNAR_ARENA`. Ten ops needed that fix before they could be
+  planned honestly.
+- **Plan carries the program `Config`.** Eps and `rope_base` come from the
+  listing, not from a fresh `Config::new()`, so norms/ROTARY match the
+  interpreter exactly.
+- **Float literals are a distinct operand.** `Arg::ConstF` keeps `INTERP`'s
+  `0.5` scales representable without weakening integer literals.
+- **`TOPK` uses insertion, not a sort.** The C emitter's single-pass loop gives
+  ties-first order, a defined NaN position, and no allocation; `sort_by` with a
+  non-total comparator gives none of those guarantees.
 - **Cap, not truncation.** Oversized working sets go back to the interpreter
   whole. Per-listing all-or-nothing.
 - **Plan cache lives in `Node`** (keyed by handle and input shapes, failures
@@ -130,28 +149,34 @@ bit-exactness. Not worth it.
    reductions/encoders 0.
 7. **Destination above operands** is what lets one buffer split into `&mut dst`
    plus immutable operands with no `unsafe`.
+8. **Parity is not possible across a missing reference.** `infer_shapes` and
+   the C emitter promised F for ten ops while the interpreter refused it.
+   Writing arena kernels first would have made the same listing succeed only
+   when the arena was on. Fix the reference (or shrink the plan) first.
 
 ## Known defects found along the way
 
-1. **`IASSEMBLE` debug panic** — `v - 2^64` in `u128` for an 8-byte window with
-   the sign bit set (`src/ops/bytes.rs:129`). Debug panics; release is correct.
-   Fix: `v as i64`.
-2. **`LUMA` has no inference rule** — blocks the op for every backend.
-3. **Scalar broadcast mismatch** — `infer_shapes` rejects `IADD(X, scalar)`
+1. **`LUMA` has no inference rule** — blocks the op for every backend.
+2. **Scalar broadcast mismatch** — `infer_shapes` rejects `IADD(X, scalar)`
    while `op_iadd` supports it.
-4. **T2 tables per thread** — 213 KB each; a process-wide `Arc` is better once
+3. **T2 tables per thread** — 213 KB each; a process-wide `Arc` is better once
    many workers exist.
-5. **One-shot plan compilation** — `jotnar-det`/`jotnar-bench` recompile per
+4. **One-shot plan compilation** — `jotnar-det`/`jotnar-bench` recompile per
    call; move the cache into `BoundProgram` or those callers.
+5. **`GATHER` I support is interpreter+arena only** — the C emitter still
+   refuses an I table (`GATHER table must be T/F (v0.2)`).
+
+`IASSEMBLE`'s debug panic is fixed: the interpreter now truncates the low 64
+bits (`v as i64`) instead of computing `v - 2^64` in `u128`.
 
 ## Numbers
 
 | Metric | Value |
 |---|---|
-| Tests | 301 (off and on) |
-| Kernels | 39 |
-| Arena unit tests / migration tests | 26 / 5 |
-| Soak fixtures | 7 |
+| Tests | 310 (off and on) |
+| Kernels | 53 |
+| Arena unit tests / migration tests | 35 / 5 |
+| Soak fixtures | 12 |
 | Warm node job | 837 → 140 allocations |
 | EXEC reply | 254 → 139 |
 | Arena steady state | 0 allocations |

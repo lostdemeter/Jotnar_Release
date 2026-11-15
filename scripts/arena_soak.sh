@@ -15,7 +15,8 @@ refs() {
 }
 
 fail=0
-for base in arena_soak arena_matmul arena_f arena_img arena_conv arena_fallback alloc_gate; do
+for base in arena_soak arena_matmul arena_f arena_img arena_conv arena_fallback alloc_gate \
+    arena_reshape arena_norm arena_fmatmul arena_conv_f arena_index; do
     off=$(refs 0 "$base")
     on=$(refs 1 "$base")
     if [ "$off" = "$on" ] && [ -n "$on" ]; then

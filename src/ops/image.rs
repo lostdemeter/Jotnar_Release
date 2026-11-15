@@ -464,11 +464,53 @@ pub fn op_resize2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::F64(from_flat(&[ho, wo, c], out)?)])
 }
 
+fn conv_f64(x: &ArrayD<f64>, k: &ArrayD<f64>, op: &str) -> Result<ArrayD<f64>> {
+    let xs = x.shape();
+    let ks = k.shape();
+    if xs.len() != 2 || ks.len() != 2 {
+        return Err(Error::runtime(format!(
+            "{op}: expected HW image and kH x kW kernel, got {xs:?} / {ks:?}"
+        )));
+    }
+    let (h, w) = (xs[0], xs[1]);
+    let (kh, kw) = (ks[0], ks[1]);
+    if kh == 0 || kw == 0 {
+        return Err(Error::runtime(format!("{op}: empty kernel")));
+    }
+    let (rh, rw) = (kh / 2, kw / 2);
+    let xf = flat(x);
+    let kf = flat(k);
+    let mut out = vec![0f64; h * w];
+    for oy in 0..h {
+        for ox in 0..w {
+            let mut acc = 0f64;
+            for ky in 0..kh {
+                let iy = (oy as i64 + ky as i64 - rh as i64).clamp(0, h as i64 - 1) as usize;
+                for kx in 0..kw {
+                    let ix = (ox as i64 + kx as i64 - rw as i64).clamp(0, w as i64 - 1) as usize;
+                    acc += xf[iy * w + ix] * kf[ky * kw + kx];
+                }
+            }
+            out[oy * w + ox] = acc;
+        }
+    }
+    from_flat(&[h, w], out)
+}
+
 pub fn op_conv(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let t = arg_triple(args, 0, "CONV")?;
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("CONV: missing input"))?
+        .stream("CONV", "x")?;
+    if matches!(v, Value::Triple(_)) {
+        let t = arg_triple(args, 0, "CONV")?;
+        let k = arg_f64_array(args, 1, "CONV")?;
+        let (m_acc, m_cov) = scales(config);
+        return Ok(vec![Value::Triple(conv_trip(t, &k, m_acc, m_cov)?)]);
+    }
+    let x = arg_f64_array(args, 0, "CONV")?;
     let k = arg_f64_array(args, 1, "CONV")?;
-    let (m_acc, m_cov) = scales(config);
-    Ok(vec![Value::Triple(conv_trip(t, &k, m_acc, m_cov)?)])
+    Ok(vec![Value::F64(conv_f64(&x, &k, "CONV")?)])
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1038,59 @@ fn interp_coord(n_out: usize, s: f64) -> Vec<i64> {
 }
 
 pub fn op_interp(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("INTERP: missing input"))?
+        .stream("INTERP", "x")?;
+    if !matches!(v, Value::Triple(_)) {
+        let x = arg_f64_array(args, 0, "INTERP")?;
+        let sy = arg_f64(args, 1, "INTERP", "sy")?;
+        let sx = arg_f64(args, 2, "INTERP", "sx")?;
+        if !(is_dyadic(sy) && is_dyadic(sx)) {
+            return Err(Error::runtime(format!(
+                "INTERP: non-dyadic scale ({sy},{sx}) is a LOWERING ERROR"
+            )));
+        }
+        let sh = x.shape().to_vec();
+        if sh.len() != 2 && sh.len() != 3 {
+            return Err(Error::runtime(format!(
+                "INTERP: needs F x(H,W[,C]), got {sh:?}"
+            )));
+        }
+        let (h, w) = (sh[0], sh[1]);
+        let c = if sh.len() == 3 { sh[2] } else { 1 };
+        let ho = ((h as f64 * sy).round().max(1.0)) as usize;
+        let wo = ((w as f64 * sx).round().max(1.0)) as usize;
+        let hdiv = h as f64 / ho as f64;
+        let wdiv = w as f64 / wo as f64;
+        let xf = flat(&x);
+        let mut out = vec![0f64; ho * wo * c];
+        for oy in 0..ho {
+            let fsy = ((oy as f64 + 0.5) * hdiv - 0.5).clamp(0.0, h as f64 - 1.0);
+            let y0 = fsy.floor() as usize;
+            let wy = fsy - y0 as f64;
+            let y1 = (y0 + 1).min(h - 1);
+            for ox in 0..wo {
+                let fsx = ((ox as f64 + 0.5) * wdiv - 0.5).clamp(0.0, w as f64 - 1.0);
+                let x0 = fsx.floor() as usize;
+                let wx = fsx - x0 as f64;
+                let x1 = (x0 + 1).min(w - 1);
+                for cc in 0..c {
+                    out[(oy * wo + ox) * c + cc] = (1.0 - wy) * (1.0 - wx)
+                        * xf[(y0 * w + x0) * c + cc]
+                        + (1.0 - wy) * wx * xf[(y0 * w + x1) * c + cc]
+                        + wy * (1.0 - wx) * xf[(y1 * w + x0) * c + cc]
+                        + wy * wx * xf[(y1 * w + x1) * c + cc];
+                }
+            }
+        }
+        let oshape = if sh.len() == 2 {
+            vec![ho, wo]
+        } else {
+            vec![ho, wo, c]
+        };
+        return Ok(vec![Value::F64(from_flat(&oshape, out)?)]);
+    }
     let t = arg_triple(args, 0, "INTERP")?;
     let sy = arg_f64(args, 1, "INTERP", "sy")?;
     let sx = arg_f64(args, 2, "INTERP", "sx")?;

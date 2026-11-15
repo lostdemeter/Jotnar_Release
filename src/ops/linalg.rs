@@ -177,18 +177,76 @@ pub fn op_t2i(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::I64(out)])
 }
 
+/// F matmul: the `ikj` accumulation order the C emitter uses, with the same
+/// leading-dimension broadcast rule as the triple path.
+fn matmul_f64(a: &ArrayD<f64>, b: &ArrayD<f64>, op: &str) -> Result<ArrayD<f64>> {
+    let ash = a.shape();
+    let bsh = b.shape();
+    if ash.len() < 2 || bsh.len() < 2 {
+        return Err(Error::runtime(format!(
+            "{op}: need rank >= 2, got {ash:?} x {bsh:?}"
+        )));
+    }
+    let rank = ash.len();
+    let n = ash[rank - 2];
+    let k = ash[rank - 1];
+    if bsh[bsh.len() - 2] != k {
+        return Err(Error::runtime(format!(
+            "{op}: inner dims {ash:?} vs {bsh:?} (did you forget TRANSPOSE?)"
+        )));
+    }
+    let m = *bsh.last().unwrap();
+    let lead = &ash[..rank - 2];
+    let nb: usize = lead.iter().product();
+    let nb_b: usize = bsh[..bsh.len() - 2].iter().product();
+    if nb_b != 1 && nb_b != nb {
+        return Err(Error::runtime(format!(
+            "{op}: batch dims {lead:?} vs {:?}",
+            &bsh[..bsh.len() - 2]
+        )));
+    }
+    let af = flat(a);
+    let bf = flat(b);
+    let mut out = vec![0f64; nb * n * m];
+    for bi in 0..nb {
+        let bb = if nb_b == 1 { 0 } else { bi };
+        for i in 0..n {
+            for kk in 0..k {
+                let aik = af[(bi * n + i) * k + kk];
+                for j in 0..m {
+                    out[(bi * n + i) * m + j] += aik * bf[(bb * k + kk) * m + j];
+                }
+            }
+        }
+    }
+    let mut osh = lead.to_vec();
+    osh.push(n);
+    osh.push(m);
+    from_flat(&osh, out)
+}
+
+fn op_matmul_any(args: &[Arg], config: &Config, mn: &str) -> Result<Vec<Value>> {
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime(format!("{mn}: missing lhs")))?
+        .stream(mn, "a")?;
+    if matches!(v, Value::Triple(_)) {
+        let a = arg_triple(args, 0, mn)?;
+        let b = arg_triple(args, 1, mn)?;
+        let (m_acc, _) = scales(config);
+        return Ok(vec![Value::Triple(matmul_int(a, b, m_acc)?)]);
+    }
+    let a = arg_f64_array(args, 0, mn)?;
+    let b = arg_f64_array(args, 1, mn)?;
+    Ok(vec![Value::F64(matmul_f64(&a, &b, mn)?)])
+}
+
 pub fn op_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let a = arg_triple(args, 0, "MATMUL")?;
-    let b = arg_triple(args, 1, "MATMUL")?;
-    let (m_acc, _) = scales(config);
-    Ok(vec![Value::Triple(matmul_int(a, b, m_acc)?)])
+    op_matmul_any(args, config, "MATMUL")
 }
 
 pub fn op_batch_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let a = arg_triple(args, 0, "BATCH_MATMUL")?;
-    let b = arg_triple(args, 1, "BATCH_MATMUL")?;
-    let (m_acc, _) = scales(config);
-    Ok(vec![Value::Triple(matmul_int(a, b, m_acc)?)])
+    op_matmul_any(args, config, "BATCH_MATMUL")
 }
 
 // ---------------------------------------------------------------------------
@@ -246,12 +304,100 @@ fn norm_rows(x: &Triple, w: &Triple, m: i64, eps_c: i64) -> Result<Triple> {
     lattice::from_fixed(&out_arr, m)
 }
 
+/// Row-wise F norm over the last axis, in the same operation order as the C
+/// emitter: sequential sum, sequential squared deviations, reciprocal sqrt.
+fn norm_rows_f64(
+    x: &ArrayD<f64>,
+    w: &ArrayD<f64>,
+    b: Option<&ArrayD<f64>>,
+    eps: f64,
+    op: &str,
+) -> Result<ArrayD<f64>> {
+    let sh = x.shape();
+    if sh.is_empty() {
+        return Err(Error::runtime(format!("{op}: need rank >= 1")));
+    }
+    let d = sh[sh.len() - 1];
+    if d == 0 {
+        return Err(Error::runtime(format!("{op}: empty last axis")));
+    }
+    let wf = flat(w);
+    if wf.len() != d {
+        return Err(Error::runtime(format!(
+            "{op}: weight length {} != {d}",
+            wf.len()
+        )));
+    }
+    let bf = b.map(flat);
+    if let Some(bf) = &bf {
+        if bf.len() != d {
+            return Err(Error::runtime(format!(
+                "{op}: bias length {} != {d}",
+                bf.len()
+            )));
+        }
+    }
+    let xf = flat(x);
+    let rows = xf.len() / d;
+    let mut out = vec![0f64; xf.len()];
+    if let Some(bf) = &bf {
+        for r in 0..rows {
+            let row = &xf[r * d..(r + 1) * d];
+            let mut mu = 0f64;
+            for &v in row {
+                mu += v;
+            }
+            mu /= d as f64;
+            let mut ss = 0f64;
+            for &v in row {
+                let dv = v - mu;
+                ss += dv * dv;
+            }
+            let rs = 1.0 / (ss / d as f64 + eps).sqrt();
+            for j in 0..d {
+                out[r * d + j] = (row[j] - mu) * rs * wf[j] + bf[j];
+            }
+        }
+    } else {
+        for r in 0..rows {
+            let row = &xf[r * d..(r + 1) * d];
+            let mut ss = 0f64;
+            for &v in row {
+                ss += v * v;
+            }
+            let rs = 1.0 / (ss / d as f64 + eps).sqrt();
+            for j in 0..d {
+                out[r * d + j] = row[j] * rs * wf[j];
+            }
+        }
+    }
+    from_flat(sh, out)
+}
+
 pub fn op_rmsnorm(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let x = arg_triple(args, 0, "RMSNORM")?;
-    let w = arg_triple(args, 1, "RMSNORM")?;
-    let (_, m_cov) = scales(config);
-    let eps = eps_counts(config, "eps_rms", "eps_rms_c", 4514, m_cov);
-    Ok(vec![Value::Triple(norm_rows(x, w, m_cov, eps)?)])
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("RMSNORM: missing x"))?
+        .stream("RMSNORM", "x")?;
+    if matches!(v, Value::Triple(_)) {
+        let x = arg_triple(args, 0, "RMSNORM")?;
+        let w = arg_triple(args, 1, "RMSNORM")?;
+        let (_, m_cov) = scales(config);
+        let eps = eps_counts(config, "eps_rms", "eps_rms_c", 4514, m_cov);
+        return Ok(vec![Value::Triple(norm_rows(x, w, m_cov, eps)?)]);
+    }
+    let x = arg_f64_array(args, 0, "RMSNORM")?;
+    let w = arg_f64_array(args, 1, "RMSNORM")?;
+    let eps = config
+        .get_f64("eps_rms")
+        .ok_or_else(|| Error::runtime("RMSNORM: needs CONFIG eps_rms"))?;
+    Ok(vec![Value::F64(norm_rows_f64(
+        &x,
+        &w,
+        None,
+        eps,
+        "RMSNORM",
+    )?)])
 }
 
 fn layernorm_rows(x: &Triple, w: &Triple, b: &Triple, m: i64, eps_c: i64) -> Result<Triple> {
@@ -299,12 +445,31 @@ fn layernorm_rows(x: &Triple, w: &Triple, b: &Triple, m: i64, eps_c: i64) -> Res
 }
 
 pub fn op_layernorm(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
-    let x = arg_triple(args, 0, "LAYERNORM")?;
-    let w = arg_triple(args, 1, "LAYERNORM")?;
-    let b = arg_triple(args, 2, "LAYERNORM")?;
-    let (_, m_cov) = scales(config);
-    let eps = eps_counts(config, "eps_ln", "eps_ln_c", 4514, m_cov);
-    Ok(vec![Value::Triple(layernorm_rows(x, w, b, m_cov, eps)?)])
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("LAYERNORM: missing x"))?
+        .stream("LAYERNORM", "x")?;
+    if matches!(v, Value::Triple(_)) {
+        let x = arg_triple(args, 0, "LAYERNORM")?;
+        let w = arg_triple(args, 1, "LAYERNORM")?;
+        let b = arg_triple(args, 2, "LAYERNORM")?;
+        let (_, m_cov) = scales(config);
+        let eps = eps_counts(config, "eps_ln", "eps_ln_c", 4514, m_cov);
+        return Ok(vec![Value::Triple(layernorm_rows(x, w, b, m_cov, eps)?)]);
+    }
+    let x = arg_f64_array(args, 0, "LAYERNORM")?;
+    let w = arg_f64_array(args, 1, "LAYERNORM")?;
+    let b = arg_f64_array(args, 2, "LAYERNORM")?;
+    let eps = config
+        .get_f64("eps_ln")
+        .ok_or_else(|| Error::runtime("LAYERNORM: needs CONFIG eps_ln"))?;
+    Ok(vec![Value::F64(norm_rows_f64(
+        &x,
+        &w,
+        Some(&b),
+        eps,
+        "LAYERNORM",
+    )?)])
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +640,55 @@ fn rope_tables(max_pos: usize, dim: usize, base: f64) -> (ArrayD<f64>, ArrayD<f6
 }
 
 pub fn op_rotary(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("ROTARY: missing x"))?
+        .stream("ROTARY", "x")?;
+    if !matches!(v, Value::Triple(_)) {
+        let x = v.as_f64("ROTARY")?;
+        let pos = arg_i64_array(args, 1, "ROTARY")?;
+        let sh = x.shape().to_vec();
+        if sh.is_empty() {
+            return Err(Error::runtime("ROTARY: need rank >= 1"));
+        }
+        let d = sh[sh.len() - 1];
+        if d % 2 != 0 {
+            return Err(Error::runtime(format!(
+                "ROTARY: head dim must be even, got {d}"
+            )));
+        }
+        let rows: usize = sh[..sh.len() - 1].iter().product();
+        if pos.len() != 1 && pos.len() != rows {
+            return Err(Error::runtime(format!(
+                "ROTARY: pos length {} not broadcastable to {} rows",
+                pos.len(),
+                rows
+            )));
+        }
+        let base = config.get_f64_or("rope_base", 10000.0);
+        let half = d / 2;
+        let theta: Vec<f64> = (0..half)
+            .map(|i| base.powf(-2.0 * i as f64 / d as f64))
+            .collect();
+        let xf = flat(&x);
+        let mut out = vec![0f64; xf.len()];
+        for r in 0..rows {
+            let p = pos[if pos.len() == 1 { 0 } else { r }];
+            if p < 0 {
+                return Err(Error::runtime("ROTARY: negative position"));
+            }
+            for j in 0..half {
+                let ang = p as f64 * theta[j];
+                let c = ang.cos();
+                let s = ang.sin();
+                let i0 = r * d + 2 * j;
+                let i1 = i0 + 1;
+                out[i0] = xf[i0] * c - xf[i1] * s;
+                out[i1] = xf[i0] * s + xf[i1] * c;
+            }
+        }
+        return Ok(vec![Value::F64(from_flat(&sh, out)?)]);
+    }
     let x = arg_triple(args, 0, "ROTARY")?;
     let pos_v = args
         .get(1)
@@ -695,14 +909,53 @@ fn gather_triple(t: &Triple, ids: &ArrayD<i64>) -> Result<Triple> {
     Triple::from_vecs(&oshape, s, e, z)
 }
 
+fn gather_rows<T: Copy>(t: &ArrayD<T>, ids: &ArrayD<i64>, op: &str) -> Result<ArrayD<T>> {
+    let sh = t.shape();
+    if sh.len() != 2 {
+        return Err(Error::runtime(format!(
+            "{op}: table must be (V,C), got {sh:?}"
+        )));
+    }
+    let (v, c) = (sh[0], sh[1]);
+    let tf = flat(t);
+    let mut oshape = if ids.ndim() == 0 {
+        vec![1]
+    } else {
+        ids.shape().to_vec()
+    };
+    oshape.push(c);
+    let mut out = Vec::with_capacity(ids.len() * c);
+    for &id in ids.iter() {
+        if id < 0 || id as usize >= v {
+            return Err(Error::runtime(format!("{op}: ids out of range [0,{v})")));
+        }
+        let row = id as usize;
+        out.extend_from_slice(&tf[row * c..(row + 1) * c]);
+    }
+    from_flat(&oshape, out)
+}
+
 pub fn op_gather(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let w = args
         .first()
         .ok_or_else(|| Error::runtime("GATHER: missing table"))?
         .stream("GATHER", "table")?;
     let ids = arg_i64_array(args, 1, "GATHER")?;
-    let t = w.triple("GATHER: table must be triples (encode first)")?;
-    Ok(vec![Value::Triple(gather_triple(t, &ids)?)])
+    match w {
+        Value::Triple(t) => Ok(vec![Value::Triple(gather_triple(t, &ids)?)]),
+        Value::F64(_) | Value::F32(_) => {
+            let t = w.as_f64("GATHER")?;
+            Ok(vec![Value::F64(gather_rows(&t, &ids, "GATHER")?)])
+        }
+        Value::I64(_) => {
+            let t = w.as_i64("GATHER")?;
+            Ok(vec![Value::I64(gather_rows(&t, &ids, "GATHER")?)])
+        }
+        other => Err(Error::runtime(format!(
+            "GATHER: table must be T/F/I, got {}",
+            other.kind()
+        ))),
+    }
 }
 
 pub fn op_gather3(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
@@ -837,31 +1090,67 @@ pub fn op_concat(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     }
 }
 
-fn reshape_triple(t: &Triple, dims: &[usize], op: &str) -> Result<Triple> {
-    let n = t.numel();
-    if dims.iter().product::<usize>() != n {
-        return Err(Error::runtime(format!("{op}: {:?} != {n} elements", dims)));
+fn reshape_value(v: &Value, dims: &[usize], op: &str) -> Result<Value> {
+    let n: usize = dims.iter().product();
+    match v {
+        Value::Triple(t) => {
+            if t.numel() != n {
+                return Err(Error::runtime(format!(
+                    "{op}: {dims:?} != {} elements",
+                    t.numel()
+                )));
+            }
+            Ok(Value::Triple(Triple::from_vecs(
+                dims,
+                flat(&t.s),
+                flat(&t.e),
+                flat(&t.z),
+            )?))
+        }
+        Value::F64(a) => {
+            if a.len() != n {
+                return Err(Error::runtime(format!(
+                    "{op}: {dims:?} != {} elements",
+                    a.len()
+                )));
+            }
+            Ok(Value::F64(from_flat(dims, flat(a))?))
+        }
+        Value::I64(a) => {
+            if a.len() != n {
+                return Err(Error::runtime(format!(
+                    "{op}: {dims:?} != {} elements",
+                    a.len()
+                )));
+            }
+            Ok(Value::I64(from_flat(dims, flat(a))?))
+        }
+        other => Err(Error::runtime(format!(
+            "{op}: needs T/F/I, got {}",
+            other.kind()
+        ))),
     }
-    Triple::from_vecs(dims, flat(&t.s), flat(&t.e), flat(&t.z))
 }
 
 pub fn op_reshape2(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
-    let t = arg_triple(args, 0, "RESHAPE2")?;
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("RESHAPE2: missing input"))?
+        .stream("RESHAPE2", "x")?;
     let d0 = arg_i64(args, 1, "RESHAPE2", "d0")? as usize;
     let d1 = arg_i64(args, 2, "RESHAPE2", "d1")? as usize;
-    Ok(vec![Value::Triple(reshape_triple(
-        t,
-        &[d0, d1],
-        "RESHAPE2",
-    )?)])
+    Ok(vec![reshape_value(v, &[d0, d1], "RESHAPE2")?])
 }
 
 pub fn op_reshape3(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
-    let t = arg_triple(args, 0, "RESHAPE3")?;
+    let v = args
+        .first()
+        .ok_or_else(|| Error::runtime("RESHAPE3: missing input"))?
+        .stream("RESHAPE3", "x")?;
     let d: Vec<usize> = (1..=3)
         .map(|i| arg_i64(args, i, "RESHAPE3", "d").map(|v| v as usize))
         .collect::<Result<_>>()?;
-    Ok(vec![Value::Triple(reshape_triple(t, &d, "RESHAPE3")?)])
+    Ok(vec![reshape_value(v, &d, "RESHAPE3")?])
 }
 
 pub fn op_permute3(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
@@ -1075,16 +1364,32 @@ pub fn op_topk(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let mut vals = vec![0f64; r * k];
     let mut idxs = vec![0i64; r * k];
     for row in 0..r {
-        let mut order: Vec<usize> = (0..s).collect();
-        order.sort_by(|&i, &j| {
-            af[row * s + j]
-                .partial_cmp(&af[row * s + i])
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(i.cmp(&j))
-        });
-        for t in 0..k {
-            vals[row * k + t] = af[row * s + order[t]];
-            idxs[row * k + t] = order[t] as i64;
+        // The C emitter's single-pass insertion: strictly greater shifts left,
+        // so equal scores keep the lower index first. The arena kernel uses the
+        // same loop, which is what makes ties and non-finite scores identical
+        // without sorting (and without an allocation).
+        let mut n = 0usize;
+        for c in 0..s {
+            let v = af[row * s + c];
+            let mut p = if n < k { n } else { k };
+            while p > 0 && v > vals[row * k + p - 1] {
+                p -= 1;
+            }
+            if p >= k {
+                continue;
+            }
+            let m = if n < k { n } else { k - 1 };
+            let mut t = m;
+            while t > p {
+                vals[row * k + t] = vals[row * k + t - 1];
+                idxs[row * k + t] = idxs[row * k + t - 1];
+                t -= 1;
+            }
+            vals[row * k + p] = v;
+            idxs[row * k + p] = c as i64;
+            if n < k {
+                n += 1;
+            }
         }
     }
     Ok(vec![

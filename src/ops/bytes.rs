@@ -125,11 +125,9 @@ pub fn op_iassemble(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     for i in 0..len as usize {
         v |= ((xf[start as usize + i] as u8 as u128) & 0xFF) << (8 * i);
     }
-    let out = if len == 8 && v >= (1u128 << 63) {
-        (v - (1u128 << 64)) as i64
-    } else {
-        v as i64
-    };
+    // Truncating the low 64 bits is the same value as the old
+    // `(v - 2^64) as i64` branch, without underflowing `u128` in debug builds.
+    let out = v as i64;
     Ok(vec![Value::I64(ArrayD::from_elem(
         ndarray::IxDyn(&[1]),
         out,
