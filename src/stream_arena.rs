@@ -1,9 +1,8 @@
-//! Stream arena probe: can the graph's working set be reused?
+//! Stream arena: reuse one buffer for a whole listing's working set.
 //!
-//! This is a spike, not a replacement for the interpreter. It implements the
-//! destination-passing discipline for four mnemonics (`IADD`, `ISUB`, `IMUL`,
-//! `IDIV`) so the *achievable* number can be measured before committing to a
-//! 94-mnemonic refactor.
+//! The arena is an opt-in execution path (`JOTNAR_ARENA=1`), not a second
+//! language. It covers I and F streams and 53 kernels; anything else falls
+//! back to the interpreter before the first instruction runs.
 //!
 //! The shape is the one the design note argued for:
 //!
@@ -15,7 +14,7 @@
 //! * Slots are allocated in program order, so an instruction's destination is
 //!   always at a higher offset than both of its operands. That lets `run`
 //!   split one buffer into `&mut dst` and two immutable operand slices with no
-//!   unsafe and no copy.
+//!   `unsafe` and no copy.
 //!
 //! The measurement this exists for is in `tests/discipline.rs`: the same chain
 //! listing that costs ~24 allocations per mnemonic through `Value`/`ArrayD`

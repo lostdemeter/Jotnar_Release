@@ -1,7 +1,7 @@
 # Stream arena — handoff
 
 Status: **opt-in, working, on branch `feat/stream-arena`.**
-Base: `d98dfe2`. 310/310 tests with `JOTNAR_ARENA` off and on.
+Base: `d98dfe2`. 311/311 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
@@ -41,8 +41,14 @@ Knobs:
 | `runtime::arena_stats()` | (hits, fallbacks) on this thread |
 
 A listing is planned only when every stream is I or F, every mnemonic has a
-kernel, and `plan.bytes() <= max_bytes()`. Otherwise it falls back to the
-interpreter. A **runtime** failure is returned, never silently re-run.
+kernel, `plan.bytes() <= max_bytes()`, and the run is single-threaded and
+unprofiled. Otherwise it falls back to the interpreter. A **runtime** failure
+is returned, never silently re-run.
+
+`tests/arena_migration.rs::every_soak_fixture_exercises_the_path_it_claims`
+pins which fixture takes which path, so the soak cannot pass by falling back
+every time. `arena_fallback` is the one deliberate interpreter case (`LUMA`
+has no inference rule).
 
 ## Coverage
 
@@ -175,7 +181,7 @@ bits (`v as i64`) instead of computing `v - 2^64` in `u128`.
 |---|---|
 | Tests | 310 (off and on) |
 | Kernels | 53 |
-| Arena unit tests / migration tests | 35 / 5 |
+| Arena unit tests / migration tests | 35 / 6 |
 | Soak fixtures | 12 |
 | Warm node job | 837 → 140 allocations |
 | EXEC reply | 254 → 139 |

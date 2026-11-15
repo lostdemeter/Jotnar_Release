@@ -173,6 +173,50 @@ fn arena_and_interpreter_agree() {
 }
 
 #[test]
+fn every_soak_fixture_exercises_the_path_it_claims() {
+    use std::path::Path;
+    // The soak compares hashes; on its own it would also pass if every
+    // fixture fell back to the interpreter. Pin the path per fixture.
+    let cases: &[(&str, bool)] = &[
+        ("arena_soak", true),
+        ("arena_matmul", true),
+        ("arena_f", true),
+        ("arena_img", true),
+        ("arena_conv", true),
+        ("arena_fallback", false),
+        ("alloc_gate", true),
+        ("arena_reshape", true),
+        ("arena_norm", true),
+        ("arena_fmatmul", true),
+        ("arena_conv_f", true),
+        ("arena_index", true),
+    ];
+    let dir = Path::new("tests/fixtures");
+    for &(base, on_arena) in cases {
+        let text = std::fs::read_to_string(dir.join(format!("{base}.asm"))).unwrap();
+        let feeds =
+            jotnar::payload::read_payload(&dir.join(format!("{base}.ndjson"))).unwrap();
+        let bound = assemble(&text, &AsmOptions::new(dir)).unwrap();
+        set_enabled(Some(true));
+        let before = arena_stats();
+        let run = run_with_options(&bound, &feeds, &ExecOptions::default());
+        let after = arena_stats();
+        set_enabled(None);
+        if let Err(e) = run {
+            panic!("{base}: {e}");
+        }
+        let (hits, falls) = (after.0 - before.0, after.1 - before.1);
+        if on_arena {
+            assert_eq!(hits, 1, "{base} did not take the arena path");
+            assert_eq!(falls, 0, "{base} unexpectedly fell back");
+        } else {
+            assert_eq!(hits, 0, "{base} should not be arena-plannable");
+            assert_eq!(falls, 1, "{base} should report one fallback");
+        }
+    }
+}
+
+#[test]
 fn unported_listing_falls_back_to_the_interpreter() {
     // LUMA has no `infer_shapes` rule, so the arena cannot plan it at all;
     // the interpreter runs it fine. That is the fallback path.

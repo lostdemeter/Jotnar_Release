@@ -179,6 +179,9 @@ The front door is deliberately short. The actual parts are here:
   [`showcase/runtime/`](showcase/runtime/)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
+- opt-in stream arena, allocation discipline, and flat payloads:
+  [`src/stream_arena.rs`](src/stream_arena.rs),
+  [`docs/ARENA_HANDOFF.md`](docs/ARENA_HANDOFF.md)
 - certificates and verification: [`crates/jotnar-lab`](crates/jotnar-lab)
 - autonomous listing circuit and experience loop: [`crates/jotnar-agent`](crates/jotnar-agent)
 - language reference and field notes: [`manual/`](manual/)
@@ -195,7 +198,8 @@ Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-231/231 workspace tests
+311/311 workspace tests
+12/12 arena soak fixtures (interpreter vs arena)
 ```
 
 These are gates, not a leaderboard. The details and commands are in

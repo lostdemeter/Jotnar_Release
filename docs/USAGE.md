@@ -61,12 +61,34 @@ CUDA units/iext/…       scripts/parity_cuda.py
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          231/231
+workspace tests          311/311
 ```
 
 Float `F` paths can differ from numpy in the last ulp on some platforms
 (different SIMD reduction order); triples and integer paths are compared
 bit-exactly.
+
+## Stream arena (opt-in)
+
+The interpreter is the reference and the default. `JOTNAR_ARENA=1` makes the
+runtime try a single-buffer execution plan first: one `Vec<i64>` holds every
+I stream (`i64`) and F stream (`f64` bits), and 53 kernels write destinations in
+place. A listing is planned only when every stream is I or F, every mnemonic has
+a kernel, the working set fits `JOTNAR_ARENA_MAX_MB` (default 64), and the run
+is single-threaded and unprofiled. Anything else falls back to the interpreter
+before the first instruction; a runtime error is returned, never silently
+re-run.
+
+```sh
+cargo test --workspace                     # arena off
+JOTNAR_ARENA=1 cargo test --workspace      # same tests, arena path
+JOTNAR_ARENA=1 ./scripts/arena_soak.sh     # interpreter vs arena, whole listings
+./scripts/alloc_gate.sh                    # allocation tripwire
+```
+
+T and T2 streams, `F32`/`U8`/`Bool` payloads, and mnemonics without arena
+kernels are not arena-backed; `docs/ARENA_HANDOFF.md` records why, what is
+covered, and the measured allocation numbers.
 
 ## T2 phi-float (opt-in)
 

@@ -226,17 +226,25 @@ fn multi_output_and_float_matmul() {
 
 #[test]
 fn conv_matches_interpreter() {
-    // Edge-replicate 3x3 over a 3x4 image: the Rust lowering must be
-    // the C/interpreter contract, not a zero-padded variant.
+    // Edge-replicate 3x3 over a 3x4 image: the Rust lowering, the C lowering,
+    // and the interpreter's F path must all agree.
     let listing = "IN X AS F:HW\nIN K AS F:HW\nOUT = CONV(X, K)\n";
     let xs = [
         1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
     ];
     let ks = [0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0];
     let f = feeds(&[("X", fvalue(&[3, 4], &xs)), ("K", fvalue(&[3, 3], &ks))]);
-    // The reference interpreter's CONV is the triple path; the C backend
-    // is the F-path contract the Rust emitter mirrors, so compare against
-    // C rather than the interpreter here.
+    let bound = jotnar::asm::assemble(listing, &AsmOptions::new(".")).unwrap();
+    let interp = jotnar::runtime::run_with_options(
+        &bound,
+        &f,
+        &jotnar::runtime::ExecOptions::default(),
+    )
+    .expect("run interpreter conv");
+    let ivals = match &interp["OUT"] {
+        Value::F64(a) => a.as_slice().expect("contiguous").to_vec(),
+        other => panic!("expected F64, got {:?}", other.kind()),
+    };
     let art = compile_program(listing, &opts(&["OUT"]), f.clone()).expect("compile conv rust");
     assert!(
         art.source.contains("for ky in 0..3"),
@@ -286,6 +294,7 @@ fn conv_matches_interpreter() {
     for (g, w) in got.iter().zip(want.iter()) {
         assert!((g - w).abs() < 1e-12, "conv {got:?} vs {want:?}");
     }
+    assert_eq!(got, ivals, "interpreter F CONV diverged from the emitters");
     // A 3x3 Laplacian over a planar ramp interior is zero; edges bend.
     assert!(got[5].abs() < 1e-9, "interior {got:?}");
 }
