@@ -112,10 +112,9 @@ the kind with a typed error rather than guessing.
 | `ARGMAX` | T/F/I | T/F | — | F/I |
 | `TOPK` | F | F | — | F |
 
-The interpreter and arena rows grew the F paths in this change; the C/Rust
-columns are pre-existing contracts and remain the cross-target check. `GATHER`
-I is the one intentional asymmetry: the interpreter and arena accept it, the C
-emitter does not yet.
+The interpreter and arena rows grew the F paths in this change, and the C
+emitter now accepts `GATHER` I as well. The Rust backend remains unported for
+`GATHER` (`—` in the table).
 
 ### Rules added, arena kernels not yet
 
