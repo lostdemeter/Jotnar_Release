@@ -5,11 +5,32 @@
 //! runs the integer reference semantics in [`phi_core::t2`]. Unsupported ops
 //! fail loud rather than silently dropping the residual.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::error::{Error, Result};
 use crate::ir::Config;
 use crate::value::{Arg, Triple, Value};
 
 use super::arg_i64;
+
+thread_local! {
+    /// The lattice LUT pair depends only on `f`. Building it costs ~210 KB,
+    /// and it was being rebuilt for every T2 instruction.
+    static TABLES: RefCell<HashMap<i64, Rc<phi_core::t2::Tables>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn tables_for(f: i64) -> Rc<phi_core::t2::Tables> {
+    TABLES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache
+            .entry(f)
+            .or_insert_with(|| Rc::new(phi_core::t2::Tables::new(f)))
+            .clone()
+    })
+}
 
 fn m_bits(config: &Config) -> Option<i64> {
     config.get_i64("t2")
@@ -49,7 +70,7 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             ))
         }
     };
-    let tabs = phi_core::t2::Tables::new(f);
+    let tabs = tables_for(f);
     let one = |v: Triple| Ok(vec![Value::Triple(v)]);
     match name {
         "MUL" => one(phi_core::t2::mul_array(
