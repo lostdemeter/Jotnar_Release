@@ -1,7 +1,7 @@
 # Stream arena
 
 Status: **opt-in, default off, 53 kernels.**
-Base: `d98dfe2`. 311/311 tests with `JOTNAR_ARENA` off and on.
+Base: `d98dfe2`. 312/312 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
@@ -133,9 +133,8 @@ the C and Rust backends too — worth doing independently.
 
 A T2 `ADD` over 1024 elements cost 271,510 bytes; a frozen-T `ADD` cost 62,430.
 **`Tables::new(24)` alone was 213,176 bytes and was rebuilt per instruction**
-(78% of the T2 op). A 15-line thread-local cache (split into a separate
-runtime-fixes PR) drops the T2 op to 58,334 bytes (−78%) and the two-op job
-from 517,504 to 91,152.
+(78% of the T2 op). A 15-line thread-local cache drops the T2 op to 58,334 bytes (−78%) and the
+two-op job from 517,504 to 91,152.
 
 After that cache, arena T2 storage would buy ~50 allocations/op and ~18 KB
 resident — at the cost of a second kind system (`is_t2()` is a runtime property
@@ -204,19 +203,19 @@ bit-exactness. Not worth it.
 5. **`GATHER` I support is interpreter+arena only** — the C emitter still
    refuses an I table (`GATHER table must be T/F (v0.2)`).
 
-`IASSEMBLE`'s debug `u128` underflow and its parity test are split into the
-separate runtime-fixes branch. This PR keeps only the arena's release-semantics
-coverage, so it does not depend on that fix.
+`IASSEMBLE`'s debug `u128` underflow is fixed: the interpreter truncates the
+low 64 bits (`v as i64`) instead of computing `v - 2^64` in `u128`. The
+eight-byte sign-bit case has an interpreter test.
 
 ## Numbers
 
 | Metric | Value |
 |---|---|
-| Tests | 311 (off and on) |
+| Tests | 312 (off and on) |
 | Kernels | 53 |
 | Arena unit tests / migration tests | 35 / 6 |
 | Soak fixtures | 12 |
 | Warm node job | 837 → 140 allocations |
 | EXEC reply | 254 → 139 |
 | Arena steady state | 0 allocations |
-| T2 `ADD` | 271,510 → 58,334 bytes (cache in follow-up) |
+| T2 `ADD` | 271,510 → 58,334 bytes |

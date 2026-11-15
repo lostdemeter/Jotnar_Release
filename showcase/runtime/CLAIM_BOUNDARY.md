@@ -29,7 +29,7 @@ Reproducible from this repository:
   127.0.0.1:0` reports the resolved ephemeral address.
 - `ping` reports the live registry size (94), and the frozen-T encoder and
   decoder agree on the pre-T2 wire layout.
-- Release gates: **231/231** workspace tests, `cargo fmt --check` clean,
+- Release gates: **312/312** workspace tests, `cargo fmt --check` clean,
   and the protocol/determinism/transport/nonfpu suites green.
 
 ## What this repository does not certify
