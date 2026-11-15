@@ -5,9 +5,8 @@
 //! runs the integer reference semantics in [`phi_core::t2`]. Unsupported ops
 //! fail loud rather than silently dropping the residual.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::{Error, Result};
 use crate::ir::Config;
@@ -15,21 +14,18 @@ use crate::value::{Arg, Triple, Value};
 
 use super::arg_i64;
 
-thread_local! {
-    /// The lattice LUT pair depends only on `f`. Building it costs ~210 KB,
-    /// and it was being rebuilt for every T2 instruction.
-    static TABLES: RefCell<HashMap<i64, Rc<phi_core::t2::Tables>>> =
-        RefCell::new(HashMap::new());
-}
+/// The lattice LUT pair depends only on `f`. Building it costs ~210 KB, and it
+/// was being rebuilt for every T2 instruction. One process-wide table per `f`
+/// is shared by every worker thread.
+static TABLES: OnceLock<Mutex<HashMap<i64, Arc<phi_core::t2::Tables>>>> = OnceLock::new();
 
-fn tables_for(f: i64) -> Rc<phi_core::t2::Tables> {
-    TABLES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache
-            .entry(f)
-            .or_insert_with(|| Rc::new(phi_core::t2::Tables::new(f)))
-            .clone()
-    })
+fn tables_for(f: i64) -> Arc<phi_core::t2::Tables> {
+    let cache = TABLES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("T2 table cache poisoned");
+    cache
+        .entry(f)
+        .or_insert_with(|| Arc::new(phi_core::t2::Tables::new(f)))
+        .clone()
 }
 
 fn m_bits(config: &Config) -> Option<i64> {
@@ -241,4 +237,16 @@ fn concat(a: &Triple, b: &Triple) -> Result<Triple> {
         }
     }
     Triple::from_vecs_opt(&[rows, da + db], s, e, z, Some(m))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tables_for;
+
+    #[test]
+    fn tables_are_shared_across_threads() {
+        let a = tables_for(24);
+        let b = std::thread::spawn(|| tables_for(24)).join().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
 }
