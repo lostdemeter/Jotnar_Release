@@ -1,6 +1,6 @@
-# Stream arena — handoff
+# Stream arena
 
-Status: **opt-in, working, on branch `feat/stream-arena`.**
+Status: **opt-in, default off, 53 kernels.**
 Base: `d98dfe2`. 311/311 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
@@ -86,6 +86,31 @@ single-pass insertion so ties, NaN ordering, and allocation are identical on
 both paths. `SCATTER` remains F-only in `infer_shapes`; the task note's "F/I"
 was wrong. `GATHER` now supports F and I in the interpreter and arena; the C
 emitter still refuses I, which is a separate backend gap.
+
+### Backend support for the last fourteen
+
+`Arena` is a runtime path, not a codegen target; `—` means the backend refuses
+the kind with a typed error rather than guessing.
+
+| op | interpreter | C | Rust | arena |
+|---|---|---|---|---|
+| `RESHAPE2`, `RESHAPE3` | T/F/I | T/F/I | F/I | F/I |
+| `LAYERNORM` | T/F | F | F | F |
+| `RMSNORM` | T/F | F | — | F |
+| `ROTARY` | T/F | F | — | F |
+| `MATMUL`, `BATCH_MATMUL` | T/F | F | F | F |
+| `CONV` | T/F | F | F | F |
+| `INTERP` | T/F | F | — | F |
+| `GATHER` | T/F/I | T/F | — | F/I |
+| `GATHER3` | T/F | T/F | — | F |
+| `SCATTER` | F | F | — | F |
+| `ARGMAX` | T/F/I | T/F | — | F/I |
+| `TOPK` | F | F | — | F |
+
+The interpreter and arena rows grew the F paths in this change; the C/Rust
+columns are pre-existing contracts and remain the cross-target check. `GATHER`
+I is the one intentional asymmetry: the interpreter and arena accept it, the C
+emitter does not yet.
 
 ### Blocked on missing `infer_shapes` rules (not arena work)
 

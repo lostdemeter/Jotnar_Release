@@ -87,7 +87,7 @@ JOTNAR_ARENA=1 ./scripts/arena_soak.sh     # interpreter vs arena, whole listing
 ```
 
 T and T2 streams, `F32`/`U8`/`Bool` payloads, and mnemonics without arena
-kernels are not arena-backed; `docs/ARENA_HANDOFF.md` records why, what is
+kernels are not arena-backed; `docs/ARENA.md` records why, what is
 covered, and the measured allocation numbers.
 
 ## T2 phi-float (opt-in)

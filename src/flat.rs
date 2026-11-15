@@ -406,6 +406,8 @@ pub fn encode(v: &Value, convention: Convention) -> Result<FlatPayload> {
 fn bytemuck_i8(s: &[i8]) -> &[u8] {
     // i8 and u8 are the same width and representation; this is the same
     // reinterpretation the old encoder did with `*x as u8`.
+    // SAFETY: both types are one byte, have alignment 1, and the resulting
+    // slice has the same length and provenance as the input.
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) }
 }
 

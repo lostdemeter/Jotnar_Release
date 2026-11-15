@@ -181,7 +181,7 @@ The front door is deliberately short. The actual parts are here:
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:
   [`src/stream_arena.rs`](src/stream_arena.rs),
-  [`docs/ARENA_HANDOFF.md`](docs/ARENA_HANDOFF.md)
+  [`docs/ARENA.md`](docs/ARENA.md)
 - certificates and verification: [`crates/jotnar-lab`](crates/jotnar-lab)
 - autonomous listing circuit and experience loop: [`crates/jotnar-agent`](crates/jotnar-agent)
 - language reference and field notes: [`manual/`](manual/)
