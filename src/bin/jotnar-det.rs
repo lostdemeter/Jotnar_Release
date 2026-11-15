@@ -20,6 +20,7 @@ use jotnar::ir::BoundProgram;
 use jotnar::payload::{self, Feeds};
 use jotnar::profile::{CountingAlloc, JobScope};
 use jotnar::runtime::{self, ExecOptions};
+use jotnar::stream_arena::WarmRunner;
 use jotnar::value::Value;
 use serde_json::Value as Json;
 
@@ -217,10 +218,19 @@ fn run_once(
     feeds: &Feeds,
     threads: usize,
     names: Option<&[String]>,
+    warm: &mut WarmRunner,
 ) -> Result<Run, String> {
     let start = Instant::now();
-    let got = runtime::run_with_options(bound, feeds, &ExecOptions::new(threads))
-        .map_err(|e| e.to_string())?;
+    let got = if threads == 1 {
+        match warm.try_run(bound, feeds) {
+            Some(r) => r.map_err(|e| e.to_string())?,
+            None => runtime::run_with_options(bound, feeds, &ExecOptions::new(1))
+                .map_err(|e| e.to_string())?,
+        }
+    } else {
+        runtime::run_with_options(bound, feeds, &ExecOptions::new(threads))
+            .map_err(|e| e.to_string())?
+    };
     let wall = start.elapsed();
     Ok(Run {
         hash: hash_feeds(&got, names),
@@ -278,9 +288,10 @@ fn real_main() -> Result<(), String> {
 
     // Reference: serial order, one run per payload. Every other execution must
     // match these hashes byte-for-byte.
+    let mut warm = WarmRunner::new();
     let mut reference = Vec::with_capacity(payloads.len());
     for (i, p) in payloads.iter().enumerate() {
-        let r = run_once(&bound, p, 1, names)?;
+        let r = run_once(&bound, p, 1, names, &mut warm)?;
         println!(
             "ref payload={i} threads=1 hash={:016x} wall={:.3}s",
             r.hash,
@@ -337,7 +348,7 @@ fn real_main() -> Result<(), String> {
         let mut hashes = Vec::new();
         for (i, p) in payloads.iter().enumerate() {
             for r in 0..args.repeat {
-                let run = run_once(&bound, p, t, names)?;
+                let run = run_once(&bound, p, t, names, &mut warm)?;
                 if run.hash != reference[i] {
                     ok = false;
                     eprintln!(

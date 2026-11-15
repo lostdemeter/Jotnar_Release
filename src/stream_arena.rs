@@ -1787,6 +1787,38 @@ impl PlanCache {
     }
 }
 
+/// A warm single-threaded runner: one plan cache and one arena, reusable
+/// across calls. `try_run` returns `None` when the arena cannot plan the
+/// listing, so the caller falls back to the interpreter.
+#[derive(Default)]
+pub struct WarmRunner {
+    cache: PlanCache,
+    arena: StreamArena,
+}
+
+impl WarmRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn try_run(&mut self, bound: &BoundProgram, feeds: &Feeds) -> Option<Result<Feeds>> {
+        if !enabled() {
+            return None;
+        }
+        let Self { cache, arena } = self;
+        let plan = cache.get(bound, feeds)?;
+        if arena.capacity_bytes() < plan.bytes() {
+            arena.reserve_words(plan.words());
+        }
+        let mut out = Feeds::new();
+        Some(plan.run_feeds(arena, feeds, &mut out).map(|()| out))
+    }
+
+    pub fn arena(&self) -> &StreamArena {
+        &self.arena
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Step {
     kernel: Kernel,
@@ -2579,6 +2611,27 @@ mod tests {
         let plan = Plan::compile(&bound, &f, &["OUT".to_string()]).unwrap();
         // A (4) + B (4) + OUT (4)
         assert_eq!(plan.words(), 12);
+    }
+
+    #[test]
+    fn warm_runner_reuses_the_plan_and_arena() {
+        let bound = assemble("IN X\nOUT = IADD(X, X)\n", &AsmOptions::default()).unwrap();
+        let f = feeds(4);
+        set_enabled(Some(true));
+        let mut warm = WarmRunner::new();
+        let a = warm.try_run(&bound, &f).unwrap().unwrap();
+        let b = warm.try_run(&bound, &f).unwrap().unwrap();
+        set_enabled(None);
+        assert_eq!(
+            crate::payload::value_to_json(&a["OUT"]).unwrap(),
+            crate::payload::value_to_json(&b["OUT"]).unwrap()
+        );
+        assert_eq!(warm.arena().resets(), 2);
+
+        set_enabled(Some(false));
+        let mut off = WarmRunner::new();
+        assert!(off.try_run(&bound, &f).is_none());
+        set_enabled(None);
     }
 
     fn feeds(n: usize) -> Feeds {
