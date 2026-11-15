@@ -53,7 +53,7 @@ is returned, never silently re-run.
 `tests/arena_migration.rs::every_soak_fixture_exercises_the_path_it_claims`
 pins which fixture takes which path, so the soak cannot pass by falling back
 every time. `arena_fallback` is the one deliberate interpreter case (`LUMA`
-has no inference rule).
+infers, but has no arena kernel).
 
 ## Coverage
 

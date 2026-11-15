@@ -209,8 +209,8 @@ fn every_soak_fixture_exercises_the_path_it_claims() {
 
 #[test]
 fn unported_listing_falls_back_to_the_interpreter() {
-    // LUMA has no `infer_shapes` rule, so the arena cannot plan it at all;
-    // the interpreter runs it fine. That is the fallback path.
+    // LUMA now infers, but it has no arena kernel, so the plan fails and the
+    // interpreter runs it. That is the fallback path.
     let mut f = Feeds::new();
     f.insert(
         "X".to_string(),
