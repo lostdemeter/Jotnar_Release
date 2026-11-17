@@ -133,4 +133,3 @@ placed at `/var/lib/jotnar/etc/ssh/authorized_keys`.
 frames to the supervisor. The controller CLI is `/usr/local/bin/jotnar-payload`
 (or `artifacts/jotnar-payload` on the development host). See
 `../README.md`.
-
