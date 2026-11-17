@@ -10,7 +10,7 @@ name = "jotnar"
 path = "src/bin/jotnar.rs"
 
 [workspace]
-members = ["crates/phi-core", "crates/jotnar-lab", "crates/jotnar-agent"]
+members = ["crates/phi-core", "crates/jotnar-lab", "crates/jotnar-agent", "crates/jotnar-node"]
 exclude = ["manual/press"]
 
 [dependencies]
@@ -20,6 +20,7 @@ serde_json = "1"
 thiserror = "2"
 regex = "1"
 libm = "0.2"
+sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
 phi-core = { path = "crates/phi-core" }
 
