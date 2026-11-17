@@ -74,3 +74,11 @@ cargo test
 5. Merge into the local integration branch and push only after that review.
 
 Do not push this branch directly from the porting session.
+
+## Generated manual artifacts
+
+`manual/out/manual.html` and `manual/out/jotnar-field-manual.pdf` are generated
+by the press and still carry the old 101-count strings in this branch. The
+source register and all registry-doc tests are updated to 105. Rebuild the
+manual artifacts before publishing a release; do not hand-edit the generated
+HTML/PDF.
