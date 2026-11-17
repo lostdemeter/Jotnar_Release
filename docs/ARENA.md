@@ -1,7 +1,7 @@
 # Stream arena
 
 Status: **opt-in, default off, 53 kernels.**
-Base: `d98dfe2`. 320/320 tests with `JOTNAR_ARENA` off and on.
+Base: `e3bb979`. 320/320 tests with `JOTNAR_ARENA` off and on.
 
 ## What this is
 
@@ -124,7 +124,7 @@ arena kernel yet:
 
 - `LUMA` — F→F; the only clean candidate. Do **not** port it speculatively:
   the trigger is a real listing (or a hit-rate report) that falls back because
-  of it.
+  of it; the existing interpreter fallback alone is not a trigger.
 - `STATIC` — F→Bool; needs a Bool output representation.
 - `GAIN` — consumes T and returns F32; needs both T and F32.
 - `PERMUTE3`, `DECONV`, `POOLAVG` — T-only.
@@ -155,8 +155,9 @@ bit-exactness. Not worth it.
 - **Arena covers I and F only.** Words are raw 64-bit patterns; F kernels use
   `f64::from_bits`/`to_bits`. No `unsafe`, no second buffer.
 - **No speculative arena kinds.** A kernel for an unused op is not progress.
-  `LUMA` waits for a real fallback; `STATIC` needs Bool; the T consumers need a
-  new T-arena decision. The inference rules are enough groundwork for now.
+  `LUMA` waits for a measured listing/hit-rate trigger; `STATIC` needs Bool;
+  the T consumers need a new T-arena decision. The inference rules are enough
+  groundwork for now.
 - **Fallback only on plan failure.** A runtime error is surfaced, so the arena
   cannot hide a divergence.
 - **The arena never widens the language.** If a kind has no interpreter path,
@@ -206,8 +207,8 @@ bit-exactness. Not worth it.
 
 1. **Arena default stays off** — pending a hit-rate report from the runtime app.
 2. **Six rule-enabled ops have no arena kernel** — see "Rules added, arena
-   kernels not yet". None is worth speculative work: `LUMA` needs a defined
-   need, `STATIC` needs Bool, and the other four need T.
+   kernels not yet". None is worth speculative work: `LUMA` needs a measured
+   trigger, `STATIC` needs Bool, and the other four need T (`GAIN` also F32).
 3. **`jotnar-bench` still compiles its one-shot reference plan** — `jotnar-det`
    now uses `WarmRunner`, but the bench reference path does not.
 
