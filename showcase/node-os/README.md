@@ -89,7 +89,7 @@ writing a USB disk.
 
 The frozen N0–N5 image is
 `b0d52c257aa1fe9d10ea610daa3f16360b2416024eec70c3e63e1bc202440785`
-(516 MiB, runtime `723a56b76f59`). On the physical USB node
+(516 MiB, runtime `723a56b76f59`). On the frozen physical USB image
 (`node-e75cfaea5d5a0826`, 192.168.1.116):
 
 - `ping` reports 4 workers, queue 64, `inline+chunked`, and the `jobs.v1`,
@@ -118,9 +118,14 @@ The integration branch was QEMU-gated on 2026-11-17 at runtime
   outputs, 17.17 jobs/s.
 
 The workspace tests and host gates (`n5_job_capability.sh`,
-`sched_two_nodes.sh`) also pass. The ported image has not been flashed to the
-physical USB node; the physical evidence below is still from the frozen image.
-See [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
+`sched_two_nodes.sh`) also pass.
+
+The ported image was flashed to USB and booted on the physical node
+(`node-e10e85bc6f1c20c3`, runtime `0.1.0+a3bab886588b`): all 8 modules are
+emitted, `physical_jobs.sh` passes, mDNS discovery reports `auth=required`, and
+the N5 path passes action-18 parity plus submit/status/list/cancel. The earlier
+frozen-image evidence below remains the reference for the N0–N5 freeze. See
+[`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
 
 ## What this is not
 

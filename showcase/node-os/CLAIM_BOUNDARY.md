@@ -23,8 +23,8 @@ Reproducible from this repository:
   list, idempotency, timeouts, cooperative cancellation, and queue-full
   rejection are covered by `crates/jotnar-node` tests and the host N5 gate.
 - **Large results.** Store-backed chunked results carry SHA-256 and byte
-  counts; reader leases and eviction are tested. The frozen image passed a
-  67,280,000-byte / 65-chunk physical result.
+  counts; reader leases and eviction are tested. Both the frozen and ported
+  images passed a 67,280,000-byte / 65-chunk physical result.
 - **Capability mediation.** The emitted `job-policy` module dispatches through
   the supervisor to the local job endpoint with the node token. Interpreted
   and emitted `module-step` agree on action/command/state, and the host N5
@@ -33,8 +33,8 @@ Reproducible from this repository:
   durable batch ledger, cached replay, resume, aggregation, and receipts are
   covered by `crates/jotnar-node/test/sched_two_nodes.sh`.
 - **Identity and discovery.** Stable node IDs, mDNS advertisement, and
-  controller discovery are implemented. The frozen physical node was found
-  with `auth=required`, 4 workers, and queue 64.
+  controller discovery are implemented. Both the frozen and ported physical
+  nodes were found with `auth=required`, 4 workers, and queue 64.
 - **Image reproducibility.** `image/build-node-image.sh` pins Alpine and the
   kernel, builds node binaries for `x86_64-unknown-linux-musl`, and writes a
   GPT image plus a build manifest. The image hash is recorded in the manifest.
@@ -63,12 +63,20 @@ async submit/timeout/cancel, 200-job batch, and a 67,280,000-byte / 65-chunk
 verified result; N4 64-job `IMATMUL` across two nodes with balanced 32/32
 placement and identical outputs.
 
-The physical gate still refers to the frozen USB image. The ported image has
-not been flashed to the physical node:
+The ported image was flashed to USB and booted on the physical node
+(`node-e10e85bc6f1c20c3`, runtime `0.1.0+a3bab886588b`). The physical gate
+passed:
 
 ```sh
-ADDR=<node>:9999 ./crates/jotnar-node/test/physical_jobs.sh
+ADDR=192.168.1.116:9999 ./crates/jotnar-node/test/physical_jobs.sh
 ```
+
+It reports 4 workers, queue 64, all 8 emitted modules including `job-policy`,
+action-18 `job.submit` parity, submit → `done`, status/list, long-job cancel →
+`canceled`, a 67,280,000-byte / 65-chunk verified result, a 200-job matmul2
+batch, and a 50-job `vec n=65536` batch. mDNS discovery found the node with
+`auth=required`. The earlier frozen-image physical evidence remains the N0–N5
+freeze reference.
 
 ## What is not certified
 
