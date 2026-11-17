@@ -33,7 +33,7 @@ behind the claims.</p>
 &nbsp;·&nbsp;
 <a href="manual/">source</a>
 </p>
-<p><em>101 pages. 105 mnemonics. One fail-loud rule: if the assembler has to
+<p><em>103 pages. 105 mnemonics. One fail-loud rule: if the assembler has to
 guess, the program is already wrong.</em></p>
 </td>
 </tr>
@@ -192,13 +192,14 @@ The front door is deliberately short. The actual parts are here:
 105 mnemonics
 88/88 Python-oracle cases (original 86)
 4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
+4 non-FPU image ops (POOLMAX2D, POOLAVG2D, MULC, ADDC) + T2 SILU
 32/32 emitter cases
 26/26 Rust parity (scripts/parity_rust.py)
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-320/320 workspace tests
+364/364 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 

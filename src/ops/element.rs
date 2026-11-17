@@ -202,9 +202,18 @@ pub fn broadcast_triple(src: &Triple, shape: &[usize]) -> Result<crate::value::T
         sstr[i] = sstr[i + 1] * sshape[i + 1];
     }
     let total: usize = shape.iter().product();
-    let s = src.s.as_slice().ok_or_else(|| Error::runtime("broadcast: s not contiguous"))?;
-    let e = src.e.as_slice().ok_or_else(|| Error::runtime("broadcast: e not contiguous"))?;
-    let z = src.z.as_slice().ok_or_else(|| Error::runtime("broadcast: z not contiguous"))?;
+    let s = src
+        .s
+        .as_slice()
+        .ok_or_else(|| Error::runtime("broadcast: s not contiguous"))?;
+    let e = src
+        .e
+        .as_slice()
+        .ok_or_else(|| Error::runtime("broadcast: e not contiguous"))?;
+    let z = src
+        .z
+        .as_slice()
+        .ok_or_else(|| Error::runtime("broadcast: z not contiguous"))?;
     let mut os = Vec::with_capacity(total);
     let mut oe = Vec::with_capacity(total);
     let mut oz = Vec::with_capacity(total);

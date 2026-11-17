@@ -1,11 +1,11 @@
 //! POOLMAX2D / POOLAVG2D reference gates.
 
-use ndarray::{ArrayD, IxDyn};
-use std::path::PathBuf;
 use jotnar::asm::{self, AsmOptions};
 use jotnar::ir::Config;
 use jotnar::ops::image::{op_poolavg2d, op_poolmax2d};
 use jotnar::value::{Arg, Value};
+use ndarray::{ArrayD, IxDyn};
+use std::path::PathBuf;
 
 fn value(shape: &[usize], vals: Vec<f64>) -> Value {
     Value::F64(ArrayD::from_shape_vec(IxDyn(shape), vals).unwrap())
@@ -33,18 +33,22 @@ fn as_vec(v: &Value) -> Vec<f64> {
 #[test]
 fn poolmax2d_2x2_stride2() {
     let x = value(&[4, 4, 1], (0..16).map(|v| v as f64).collect());
-    let out = op_poolmax2d(&args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
-                           &Config::default())
-        .unwrap();
+    let out = op_poolmax2d(
+        &args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
     assert_eq!(as_vec(&out[0]), vec![5.0, 7.0, 13.0, 15.0]);
 }
 
 #[test]
 fn poolavg2d_2x2_stride2() {
     let x = value(&[4, 4, 1], (0..16).map(|v| v as f64).collect());
-    let out = op_poolavg2d(&args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
-                           &Config::default())
-        .unwrap();
+    let out = op_poolavg2d(
+        &args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
     assert_eq!(as_vec(&out[0]), vec![2.5, 4.5, 10.5, 12.5]);
 }
 
@@ -52,14 +56,18 @@ fn poolavg2d_2x2_stride2() {
 fn poolaverage2d_strip_rows_and_columns() {
     let x = value(&[4, 4, 1], (0..16).map(|v| v as f64).collect());
     // 1x4 over rows -> mean of each row
-    let rows = op_poolavg2d(&args(x.clone(), (1.0, 4.0), (1.0, 1.0), (0.0, 0.0)),
-                            &Config::default())
-        .unwrap();
+    let rows = op_poolavg2d(
+        &args(x.clone(), (1.0, 4.0), (1.0, 1.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
     assert_eq!(as_vec(&rows[0]), vec![1.5, 5.5, 9.5, 13.5]);
     // 4x1 over columns -> mean of each column
-    let cols = op_poolavg2d(&args(x, (4.0, 1.0), (1.0, 1.0), (0.0, 0.0)),
-                            &Config::default())
-        .unwrap();
+    let cols = op_poolavg2d(
+        &args(x, (4.0, 1.0), (1.0, 1.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
     assert_eq!(as_vec(&cols[0]), vec![6.0, 7.0, 8.0, 9.0]);
 }
 
@@ -67,19 +75,87 @@ fn poolaverage2d_strip_rows_and_columns() {
 fn pooolmax2d_keeps_channels_independent() {
     // two channels, 2x2 each: channel 0 = 0..4, channel 1 = 100..104
     let x = value(&[2, 2, 2], vec![0., 100., 1., 101., 2., 102., 3., 103.]);
-    let out = op_poolmax2d(&args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
-                           &Config::default())
-        .unwrap();
+    let out = op_poolmax2d(
+        &args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
     assert_eq!(as_vec(&out[0]), vec![3.0, 103.0]);
 }
 
 #[test]
 fn pool2d_rejects_non_hwc() {
     let x = value(&[4, 4], (0..16).map(|v| v as f64).collect());
-    let err = op_poolmax2d(&args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
-                           &Config::default())
-        .unwrap_err();
+    let err = op_poolmax2d(
+        &args(x, (2.0, 2.0), (2.0, 2.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("expected HWC"), "{err}");
+}
+
+#[test]
+fn poolmax2d_pads_with_neg_inf() {
+    // All-negative input: a zero pad would win the max. The declared -inf
+    // pad must not, so every 3x3 window still sees only real taps.
+    let x = value(&[2, 2, 1], vec![-1., -2., -3., -4.]);
+    let out = op_poolmax2d(
+        &args(x, (3.0, 3.0), (1.0, 1.0), (1.0, 1.0)),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(as_vec(&out[0]), vec![-1.0, -1.0, -1.0, -1.0]);
+}
+
+#[test]
+fn poolavg2d_counts_padded_taps() {
+    // 2x2 ones, 2x2 kernel, stride 1, pad 1 -> 3x3. The denominator is the
+    // full kernel (4), so corners are 1/4 and the centre is 4/4.
+    let x = value(&[2, 2, 1], vec![1., 1., 1., 1.]);
+    let out = op_poolavg2d(
+        &args(x, (2.0, 2.0), (1.0, 1.0), (1.0, 1.0)),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        as_vec(&out[0]),
+        vec![0.25, 0.5, 0.25, 0.5, 1.0, 0.5, 0.25, 0.5, 0.25]
+    );
+}
+
+#[test]
+fn pool2d_asymmetric_padding() {
+    // x = [[1,2],[3,4]]; kernel 2x1, stride 1, pad (1,0) -> 3x2.
+    let x = value(&[2, 2, 1], vec![1., 2., 3., 4.]);
+    let out = op_poolmax2d(
+        &args(x, (2.0, 1.0), (1.0, 1.0), (1.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap();
+    assert_eq!(as_vec(&out[0]), vec![1., 2., 3., 4., 3., 4.]);
+}
+
+#[test]
+fn pool2d_rejects_bad_geometry() {
+    let x = || value(&[2, 2, 1], vec![1., 2., 3., 4.]);
+    for (k, s, p) in [
+        ((0.0, 2.0), (1.0, 1.0), (0.0, 0.0)),  // zero kernel
+        ((2.0, 2.0), (1.0, 0.0), (0.0, 0.0)),  // zero stride
+        ((2.0, 2.0), (1.0, 1.0), (-1.0, 0.0)), // negative pad
+        ((5.0, 5.0), (1.0, 1.0), (0.0, 0.0)),  // kernel larger than input
+    ] {
+        let err = op_poolmax2d(&args(x(), k, s, p), &Config::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("POOLMAX2D"),
+            "{k:?} {s:?} {p:?}: {err}"
+        );
+    }
+    let err = op_poolavg2d(
+        &args(x(), (0.0, 2.0), (1.0, 1.0), (0.0, 0.0)),
+        &Config::default(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("POOLAVG2D"), "{err}");
 }
 
 #[test]

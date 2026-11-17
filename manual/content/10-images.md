@@ -43,11 +43,13 @@ Every arrow is a stream. Every stage can be inspected, replaced, or run on a dif
 | `POOLAVG` | `* -> *` | Global average pool over H,W; returns `(C)`. |
 | `POOLMAX2D` | `*, F:SCALAR ×6 -> *` | HWC max pool: kh, kw, sh, sw, ph, pw. |
 | `POOLAVG2D` | `*, F:SCALAR ×6 -> *` | HWC average pool: kh, kw, sh, sw, ph, pw; padding is counted. |
-| `MULC` | `*, * -> *` | Broadcast multiply: per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)`. |
-| `ADDC` | `*, * -> *` | Broadcast add: per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)`. |
+| `MULC` | `*, * -> *` | Broadcast multiply: the second operand is per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)` and broadcasts onto the first. |
+| `ADDC` | `*, * -> *` | Broadcast add: the second operand is per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)` and broadcasts onto the first. |
 | `PRELU` | `$A, $A -> $A` | PReLU with scalar or per-channel slope. |
 
 `INTERP` only accepts dyadic scales (powers of two). A non-dyadic scale is a lowering error, not a silent approximation. That is a deliberate constraint: it keeps the fixed-point coordinate math exact.
+
+A mnemonic may have an interpreter reference and still have no pattern on every target. `POOLMAX2D`, `POOLAVG2D`, `MULC`, `ADDC`, and `PRELU` are interpreter-only today: asking C, non-FPU C, Rust, or CUDA to lower them is a loud `NoPattern`, never a silent fallback. `POOLMAX2D` pads with `-inf`; `POOLAVG2D` divides by the full kernel, so padded taps count in the denominator.
 
 ## Structure and coherence
 

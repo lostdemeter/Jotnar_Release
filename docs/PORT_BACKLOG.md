@@ -40,7 +40,8 @@ Open:
 ## 1. Jotnar-LAN / language core
 
 - [x] `asm.py`: IMPORT, DEF/CALL, REPEAT/BREAK, parse, assemble, verify
-- [x] `asm_ops.py`: all 105 opcodes and signatures
+- [x] `asm_ops.py`: the 86 historical opcodes and signatures (the Rust
+  registry extends to 105)
 - [x] `run()` / `repeat()` reference interpreter
 - [ ] `builder.py`: programmatic listing construction
 - [ ] `debugger.py`: breakpoints, watch, step, lesion

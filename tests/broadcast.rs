@@ -70,6 +70,31 @@ fn addc_spatial_broadcast() {
 }
 
 #[test]
+fn mulc_spatial_broadcast() {
+    let x = triple(&[2, 2, 2], vec![1., 2., 3., 4., 5., 6., 7., 8.]);
+    // [1,W,C]: scale column 0 by 10, column 1 by 0.5.
+    let col = triple(&[1, 2, 2], vec![10., 10., 0.5, 0.5]);
+    let out = op_mulc(&args(x, col), &Config::default()).unwrap();
+    let got = decoded(&out[0]);
+    for (g, e) in got.iter().zip([10., 20., 1.5, 2., 50., 60., 3.5, 4.]) {
+        assert!((g - e).abs() <= 0.02 * e.abs().max(1.0), "{got:?}");
+    }
+}
+
+#[test]
+fn broadcast_rejects_incompatible_shapes() {
+    let x = triple(&[2, 2, 2], vec![1.; 8]);
+    // (3) cannot broadcast to a trailing dim of 2.
+    let bad = triple(&[3], vec![1., 2., 3.]);
+    let err = op_mulc(&args(x.clone(), bad), &Config::default()).unwrap_err();
+    assert!(err.to_string().contains("broadcast"), "{err}");
+    // More dimensions than the target cannot be broadcast down.
+    let rank4 = triple(&[1, 1, 2, 2], vec![1.; 4]);
+    let err = op_addc(&args(x, rank4), &Config::default()).unwrap_err();
+    assert!(err.to_string().contains("broadcast"), "{err}");
+}
+
+#[test]
 fn broadcast_listings_assemble() {
     let opts = AsmOptions::new(PathBuf::from("."));
     for text in [

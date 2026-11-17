@@ -253,7 +253,13 @@ SL = SILU(R)
     let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interpreter");
     let opts = CompileOptions {
         target: Target::NonFpu,
-        outputs: vec!["CV".into(), "DC".into(), "RS".into(), "RL".into(), "SL".into()],
+        outputs: vec![
+            "CV".into(),
+            "DC".into(),
+            "RS".into(),
+            "RL".into(),
+            "SL".into(),
+        ],
         asm: AsmOptions::new("."),
         use_fp16: false,
     };
@@ -301,6 +307,66 @@ SL = SILU(R)
         );
         assert_eq!(&got.z, &want.z, "{name} zero");
     }
+}
+
+#[test]
+fn t2_silu_zero_planes_match_interpreter() {
+    // Exact zeros in the source must stay zero through the sigmoid-LUT path
+    // (the T2 zero plane), and the emitted integer C must match the reference
+    // on all four planes, including both saturation tails.
+    let listing = "\
+CONFIG t2 24
+CONFIG bridge_f 24
+IN X AS T:HW
+OUT = SILU(X)
+";
+    let xv = [
+        0.0, 1.0, -1.0, 2.0, -2.0, 0.0, 0.5, -0.5, 3.0, -3.0, 0.0, 8.0,
+    ];
+    let mut f = Feeds::new();
+    f.insert("X".into(), Value::Triple(arr(&[3, 4], &xv)));
+    let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interpreter");
+    let opts = CompileOptions {
+        target: Target::NonFpu,
+        outputs: vec!["OUT".into()],
+        asm: AsmOptions::new("."),
+        use_fp16: false,
+    };
+    let art = compile_program(listing, &opts, f.clone()).expect("compile t2 silu");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "nft2silu", Target::NonFpu).expect("build");
+    let mut argv: Vec<String> = Vec::new();
+    let t = match f.get("X").unwrap() {
+        Value::Triple(t) => t,
+        _ => unreachable!(),
+    };
+    argv.extend(write_planes(dir.path(), "X", t));
+    for comp in ["s", "e", "m", "z"] {
+        argv.push(
+            dir.path()
+                .join(format!("OUT_{comp}.bin"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    assert!(Command::new(&exe).args(&argv).status().unwrap().success());
+    let got = read_planes(dir.path(), "OUT", &[3, 4]);
+    let want = match expected.get("OUT").unwrap() {
+        Value::Triple(t) => t,
+        _ => unreachable!(),
+    };
+    assert_eq!(&got.s, &want.s, "sign");
+    assert_eq!(&got.e, &want.e, "exponent");
+    assert_eq!(
+        got.m.as_ref().unwrap(),
+        want.m.as_ref().unwrap(),
+        "mantissa"
+    );
+    assert_eq!(&got.z, &want.z, "zero");
+    // Source positions 0 and 5 were exactly zero and must remain zero.
+    let wz = want.z.as_slice().unwrap();
+    assert_eq!(wz[0], 1, "SILU(0) must stay zero");
+    assert_eq!(wz[5], 1, "SILU(0) must stay zero");
 }
 
 #[test]

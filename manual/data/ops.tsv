@@ -5,8 +5,8 @@ SPLAT_BLUR	1	2	T:HW -> T:HW, T:HW	image	Structure-tensor splat blur; returns ima
 SUB	2	1	$A, $A -> $A	image	Elementwise subtraction.
 BETA_V5	2	1	T:HW, T:HW -> T:HW	image	Beta field v5 from depth and coherence.
 MUL	2	1	$A, $A -> $A	image	Elementwise multiplication.
-MULC	2	1	*, * -> *	image	Broadcast multiply: per-channel (C) or spatial (H,1,C)/(1,W,C)/(H,W,C) operand.
-ADDC	2	1	*, * -> *	image	Broadcast add: per-channel (C) or spatial (H,1,C)/(1,W,C)/(H,W,C) operand.
+MULC	2	1	*, * -> *	image	Broadcast multiply: second operand (C)/(H,1,C)/(1,W,C)/(H,W,C) broadcast onto the first.
+ADDC	2	1	*, * -> *	image	Broadcast add: second operand (C)/(H,1,C)/(1,W,C)/(H,W,C) broadcast onto the first.
 ADD	2	1	$A, $A -> $A	image	Elementwise addition.
 SQUARE	1	1	$A -> $A	image	Elementwise square.
 GAIN	3	1	F:HWC, F:HW, T:HW -> F:HWC	image	Apply a coherence-gated color gain.
