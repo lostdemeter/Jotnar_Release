@@ -4,7 +4,10 @@
 //! and the generated source. The numerical gate lives in
 //! `scripts/parity_hip.py` and runs on a ROCm host.
 
+use std::path::Path;
+
 use jotnar::asm::AsmOptions;
+use jotnar::codegen::hip::build_hip;
 use jotnar::codegen::{compile_program, CompileOptions, Target};
 use jotnar::payload::Feeds;
 use jotnar::value::Value;
@@ -75,4 +78,33 @@ fn hip_integer_and_matmul_use_hip_apis() {
     let art = compile_program(listing, &opts(&["OUT"]), feeds(&[("a", a), ("b", b)]))
         .expect("compile hip matmul");
     assert!(art.source.contains("k_matmul"));
+}
+
+#[test]
+fn hip_refuses_ops_outside_the_slice() {
+    let listing = "IN a\nOUT = GELU(a)\n";
+    let a = Value::F64(ArrayD::from_shape_vec(IxDyn(&[4]), vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+    let err = compile_program(listing, &opts(&["OUT"]), feeds(&[("a", a)]))
+        .unwrap_err()
+        .to_string();
+    assert!(err.to_lowercase().contains("no pattern"), "{err}");
+}
+
+#[test]
+fn hip_missing_toolchain_is_actionable() {
+    let previous = std::env::var_os("HIPCC");
+    std::env::set_var("HIPCC", "/definitely/missing/hipcc");
+    let dir = tempfile::tempdir().unwrap();
+    let err = build_hip(
+        "int main() { return 0; }\n",
+        Path::new(dir.path()),
+        "missing",
+    )
+    .unwrap_err()
+    .to_string();
+    match previous {
+        Some(value) => std::env::set_var("HIPCC", value),
+        None => std::env::remove_var("HIPCC"),
+    }
+    assert!(err.contains("hipcc not found"), "{err}");
 }

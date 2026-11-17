@@ -1221,6 +1221,12 @@ pub fn build_hip(
     let exe = workdir.join(name);
     std::fs::write(&src, source)?;
     let hipcc = find_hipcc();
+    if !hipcc.is_file() {
+        return Err(Error::asm(format!(
+            "hipcc not found; set HIPCC or install ROCm (looked for {})",
+            hipcc.display()
+        )));
+    }
     let mut cmd = std::process::Command::new(&hipcc);
     cmd.args(["-O2", "-std=c++14"]);
     // Auto-detection is the default. Set HIP_ARCH (e.g. gfx1100) to pin the
