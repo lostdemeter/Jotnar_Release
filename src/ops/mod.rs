@@ -451,7 +451,9 @@ fn build_registry() -> Registry {
         7,
         1,
         sig(
-            &["*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR"],
+            &[
+                "*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR",
+            ],
             &["*"],
         ),
         Some(op_poolmax2d),
@@ -461,7 +463,9 @@ fn build_registry() -> Registry {
         7,
         1,
         sig(
-            &["*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR"],
+            &[
+                "*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR",
+            ],
             &["*"],
         ),
         Some(op_poolavg2d),
