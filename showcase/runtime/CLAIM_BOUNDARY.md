@@ -8,6 +8,13 @@ production serve claim**. Adding it does not change the ten-exhibit count and
 does not promote application performance or live-service behavior to a
 language-repo gate.
 
+The asynchronous job lifecycle, store-backed results, cancellation, node OS,
+and distributed scheduler are application evidence in
+[`showcase/node-os/`](../node-os/CLAIM_BOUNDARY.md) and
+[`crates/jotnar-node`](../../crates/jotnar-node). They use the runtime's
+`Node::snapshot`, `Node::authorize`, and `CancelGuard`, but they are not added
+to the language contract.
+
 ## What this repository certifies
 
 Reproducible from this repository:
@@ -27,10 +34,14 @@ Reproducible from this repository:
   (10 bytes/element); frozen T keeps the interleaved 24-byte `i64x3` form.
 - `NodeHandle` uses a bounded request queue; `jotnar-node --bind
   127.0.0.1:0` reports the resolved ephemeral address.
-- `ping` reports the live registry size (94), and the frozen-T encoder and
-  decoder agree on the pre-T2 wire layout.
-- Release gates: **320/320** workspace tests, `cargo fmt --check` clean,
-  and the protocol/determinism/transport/nonfpu suites green.
+- `ping` reports the live registry size and build identity; compatibility tests
+  cover the frozen-T encoder/decoder and unknown message types.
+- `Node::snapshot` shares bound programs and stored payloads behind `Arc`, and
+  `Node::authorize` is the single token check used by `handle`/`handle_into`.
+  `CancelGuard` installs a cooperative flag that the interpreter, `REPEAT`
+  loops, and the stream-arena step loop check.
+- The workspace test suite, protocol/determinism/transport/nonfpu suites, and
+  the node crate tests are green on the integration branch.
 
 ## What this repository does not certify
 
@@ -40,33 +51,37 @@ Reproducible from this repository:
   repository.
 - Live service, production replacement, or SBS integration. `fast-float`
   remains the production default; exact T2 is a canary/reference path.
-- TCP parity for large outputs. A 64 MiB frame carries ~6.7M T2 elements;
-  application neck/head outputs are much larger. Chunked/segmented or
-  store-backed result transport is Stage E.
-- Concurrent TCP jobs, cancellation/timeouts, `Arc` snapshots that decouple
-  `program`/`store` from a long `exec`, or a per-job memory policy.
-- F32/GPU performance or cross-backend float bit-identity.
-- That the FNV-1a 64-bit hashes are a cryptographic content address. They
-  are fingerprints for receipts/regression, not dedup or security.
+- TLS beyond the shared-token trusted-LAN model, per-node fingerprints, or key
+  rotation.
 - Cross-host transport latency or throughput; the measured numbers are
   one-machine observations.
+- The node application's async/store-backed behavior as a *language* claim.
+  Those paths are gated in `crates/jotnar-node`, with the claim boundary in
+  `showcase/node-os/`.
+- F32/GPU performance or cross-backend float bit-identity.
+- That the FNV-1a 64-bit hashes are a cryptographic content address. They are
+  fingerprints for receipts/regression, not dedup or security. Result payload
+  chunks use SHA-256 in the node application, but receipts remain fingerprints.
 
 ## Evidence provenance
 
 - Language-side claims: checked-in Rust tests, `jotnar-det`, and
   `showcase/runtime/` commands.
-- Application-side claims: the companion depth-conversion repository
+- Node application claims: `crates/jotnar-node` tests and the QEMU/physical
+  gates under `crates/jotnar-node/test/`, summarized in `showcase/node-os/`.
+- Application-side depth claims: the companion depth-conversion repository
   (currently local-only). The language repository does not include its
   payloads, model weights, or benchmark scripts.
 
 ## Change control
 
-- Do not cite this exhibit as proof of live serve, large-output TCP parity,
-  or production depth performance.
-- Do not move companion application numbers into language-gated receipts,
-  the root exhibit table, or the manual as if they were reproducible here.
-- When Stage E lands (concurrent TCP, cancellation/timeouts, `Arc` snapshots,
-  memory policy, chunked large outputs, stronger content hash), update this
-  boundary and the exhibit together. Promotion to a separate numbered exhibit
-  would also require the root README, `docs/LOOP.md`, the manual showcase
-  chapter, and the manual output to be updated together.
+- Do not cite this exhibit as proof of live serve, production depth
+  performance, transport security, or a two-physical-node benchmark.
+- Do not move companion application numbers into language-gated receipts, the
+  root exhibit table, or the manual as if they were reproducible here.
+- Async lifecycle, snapshots, cancellation, chunked results, scheduler, and
+  node OS evidence belong in `showcase/node-os/`; keep this exhibit's language
+  gates focused on determinism, receipts, and transport.
+- Promotion to a separate numbered exhibit would also require the root README,
+  `showcase/README.md`, `docs/LOOP.md`, the manual showcase chapter, and the
+  manual output to be updated together.

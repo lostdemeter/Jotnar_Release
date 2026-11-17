@@ -58,8 +58,9 @@ The interesting contract is not TCP; it is:
 Channels preserve the frame bytes and the model-blind boundary. The TCP
 transport now exists as `jotnar-node` wrapping the same `Node::handle`,
 `EXEC`, blob shelf, and determinism gate — see [`../runtime/`](../runtime/).
-This exhibit keeps the channel form because it isolates the ordering
-claim from network jitter.
+The async/job variant and the bootable node live in
+[`../node-os/`](../node-os/); this exhibit keeps the channel form because it
+isolates the ordering claim from network jitter.
 
 The nodes are intentionally one-request-at-a-time. Fan-out lives in the
 controller, matching the original one-client-per-server policy.

@@ -178,9 +178,36 @@ boundary with no per-command compile step; the certified T2 kernels are
 hash-identical across the tested thread counts, repeats, and in-process
 concurrent jobs, and receipts name the build and partition.
 Does not prove: cross-backend float identity, TLS beyond loopback +
-token, host-side placement (that lives in the controller), live serve,
-large-output/concurrent TCP, cancellation/timeouts, or a memory policy.
+token, host-side placement (that lives in the controller), or live serve.
+Async jobs, cancellation, chunked results, and the distributed scheduler are
+application evidence in [`node-os/`](node-os/), not language-exhibit claims.
 See [`runtime/CLAIM_BOUNDARY.md`](runtime/CLAIM_BOUNDARY.md).
+
+## Applications built on the stack
+
+These are not numbered language exhibits. They use the runtime and report their
+own evidence and limits.
+
+### JotnarOS node OS
+
+A bootable x86-64 node: model-blind job server, payload supervisor, emitted
+system modules (including a `job` capability), node identity, mDNS discovery,
+and a multi-node scheduler. The boot control plane is emitted Rust; Linux
+remains the substrate, so this is Claim A, not a Jotnar-native kernel.
+
+```sh
+./crates/jotnar-node/image/build-node-image.sh
+./crates/jotnar-node/test/qemu_smoke.py --m8 --m11
+./crates/jotnar-node/test/sched_two_nodes.sh
+```
+
+Proves: async job lifecycle over an immutable `Node` snapshot, store-backed
+chunked results, capability-mediated job submission with interpreted/emitted
+parity, and multi-node placement/retry/ledger behavior.
+Does not prove: TLS/fingerprint trust, node-side durability, a production
+scheduler, or a two-physical-node benchmark.
+Read [`node-os/README.md`](node-os/README.md) and
+[`node-os/CLAIM_BOUNDARY.md`](node-os/CLAIM_BOUNDARY.md).
 
 ## Companion showcases
 

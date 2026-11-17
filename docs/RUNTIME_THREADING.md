@@ -109,20 +109,29 @@ bottleneck.
   the receipt.
 - T2 streams use `T/t2` (s:i8, e:i32, z:u8, m:i32 = 10 bytes/element);
   frozen T keeps the interleaved 24-byte `i64x3` form.
-- `NodeHandle` uses a bounded request queue. It still has one worker, so
-  `program`/`store` can queue behind a long `exec` until `Arc` snapshots
-  land.
+- `NodeHandle` uses a bounded request queue. It still has one worker, so the
+  simple `jotnar-node` front door can queue `program`/`store` behind a long
+  `exec`.
+- `Node::snapshot` shares bound programs and stored payloads behind `Arc`, so
+  the async node application can execute a job against an immutable registry.
+- `CancelGuard` installs a cooperative cancellation flag checked between
+  instructions, `REPEAT` iterations, and stream-arena steps.
 
-## What remains (Stage E research)
+## What remains
 
-1. Concurrent TCP jobs, cancellation/timeouts, and retry/health behavior.
-2. `Arc` snapshots that decouple `program`/`store` from a long `exec`.
-3. A per-job memory policy and backpressure for large stores.
-4. Chunked/segmented or store-backed results for outputs larger than one
-   frame. A 64 MiB frame carries ~6.7M T2 elements; application neck/head
-   outputs are much larger.
-5. A stronger content address than FNV-1a 64-bit before claiming immutable
-   dedup.
+The node application (`crates/jotnar-node`) now implements concurrent jobs,
+cancellation/timeouts, `Arc` snapshots, chunked/store-backed results, node
+identity, discovery, and a controller ledger. Those are application claims,
+not language-exhibit claims. Remaining work:
+
+1. In the simple `jotnar-node` front door, concurrency stays in the
+   controller; use `jotnar-noded` for the async worker pool.
+2. A per-job memory policy and stronger backpressure for large stores.
+3. TLS/mTLS and per-node fingerprint trust; the current token is a cleartext
+   trusted-LAN secret.
+4. A node-side durable job journal and restart recovery.
+5. A stronger content address than FNV-1a 64-bit for receipts (result chunks
+   already use SHA-256 in the node application).
 6. F32 first-class streams/kernels and optional GPU acceleration; the gap to
    fast-float is precision/acceleration, not interpreter dispatch.
 7. A separate numbered exhibit if the job server is promoted beyond exhibit
@@ -133,10 +142,12 @@ bottleneck.
 
 - Certified here: hash-identical model-blind T2 kernels across the tested
   thread counts/repeats/concurrent in-process jobs, canonical receipts,
-  build provenance, explicit thread policy, T2 small-output transport, and
-  the bounded queue.
-- Not certified here: DAV2 full-depth/FPS numbers, live serve, large-output
-  or concurrent TCP, cancellation/timeouts, memory policy, F32/GPU parity,
-  or a cryptographic content address.
+  build provenance, explicit thread policy, T2 small-output transport, the
+  bounded queue, and the snapshot/authorize/cancel primitives.
+- Not certified here: DAV2 full-depth/FPS numbers, live serve, transport
+  security, node durability, memory policy, F32/GPU parity, or a
+  cryptographic receipt address.
+- Node application evidence lives in
+  [`showcase/node-os/CLAIM_BOUNDARY.md`](../showcase/node-os/CLAIM_BOUNDARY.md).
 
 See [`showcase/runtime/CLAIM_BOUNDARY.md`](../showcase/runtime/CLAIM_BOUNDARY.md).

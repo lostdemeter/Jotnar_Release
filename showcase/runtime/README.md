@@ -3,8 +3,9 @@
 > **Status: language-repo exhibit 10.** The deterministic job-server section
 > below is first-class research/tooling, not a production serve claim. The
 > language repository certifies the hash-identical kernels, receipts, build
-> provenance, and small-output transport; application performance and Stage E
-> live-service behavior are not certified here. See
+> provenance, and small-output transport. Async jobs, cancellation, chunked
+> results, and the node OS are application evidence in
+> [`../node-os/`](../node-os/), not additions to the language contract. See
 > [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
 
 The warm interpreter and the network node are one processor with two
@@ -117,7 +118,38 @@ cargo run --release --bin jotnar-det -- <listing.asm> <payload.ndjson> \
 Application-level DAV2 layer-0/backbone/neck/head measurements are
 companion-repository evidence and are not reproduced from this repository.
 See [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md) for the certified/research
-split and the Stage E blockers.
+split.
+
+## Node application: async jobs, results, and the OS
+
+The runtime primitives used by the node application live here:
+
+- `Node::snapshot` shares `Arc`-backed programs and payloads, so a job gets a
+  cheap immutable registry and long executions do not block uploads/drops.
+- `Node::authorize` is the one shared-token check behind `handle`/`handle_into`.
+- `CancelGuard` installs a cooperative cancellation flag checked between
+  instructions, `REPEAT` iterations, and stream-arena steps.
+
+The full lifecycle is demonstrated by `crates/jotnar-node`:
+
+```sh
+cargo test -p jotnar-node-tools
+./crates/jotnar-node/test/n5_job_capability.sh
+./crates/jotnar-node/test/sched_two_nodes.sh
+./crates/jotnar-node/test/qemu_jobs.sh
+```
+
+That application adds a bounded worker pool/queue, submit/status/result/cancel/
+list, idempotency, timeouts, inline and chunked store-backed results with
+SHA-256, a durable controller ledger, retries, node IDs, mDNS discovery, the
+emitted `job` capability, and the bootable node image. See
+[`../node-os/`](../node-os/) for the evidence and
+[`../node-os/CLAIM_BOUNDARY.md`](../node-os/CLAIM_BOUNDARY.md) for what is not
+claimed.
+
+The simple `jotnar-node` binary in this exhibit remains the synchronous
+one-client TCP front door. `jotnar-noded` in the node crate is the async
+multi-worker service.
 
 ## Proves
 
@@ -133,9 +165,10 @@ partition.
 Cross-backend float bit-identity (integer/triple are cross-target
 exact; float is exact on identical engines/orders), TLS beyond the
 loopback + `--token` trusted-LAN model, or host-side workload
-placement (that lives in the controller, by design). It does not prove
-large-output TCP parity, concurrent TCP, cancellation/timeouts, a memory
-quota, or live service.
+placement (that lives in the controller, by design). This exhibit does
+not prove the node application's async lifecycle, large-result transport,
+scheduler behavior, or live service; those are gated in
+`crates/jotnar-node` and bounded in `showcase/node-os/`.
 
 ## Boundaries (explicit)
 
@@ -143,19 +176,21 @@ quota, or live service.
   Non-loopback binds are refused without `--token`; the token is a
   cleartext shared secret in the JSON header, a trusted-LAN
   convenience, not a cryptographic authenticator. No TLS.
-- One client at a time; fan-out lives in the controller.
-- No memory quota: programs/stores persist across clients until
-  `drop`. Oversize frames (`--max-frame`, 64 MiB default) are refused
-  as `error/too-large` and the connection closes.
+- The simple `jotnar-node` front door handles one client at a time; fan-out
+  lives in the controller. `jotnar-noded` in `crates/jotnar-node` adds the
+  async worker pool and queue.
+- No per-job memory quota in the simple front door: programs/stores persist
+  across clients until `drop`. Oversize frames (`--max-frame`, 64 MiB
+  default) are refused as `error/too-large` and the connection closes. The
+  node application adds a bounded result store, not a full memory policy.
 - The JSON arm is a benchmark/debugging aid, not a supported wire.
 - Numbers above are one-machine observations, not cross-host gates.
-- **Stage E research, not claimed:** concurrent TCP jobs,
-  cancellation/timeouts, `Arc` snapshots for program/store, a per-job memory
-  policy, and chunked/segmented or store-backed results for outputs larger
-  than one frame. A 64 MiB frame carries ~6.7M T2 elements; application
-  neck/head outputs are much larger, so TCP parity is not claimed for them.
-- `NodeHandle` has a bounded queue but one worker; a long `exec` can still
-  delay `program`/`store` until snapshots land.
+- **Node application, separately gated:** concurrent TCP jobs,
+  cancellation/timeouts, `Arc` snapshots, and chunked/store-backed results
+  are implemented in `crates/jotnar-node`; their evidence is in
+  `showcase/node-os/`, not in this language exhibit.
+- `NodeHandle` has a bounded queue but one worker; use `jotnar-noded` when a
+  long `exec` must not delay `program`/`store`.
 - FNV-1a 64-bit is a fast fingerprint, not a cryptographic content address.
   Do not use these hashes for immutable dedup or security without a stronger
   hash.

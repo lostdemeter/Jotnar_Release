@@ -179,6 +179,14 @@ Each one is a different angle on the same stack. The full visual index is
 | [Certified agent](showcase/agent/) | exact-gate harness composition; bit-exact backend pipeline with C/non-FPU parity |
 | [Interpreter + node](showcase/runtime/) | warm execution; deterministic threaded kernels; same bytes over framed TCP |
 
+## Applications built on the stack
+
+These are not additional numbered language exhibits:
+
+| application | the claim |
+|---|---|
+| [JotnarOS node OS](showcase/node-os/) | bootable Linux node; model-blind async jobs; emitted system modules; multi-node scheduling |
+
 ## Start here
 
 | if you want to… | go here |
@@ -207,6 +215,9 @@ The front door is deliberately short. The actual parts are here:
   [`src/protocol.rs`](src/protocol.rs),
   [`docs/RUNTIME_THREADING.md`](docs/RUNTIME_THREADING.md),
   [`showcase/runtime/`](showcase/runtime/)
+- node OS: async jobs, supervisor, emitted system modules, scheduler, image:
+  [`crates/jotnar-node/`](crates/jotnar-node/),
+  [`showcase/node-os/`](showcase/node-os/)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:

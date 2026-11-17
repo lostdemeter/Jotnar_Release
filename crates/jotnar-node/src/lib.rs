@@ -128,7 +128,12 @@ pub fn error_frame(id: &serde_json::Value, code: &str, msg: impl Into<String>) -
     jotnar::protocol::error_frame(id, code, msg)
 }
 
-pub fn ok_frame(id: &serde_json::Value, typ: &str, fields: serde_json::Value, payload: &[u8]) -> Vec<u8> {
+pub fn ok_frame(
+    id: &serde_json::Value,
+    typ: &str,
+    fields: serde_json::Value,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut h = fields;
     if let Some(o) = h.as_object_mut() {
         o.insert("v".into(), json!(jotnar::protocol::PROTO_V));

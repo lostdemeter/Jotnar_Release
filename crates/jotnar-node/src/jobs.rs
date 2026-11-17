@@ -1095,11 +1095,10 @@ fn worker_loop(inner: Arc<Inner>) {
                                     }),
                                 );
                             }
-                            data.result =
-                                Some(JobResultState::Inline(JobResult {
-                                    header,
-                                    payload: payload.to_vec(),
-                                }));
+                            data.result = Some(JobResultState::Inline(JobResult {
+                                header,
+                                payload: payload.to_vec(),
+                            }));
                             data.state = JobState::Done;
                         } else {
                             match inner.results.store(&job.id, header, payload.to_vec()) {

@@ -149,17 +149,18 @@ fixed-point bridge width (default 18); T2 uses 24. See
   the store-hook fused executor. The in-process frame codec, registry, blob
   shelf, deterministic EXEC path, and TCP transport (`jotnar-node`) are
   in place.
-- Deterministic job-server Stage E: concurrent TCP jobs, cancellation and
-  timeouts, `Arc` snapshots that decouple `program`/`store` from a long
-  `exec`, a per-job memory policy, and chunked/segmented or store-backed
-  results for outputs larger than one frame. The current node is one client
-  at a time with a bounded in-process queue; TCP parity is claimed only for
-  single-job, small-output T2.
 - The model-side phi-core modules (`calibrate`, `score`, `compose`, `stamp`,
   `zoo`); the substrate crate covers the lattice/triple/exact helpers and
   numpy-style ops Jotnar consumes.
 - Speed work: the CUDA backend is correctness-first (one launch/op); tuned
   kernels/cuBLAS scheduling is a separate pass.
+
+The async node application now lives in `crates/jotnar-node`: bounded worker
+pool, cancellation/timeouts, `Arc` snapshots, chunked/store-backed results,
+node identity, discovery, and a controller ledger. These are application
+claims, not language-exhibit claims. The simple `jotnar-node` front door
+remains one client at a time with a bounded in-process queue; exhibit 10 claims
+TCP parity only for single-job, small-output T2.
 
 The Rust SDL player has intermittent frame-time spikes not seen in the
 original Python/C player. This is recorded as future work; add a frame-time
@@ -249,9 +250,10 @@ plus short git), scheduler version, resolved threads, partition descriptor,
 and verdict. `profile_ops: true` adds advisory per-op timing outside the
 receipt. T2 streams use the compact `T/t2` wire dtype (`s:i8, e:i32, z:u8,
 m:i32` = 10 bytes/element); frozen T keeps the interleaved 24-byte
-`i64x3` form. A 64 MiB frame carries about 6.7M T2 elements, so large
-application outputs need chunked or store-backed transport before TCP parity
-is claimed.
+`i64x3` form. A 64 MiB frame carries about 6.7M T2 elements. The node
+application's async result path adds chunked store-backed outputs with
+SHA-256; see `showcase/node-os/`. The simple front door does not claim TCP
+parity for large outputs.
 
 `jotnar-repl` assembles once, then answers one JSON payload per stdin
 line (errors are per-line `{"error": ...}`, the process stays alive).
@@ -264,10 +266,12 @@ budget) and `thread_policy: "reference" | "auto"`; the default stays the
 one-thread reference order. `ping` (pong) and `exec-ok` carry
 `runtime_version=<crate>+<short-git>`. The in-process `NodeHandle` uses a
 bounded queue (default 64), but one worker: program/store mutations can
-still queue behind a long exec until `Arc` snapshots land. See
+still queue behind a long exec. Use `jotnar-noded` from
+`crates/jotnar-node` for the async job engine and immutable snapshots. See
 `docs/RUNTIME_RESEARCH.md` for transport measurements,
-`docs/RUNTIME_THREADING.md` for the determinism/threading design, and
-`showcase/runtime/` for the exhibit and claim boundary.
+`docs/RUNTIME_THREADING.md` for the determinism/threading design,
+`showcase/runtime/` for the exhibit and claim boundary, and
+`showcase/node-os/` for the node application.
 
 ## Payload format
 
