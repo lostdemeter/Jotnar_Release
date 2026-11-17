@@ -131,6 +131,36 @@ cargo run -p jotnar-lab -- verify certificates/example/certificate.json
 
 [The loop](docs/LOOP.md) · [Certificate schema](docs/appendix/TRUST_SPINE.md) · [Harness](crates/jotnar-lab/)
 
+## The artifact, not the source
+
+A listing does not determine what ran. Target, dtype, shapes, thread policy
+and toolchain all sit outside it; two builds of the same listing are two
+different machines. A claim about the source is a claim about something that
+can change without the claim noticing.
+
+So the build emits two things, and they do different jobs:
+
+- **`<name>.manifest.json` — the declaration.** Target, dtype, input and
+  output streams, shapes, argv layout, serve endpoints. It says what shape of
+  thing this is, in a form another process can read without parsing a listing.
+- **the certificate — the binding.** Artifact paths and hashes, byte counts,
+  and the provenance that makes them locatable: command, cwd, commit, host.
+
+Neither half is the claim. The pair is: bytes you can hash, a declaration of
+what they are, and a boundary naming what was not checked. That pair survives
+the toolchain moving, the listing being edited and the author being
+unavailable. The source does not.
+
+This is why certificates reference artifacts by hash rather than by listing.
+A certificate about a source file would be a certificate about something that
+can change underneath it.
+
+The shape is not unique to Jotnar. Stacks built for an entirely different job
+arrive at it: CANN's ATC emits a `.om` that gets archived and re-run long
+after the source graph is gone. The convergence is not the file format — it
+is the decision that the build, not the source, is the thing a claim can be
+made about.
+
 ## The ten exhibits
 
 Each one is a different angle on the same stack. The full visual index is
