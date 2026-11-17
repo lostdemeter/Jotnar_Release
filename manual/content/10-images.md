@@ -41,6 +41,10 @@ Every arrow is a stream. Every stage can be inspected, replaced, or run on a dif
 | `INTERP` | `*, F:SCALAR, F:SCALAR -> *` | Bilinear resize by dyadic scales. |
 | `RESIZE2D` | `*, F:SCALAR, F:SCALAR, F:SCALAR -> *` | Bilinear resize to an explicit size with an align_corners flag. |
 | `POOLAVG` | `* -> *` | Global average pool over H,W; returns `(C)`. |
+| `POOLMAX2D` | `*, F:SCALAR ×6 -> *` | HWC max pool: kh, kw, sh, sw, ph, pw. |
+| `POOLAVG2D` | `*, F:SCALAR ×6 -> *` | HWC average pool: kh, kw, sh, sw, ph, pw; padding is counted. |
+| `MULC` | `*, * -> *` | Broadcast multiply: per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)`. |
+| `ADDC` | `*, * -> *` | Broadcast add: per-channel `(C)` or spatial `(H,1,C)`/`(1,W,C)`/`(H,W,C)`. |
 | `PRELU` | `$A, $A -> $A` | PReLU with scalar or per-channel slope. |
 
 `INTERP` only accepts dyadic scales (powers of two). A non-dyadic scale is a lowering error, not a silent approximation. That is a deliberate constraint: it keeps the fixed-point coordinate math exact.

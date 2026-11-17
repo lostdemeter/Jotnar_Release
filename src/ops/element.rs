@@ -171,6 +171,75 @@ pub fn select_mux(trips: &[Triple], bucket: &ArrayD<i64>) -> Result<Triple> {
 // Public mnemonics
 // ---------------------------------------------------------------------------
 
+pub fn broadcast_triple(src: &Triple, shape: &[usize]) -> Result<crate::value::Triple> {
+    let sshape = src.shape();
+    if sshape == shape {
+        return Ok(src.clone());
+    }
+    if sshape.len() > shape.len() {
+        return Err(Error::runtime(format!(
+            "broadcast: source {:?} has more dims than target {:?}",
+            sshape, shape
+        )));
+    }
+    let off = shape.len() - sshape.len();
+    for i in 0..sshape.len() {
+        let sd = sshape[i];
+        let td = shape[off + i];
+        if sd != 1 && sd != td {
+            return Err(Error::runtime(format!(
+                "broadcast: dimension {} of {:?} is not 1 or {}",
+                i, sshape, td
+            )));
+        }
+    }
+    let mut tstr = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        tstr[i] = tstr[i + 1] * shape[i + 1];
+    }
+    let mut sstr = vec![1usize; sshape.len()];
+    for i in (0..sshape.len().saturating_sub(1)).rev() {
+        sstr[i] = sstr[i + 1] * sshape[i + 1];
+    }
+    let total: usize = shape.iter().product();
+    let s = src.s.as_slice().ok_or_else(|| Error::runtime("broadcast: s not contiguous"))?;
+    let e = src.e.as_slice().ok_or_else(|| Error::runtime("broadcast: e not contiguous"))?;
+    let z = src.z.as_slice().ok_or_else(|| Error::runtime("broadcast: z not contiguous"))?;
+    let mut os = Vec::with_capacity(total);
+    let mut oe = Vec::with_capacity(total);
+    let mut oz = Vec::with_capacity(total);
+    for flat in 0..total {
+        let mut si = 0usize;
+        for d in 0..shape.len() {
+            let idx = (flat / tstr[d]) % shape[d];
+            if d >= off {
+                let sd = sshape[d - off];
+                let sidx = if sd == 1 { 0 } else { idx };
+                si += sidx * sstr[d - off];
+            }
+        }
+        os.push(s[si]);
+        oe.push(e[si]);
+        oz.push(z[si]);
+    }
+    Ok(crate::value::Triple::from_vecs(shape, os, oe, oz)?)
+}
+
+pub fn op_mulc(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let a = arg_triple(args, 0, "MULC")?;
+    let b = arg_triple(args, 1, "MULC")?;
+    let bf = broadcast_triple(b, &a.shape())?;
+    Ok(vec![Value::Triple(tmul(a, &bf)?)])
+}
+
+pub fn op_addc(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    let a = arg_triple(args, 0, "ADDC")?;
+    let b = arg_triple(args, 1, "ADDC")?;
+    let bf = broadcast_triple(b, &a.shape())?;
+    let (_, m) = scales(config);
+    Ok(vec![Value::Triple(binop_fixed(a, &bf, m, m, "add")?)])
+}
+
 pub fn op_add(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     let a = arg_triple(args, 0, "ADD")?;
     let b = arg_triple(args, 1, "ADD")?;

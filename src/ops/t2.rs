@@ -101,6 +101,7 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
             eps(config),
         )?),
         "GELU" => one(phi_core::t2::gelu(triple(args, 0, name)?, &tabs, m)?),
+        "SILU" => one(phi_core::t2::silu(triple(args, 0, name)?, &tabs, m)?),
         "SOFTMAX" | "SOFTMAX_WIDE" => one(phi_core::t2::softmax_mt(
             triple(args, 0, name)?,
             &tabs,
@@ -170,7 +171,7 @@ fn run(name: &str, args: &[Arg], config: &Config) -> Result<Vec<Value>> {
         "CONCAT" => one(concat(triple(args, 0, name)?, triple(args, 1, name)?)?),
         other => Err(Error::unimplemented(format!(
             "T2: no non-FPU reference for {other} (supported: MUL, SQUARE, ADD, SUB, \
-             MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE, TRANSPOSE, CONCAT)"
+             MATMUL, LAYERNORM, GELU, SILU, SOFTMAX, SOFTMAX_WIDE, TRANSPOSE, CONCAT)"
         ))),
     }
 }

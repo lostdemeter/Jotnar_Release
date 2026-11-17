@@ -234,6 +234,7 @@ CV = CONV2D(X, W, B, 1, 1)
 DC = DECONV2D(X, W, B, 2, 1)
 RS = RESIZE2D(R, 5, 7, 0)
 RL = RELU(R)
+SL = SILU(R)
 ";
     let xv = [
         0.5, -1.25, 2.0, -0.75, 3.5, 0.125, -0.5, 1.0, 0.25, -2.0, 0.75, 1.5, -1.0, 0.5, 2.5,
@@ -252,7 +253,7 @@ RL = RELU(R)
     let expected = jotnar::run_text(listing, &AsmOptions::new("."), &f).expect("interpreter");
     let opts = CompileOptions {
         target: Target::NonFpu,
-        outputs: vec!["CV".into(), "DC".into(), "RS".into(), "RL".into()],
+        outputs: vec!["CV".into(), "DC".into(), "RS".into(), "RL".into(), "SL".into()],
         asm: AsmOptions::new("."),
         use_fp16: false,
     };
@@ -267,7 +268,7 @@ RL = RELU(R)
         };
         argv.extend(write_planes(dir.path(), name, t));
     }
-    for name in ["CV", "DC", "RS", "RL"] {
+    for name in ["CV", "DC", "RS", "RL", "SL"] {
         for comp in ["s", "e", "m", "z"] {
             argv.push(
                 dir.path()
@@ -283,6 +284,7 @@ RL = RELU(R)
         ("DC", &[5, 7, 3]),
         ("RS", &[5, 7, 2]),
         ("RL", &[3, 4, 2]),
+        ("SL", &[3, 4, 2]),
     ];
     for (name, shape) in shapes {
         let got = read_planes(dir.path(), name, shape);

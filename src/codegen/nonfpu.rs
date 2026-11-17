@@ -531,6 +531,17 @@ static void nf_t2_layernorm_row(const int8_t *xs, const int32_t *xe, const int32
     nf_t2_from_fixed(av, m0, &os[j], &oe[j], &om[j], &oz[j]);
   }
 }
+static void nf_t2_silu(int8_t s, int32_t e, int32_t m, uint8_t z,
+                       int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  int64_t q = nf_t2_to_fixed(s, e, m, z, 32768);
+  int64_t x14 = nf_t2_tdiv(q, (int64_t)(1LL << (NF_FIXED_F - 14)));
+  int64_t y14;
+  if (x14 < -262144) y14 = 0;
+  else if (x14 > 262144) y14 = 16384;
+  else y14 = NF_SIG[x14 + 262144];
+  int64_t out14 = nf_t2_tdiv(x14 * y14, 16384);
+  nf_t2_from_fixed(out14 * (int64_t)(1LL << (NF_FIXED_F - 14)), 32768, os, oe, om, oz);
+}
 static void nf_t2_gelu(int8_t s, int32_t e, int32_t m, uint8_t z,
                        int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
   int64_t q = nf_t2_to_fixed(s, e, m, z, 32768);
@@ -835,7 +846,7 @@ pub fn prologue(ctx: &Ctx) -> Result<String> {
             ));
             l.push_str(NF_SOFTMAX_HELPERS);
         }
-        if has("SILU") {
+        if has("SILU") || t2_m.is_some() {
             l.push_str(&bake_vec("NF_SIGX", lattice::sigx_lut(), 8));
             l.push('\n');
             l.push_str(&bake_vec("NF_SIG", lattice::sig_lut(), 8));
@@ -1177,6 +1188,26 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
                 None,
             ))
         }
+        "SILU" => {
+            let a = args[0].as_str();
+            Ok((
+                fill(
+                    r#"/* {o} = SILU({a}) T2 sigmoid-LUT + tmul */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_silu({as}, {ae}, {am}, {az}, &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()),
+                        ("a", a.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "SOFTMAX_WIDE" | "SOFTMAX" => {
             let x = args[0].as_str();
             let d = ctx.width(x, "nonfpu T2 SOFTMAX")?;
@@ -1346,7 +1377,7 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i) {
         }
         other => Err(Error::unimplemented(format!(
             "nonfpu T2: no pattern for {other} (supported: MUL, SQUARE, ADD, SUB, \
-             MATMUL, LAYERNORM, GELU, SOFTMAX, SOFTMAX_WIDE, CONV2D, \
+             MATMUL, LAYERNORM, GELU, SILU, SOFTMAX, SOFTMAX_WIDE, CONV2D, \
              DECONV2D, RESIZE2D, RELU)"
         ))),
     }

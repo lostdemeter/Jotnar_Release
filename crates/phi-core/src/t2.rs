@@ -759,6 +759,49 @@ pub fn gelu(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
     from_planes(&a.shape(), s, e, m, z)
 }
 
+/// SiLU (`x * sigmoid(x)`) on T2, matching the emitted non-FPU LUT path.
+pub fn silu(a: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
+    let (as_, ae, am, az) = planes(a)?;
+    let n = as_.len();
+    let (mut s, mut e, mut m, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    let sig = lattice::sig_lut();
+    let span = lattice::SIG_SPAN;
+    let sh = tabs.f - 14;
+    for i in 0..n {
+        let q = to_fixed(
+            T2 {
+                s: as_[i],
+                e: ae[i],
+                m: am[i],
+                z: az[i],
+            },
+            BIAS,
+            tabs,
+            m_bits,
+        );
+        let x14 = trunc_div(q as i128, 1i128 << sh) as i64;
+        let y14 = if x14 < -span {
+            0
+        } else if x14 > span {
+            16384
+        } else {
+            sig[(x14 + span) as usize]
+        };
+        let out14 = trunc_div(x14 as i128 * y14 as i128, 16384) as i64;
+        let out = from_fixed(out14 << sh, BIAS, tabs, m_bits);
+        s.push(out.s);
+        e.push(out.e);
+        m.push(out.m);
+        z.push(out.z);
+    }
+    from_planes(&a.shape(), s, e, m, z)
+}
+
 /// Row softmax at BIAS scale (`SOFTMAX`/`SOFTMAX_WIDE` share the T2 path).
 #[allow(clippy::too_many_arguments)]
 fn softmax_rows(

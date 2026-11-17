@@ -906,6 +906,116 @@ pub fn op_poolavg(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::Triple(from_fixed(&arr, m_cov)?)])
 }
 
+pub fn op_poolmax2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = arg_f64_array(args, 0, "POOLMAX2D")?;
+    let kh = arg_i64(args, 1, "POOLMAX2D", "kh")?;
+    let kw = arg_i64(args, 2, "POOLMAX2D", "kw")?;
+    let sh = arg_i64(args, 3, "POOLMAX2D", "sh")?;
+    let sw = arg_i64(args, 4, "POOLMAX2D", "sw")?;
+    let ph = arg_i64(args, 5, "POOLMAX2D", "ph")?;
+    let pw = arg_i64(args, 6, "POOLMAX2D", "pw")?;
+    if kh <= 0 || kw <= 0 || sh <= 0 || sw <= 0 || ph < 0 || pw < 0 {
+        return Err(Error::runtime(
+            "POOLMAX2D: kernel/stride must be > 0, pad >= 0",
+        ));
+    }
+    let shp = x.shape();
+    if shp.len() != 3 {
+        return Err(Error::runtime(format!(
+            "POOLMAX2D: expected HWC, got {:?}",
+            shp
+        )));
+    }
+    let (h, w, c) = (shp[0], shp[1], shp[2]);
+    let ho = (h as i64 + 2 * ph - kh) / sh + 1;
+    let wo = (w as i64 + 2 * pw - kw) / sw + 1;
+    if ho <= 0 || wo <= 0 {
+        return Err(Error::runtime("POOLMAX2D: bad output size"));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let xf = flat(&x);
+    let mut out = vec![f64::NEG_INFINITY; ho * wo * c];
+    for oy in 0..ho {
+        for ox in 0..wo {
+            for ch in 0..c {
+                let mut best = f64::NEG_INFINITY;
+                for ky in 0..kh as usize {
+                    let iy = oy as i64 * sh + ky as i64 - ph;
+                    if iy < 0 || iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw as usize {
+                        let ix = ox as i64 * sw + kx as i64 - pw;
+                        if ix < 0 || ix >= w as i64 {
+                            continue;
+                        }
+                        let v = xf[((iy as usize) * w + ix as usize) * c + ch];
+                        if v > best {
+                            best = v;
+                        }
+                    }
+                }
+                out[(oy * wo + ox) * c + ch] = best;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[ho, wo, c], out)?)])
+}
+
+pub fn op_poolavg2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let x = arg_f64_array(args, 0, "POOLAVG2D")?;
+    let kh = arg_i64(args, 1, "POOLAVG2D", "kh")?;
+    let kw = arg_i64(args, 2, "POOLAVG2D", "kw")?;
+    let sh = arg_i64(args, 3, "POOLAVG2D", "sh")?;
+    let sw = arg_i64(args, 4, "POOLAVG2D", "sw")?;
+    let ph = arg_i64(args, 5, "POOLAVG2D", "ph")?;
+    let pw = arg_i64(args, 6, "POOLAVG2D", "pw")?;
+    if kh <= 0 || kw <= 0 || sh <= 0 || sw <= 0 || ph < 0 || pw < 0 {
+        return Err(Error::runtime(
+            "POOLAVG2D: kernel/stride must be > 0, pad >= 0",
+        ));
+    }
+    let shp = x.shape();
+    if shp.len() != 3 {
+        return Err(Error::runtime(format!(
+            "POOLAVG2D: expected HWC, got {:?}",
+            shp
+        )));
+    }
+    let (h, w, c) = (shp[0], shp[1], shp[2]);
+    let ho = (h as i64 + 2 * ph - kh) / sh + 1;
+    let wo = (w as i64 + 2 * pw - kw) / sw + 1;
+    if ho <= 0 || wo <= 0 {
+        return Err(Error::runtime("POOLAVG2D: bad output size"));
+    }
+    let (ho, wo) = (ho as usize, wo as usize);
+    let xf = flat(&x);
+    let denom = (kh * kw) as f64;
+    let mut out = vec![0f64; ho * wo * c];
+    for oy in 0..ho {
+        for ox in 0..wo {
+            for ch in 0..c {
+                let mut tot = 0f64;
+                for ky in 0..kh as usize {
+                    let iy = oy as i64 * sh + ky as i64 - ph;
+                    if iy < 0 || iy >= h as i64 {
+                        continue;
+                    }
+                    for kx in 0..kw as usize {
+                        let ix = ox as i64 * sw + kx as i64 - pw;
+                        if ix < 0 || ix >= w as i64 {
+                            continue;
+                        }
+                        tot += xf[((iy as usize) * w + ix as usize) * c + ch];
+                    }
+                }
+                out[(oy * wo + ox) * c + ch] = tot / denom;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[ho, wo, c], out)?)])
+}
+
 pub fn op_prelu(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let t = arg_triple(args, 0, "PRELU")?;
     let slope = arg_triple(args, 1, "PRELU")?;

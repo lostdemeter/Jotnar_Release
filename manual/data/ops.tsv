@@ -5,6 +5,8 @@ SPLAT_BLUR	1	2	T:HW -> T:HW, T:HW	image	Structure-tensor splat blur; returns ima
 SUB	2	1	$A, $A -> $A	image	Elementwise subtraction.
 BETA_V5	2	1	T:HW, T:HW -> T:HW	image	Beta field v5 from depth and coherence.
 MUL	2	1	$A, $A -> $A	image	Elementwise multiplication.
+MULC	2	1	*, * -> *	image	Broadcast multiply: per-channel (C) or spatial (H,1,C)/(1,W,C)/(H,W,C) operand.
+ADDC	2	1	*, * -> *	image	Broadcast add: per-channel (C) or spatial (H,1,C)/(1,W,C)/(H,W,C) operand.
 ADD	2	1	$A, $A -> $A	image	Elementwise addition.
 SQUARE	1	1	$A -> $A	image	Elementwise square.
 GAIN	3	1	F:HWC, F:HW, T:HW -> F:HWC	image	Apply a coherence-gated color gain.
@@ -77,6 +79,8 @@ GATHER3	3	1	*, I:*, I:* -> *	move	Gather from a 3D table by i/j index vectors.
 SCATTER	3	1	$A, $A, I:* -> $A	move	Scatter values into a copy at the given indices.
 PRELU	2	1	$A, $A -> $A	move	PReLU with a scalar or per-channel slope.
 POOLAVG	1	1	* -> *	move	Global average pool over H,W; returns (C).
+POOLMAX2D	7	1	*, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR -> *	image	HWC max pool: kh,kw,sh,sw,ph,pw.
+POOLAVG2D	7	1	*, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR, F:SCALAR -> *	image	HWC average pool: kh,kw,sh,sw,ph,pw (count includes pad).
 DECONV	4	1	*, *, F:SCALAR, F:SCALAR -> *	move	Transposed convolution with stride and padding.
 INTERP	3	1	*, F:SCALAR, F:SCALAR -> *	move	Bilinear resize by dyadic scales.
 CONV	2	1	*, * -> *	move	2D convolution with an explicit kernel.

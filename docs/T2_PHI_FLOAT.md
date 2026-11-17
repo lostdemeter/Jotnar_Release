@@ -151,7 +151,7 @@ reference.
 `phi_core::t2` is the integer reference. The interpreter routes any
 T2 stream to `src/ops/t2.rs`, which calls it; an op without a T2
 reference fails loud (never silently drops the mantissa). Supported:
-`MUL`, `SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`,
+`MUL`, `SQUARE`, `ADD`, `SUB`, `MATMUL`, `LAYERNORM`, `GELU`, `SILU`,
 `SOFTMAX`, `SOFTMAX_WIDE`, `TRANSPOSE`, `CONCAT`, `CONV2D`, `DECONV2D`,
 `RESIZE2D`, `RELU`, `SLICE`, `RESHAPE2`, `RESHAPE3`.
 
@@ -159,7 +159,7 @@ reference fails loud (never silently drops the mantissa). Supported:
   fixed round-trip, MATMUL vs f64.
 - `tests/nonfpu_t2.rs`: emitted integer C vs the interpreter,
   **bit-identical on all four planes**, for MUL, ADD, SUB, MATMUL,
-  LAYERNORM, GELU, SOFTMAX; the source passes the NonFpu float trap.
+  LAYERNORM, GELU, SILU, SOFTMAX; the source passes the NonFpu float trap.
 - The DAV2 application gates layer 0 with `CONFIG t2 24`, stage-wise
   against the float oracle.
 

@@ -119,6 +119,8 @@ fn build_registry() -> Registry {
         Some(op_beta_v5),
     );
     add("MUL", 2, 1, sig(&["$A", "$A"], &["$A"]), Some(op_mul));
+    add("MULC", 2, 1, sig(&["*", "*"], &["*"]), Some(op_mulc));
+    add("ADDC", 2, 1, sig(&["*", "*"], &["*"]), Some(op_addc));
     add("ADD", 2, 1, sig(&["$A", "$A"], &["$A"]), Some(op_add));
     add("SQUARE", 1, 1, sig(&["$A"], &["$A"]), Some(op_square));
     add(
@@ -444,6 +446,26 @@ fn build_registry() -> Registry {
     );
     add("PRELU", 2, 1, sig(&["$A", "$A"], &["$A"]), Some(op_prelu));
     add("POOLAVG", 1, 1, sig(&["*"], &["*"]), Some(op_poolavg));
+    add(
+        "POOLMAX2D",
+        7,
+        1,
+        sig(
+            &["*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR"],
+            &["*"],
+        ),
+        Some(op_poolmax2d),
+    );
+    add(
+        "POOLAVG2D",
+        7,
+        1,
+        sig(
+            &["*", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR", "F:SCALAR"],
+            &["*"],
+        ),
+        Some(op_poolavg2d),
+    );
     add(
         "DECONV",
         4,
