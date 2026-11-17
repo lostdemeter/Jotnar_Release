@@ -69,7 +69,8 @@ must agree on action, command, and state.
 
 # QEMU: interactive console, or the automated gates
 ./crates/jotnar-node/test/run_qemu.sh
-./crates/jotnar-node/test/qemu_smoke.py --m8 --m11
+./crates/jotnar-node/test/qemu_smoke.py --ssh-key ~/.ssh/id_ed25519 --m8
+./crates/jotnar-node/test/qemu_smoke.py --m11
 ./crates/jotnar-node/test/qemu_jobs.sh
 
 # Host scheduler gate (two local nodes)
@@ -106,10 +107,20 @@ parity steps including `job-policy`), and the N2a job gate. The N4 distributed
 IMATMUL benchmark ran 64 jobs across two QEMU nodes at 12.94 jobs/s with
 identical outputs; duplicate replay and mid-batch node-loss retries pass.
 
-The upstream integration branch has re-run the workspace tests and host gates
-(`n5_job_capability.sh`, `sched_two_nodes.sh`). The image/QEMU/physical gates
-are reproducible from this repository but should be re-run before citing a new
-image hash. See [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
+The integration branch was QEMU-gated on 2026-11-17 at runtime
+`0.1.0+a3bab886588b`:
+
+- M8: all 8 modules emitted, whole-system interpreted/emitted parity PASS;
+- M11 standalone: 96 randomized parity steps PASS;
+- N1/N2a jobs gate: async submit, timeout, cancel, 200-job batch, and a
+  67,280,000-byte / 65-chunk verified result PASS;
+- N4: 64 `IMATMUL` jobs across two QEMU nodes, balanced 32/32, identical
+  outputs, 17.17 jobs/s.
+
+The workspace tests and host gates (`n5_job_capability.sh`,
+`sched_two_nodes.sh`) also pass. The ported image has not been flashed to the
+physical USB node; the physical evidence below is still from the frozen image.
+See [`CLAIM_BOUNDARY.md`](CLAIM_BOUNDARY.md).
 
 ## What this is not
 

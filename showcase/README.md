@@ -197,7 +197,8 @@ remains the substrate, so this is Claim A, not a Jotnar-native kernel.
 
 ```sh
 ./crates/jotnar-node/image/build-node-image.sh
-./crates/jotnar-node/test/qemu_smoke.py --m8 --m11
+./crates/jotnar-node/test/qemu_smoke.py --ssh-key ~/.ssh/id_ed25519 --m8
+./crates/jotnar-node/test/qemu_smoke.py --m11
 ./crates/jotnar-node/test/sched_two_nodes.sh
 ```
 

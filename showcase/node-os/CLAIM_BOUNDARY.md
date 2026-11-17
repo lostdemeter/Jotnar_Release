@@ -47,12 +47,26 @@ cargo test -p jotnar-node-tools
 ./crates/jotnar-node/test/sched_two_nodes.sh
 ```
 
-QEMU and physical gates are reproducible but require the build/QEMU host and a
-USB target:
+QEMU gates also passed on the integration branch at runtime
+`0.1.0+a3bab886588b`:
 
 ```sh
-./crates/jotnar-node/test/qemu_smoke.py --m8 --m11
+./crates/jotnar-node/test/qemu_smoke.py --ssh-key ~/.ssh/id_ed25519 --m8
+./crates/jotnar-node/test/qemu_smoke.py --m11
 ./crates/jotnar-node/test/qemu_jobs.sh
+# two QEMU nodes, then:
+ADDR_A=<host>:9998 ADDR_B=<host>:9999 COUNT=64 ./crates/jotnar-node/test/n4_imatmul.sh
+```
+
+Results: all 8 modules emitted with M8 parity; 96 M11 parity steps; N1/N2a
+async submit/timeout/cancel, 200-job batch, and a 67,280,000-byte / 65-chunk
+verified result; N4 64-job `IMATMUL` across two nodes with balanced 32/32
+placement and identical outputs.
+
+The physical gate still refers to the frozen USB image. The ported image has
+not been flashed to the physical node:
+
+```sh
 ADDR=<node>:9999 ./crates/jotnar-node/test/physical_jobs.sh
 ```
 

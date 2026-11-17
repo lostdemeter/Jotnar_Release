@@ -158,7 +158,8 @@ jotnar-osd --events 10,11,12          # stateful sequence
 ```sh
 ./crates/jotnar-node/image/build-node-image.sh
 ./crates/jotnar-node/test/run_qemu.sh
-./crates/jotnar-node/test/qemu_smoke.py --m8 --m11
+./crates/jotnar-node/test/qemu_smoke.py --ssh-key ~/.ssh/id_ed25519 --m8
+./crates/jotnar-node/test/qemu_smoke.py --m11
 ./crates/jotnar-node/test/qemu_jobs.sh
 ./crates/jotnar-node/test/sched_two_nodes.sh
 ADDR=192.168.1.116:9999 ./crates/jotnar-node/test/physical_jobs.sh
