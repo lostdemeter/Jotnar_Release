@@ -9,7 +9,7 @@ Usage:
   PHI_CORE_DIR=... JOTNAR_PY=... python3 scripts/parity_cuda.py \
       --bin target/release/jotnar [--skip-widths]
 """
-import argparse, json, os, subprocess, sys, tempfile
+import argparse, json, os, shutil, subprocess, sys, tempfile
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -121,9 +121,16 @@ def main():
     ap.add_argument("--skip-widths", action="store_true")
     args = ap.parse_args()
     binary = os.path.abspath(args.bin)
-    if subprocess.run(["which", "nvcc"], capture_output=True).returncode:
-        print("SKIP (no nvcc)")
-        return 0
+    nvcc = os.environ.get("NVCC", "nvcc")
+    nvcc_ok = (
+        os.path.isfile(nvcc) and os.access(nvcc, os.X_OK)
+        if os.path.isabs(nvcc)
+        else shutil.which(nvcc) is not None
+    )
+    if not nvcc_ok:
+        sys.exit(
+            "missing nvcc: CUDA parity was not run; install CUDA or set NVCC"
+        )
     rng = np.random.default_rng(7)
     dd = os.path.join(JOTNAR_PY, "data")
     sdir = os.path.join(JOTNAR_PY, "programs")

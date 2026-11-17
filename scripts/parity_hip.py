@@ -20,6 +20,7 @@ import array
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -437,9 +438,16 @@ def main():
     binary = os.path.abspath(args.bin)
     if not os.path.isfile(binary):
         sys.exit(f"missing binary: {binary}")
-    if subprocess.run(["which", "hipcc"], capture_output=True).returncode:
-        print("SKIP (no hipcc)")
-        return 0
+    hipcc = os.environ.get("HIPCC", "hipcc")
+    hipcc_ok = (
+        os.path.isfile(hipcc) and os.access(hipcc, os.X_OK)
+        if os.path.isabs(hipcc)
+        else shutil.which(hipcc) is not None
+    )
+    if not hipcc_ok:
+        sys.exit(
+            "missing hipcc: HIP parity was not run; install ROCm or set HIPCC"
+        )
     names = args.case or list(CASES)
     failed = []
     for name in names:
