@@ -120,9 +120,18 @@ emitter does not yet.
 ### Rules added, arena kernels not yet
 
 `LUMA`, `PERMUTE3`, `DECONV`, `POOLAVG`, `GAIN`, `STATIC` now have
-`infer_shapes` rules. They are still not arena kernels: `PERMUTE3`, `DECONV`,
-and `POOLAVG` are T-only, `STATIC` returns Bool, and `GAIN` returns F32. `LUMA`
-is the only F-to-F candidate left.
+`infer_shapes` rules, so shape inference no longer blocks them. None is an
+arena kernel yet:
+
+- `LUMA` — F→F; the only clean candidate. Do **not** port it speculatively:
+  the trigger is a real listing (or a hit-rate report) that falls back because
+  of it.
+- `STATIC` — F→Bool; needs a Bool output representation.
+- `GAIN` — consumes T and returns F32; needs both T and F32.
+- `PERMUTE3`, `DECONV`, `POOLAVG` — T-only.
+
+T/T2 remains excluded for the measured reasons below; adding any of these four
+T consumers is a T-arena decision, not a kernel task.
 
 ### Excluded by design
 
@@ -146,6 +155,9 @@ bit-exactness. Not worth it.
 
 - **Arena covers I and F only.** Words are raw 64-bit patterns; F kernels use
   `f64::from_bits`/`to_bits`. No `unsafe`, no second buffer.
+- **No speculative arena kinds.** A kernel for an unused op is not progress.
+  `LUMA` waits for a real fallback; `STATIC` needs Bool; the T consumers need a
+  new T-arena decision. The inference rules are enough groundwork for now.
 - **Fallback only on plan failure.** A runtime error is surfaced, so the arena
   cannot hide a divergence.
 - **The arena never widens the language.** If a kind has no interpreter path,
@@ -195,7 +207,8 @@ bit-exactness. Not worth it.
 
 1. **Arena default stays off** — pending a hit-rate report from the runtime app.
 2. **Six rule-enabled ops have no arena kernel** — see "Rules added, arena
-   kernels not yet"; only `LUMA` is F-to-F.
+   kernels not yet". None is worth speculative work: `LUMA` needs a defined
+   need, `STATIC` needs Bool, and the other four need T.
 3. **`jotnar-bench` still compiles its one-shot reference plan** — `jotnar-det`
    now uses `WarmRunner`, but the bench reference path does not.
 
