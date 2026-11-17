@@ -238,11 +238,12 @@ The front door is deliberately short. The actual parts are here:
 4 non-FPU image ops (POOLMAX2D, POOLAVG2D, MULC, ADDC) + T2 SILU
 32/32 emitter cases
 26/26 Rust parity (scripts/parity_rust.py)
+HIP 32/32 cases (C vs HIP) scripts/parity_hip.py
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-383/383 workspace tests
+386/386 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 
