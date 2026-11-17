@@ -7,9 +7,9 @@ of instructions that mutates a machine. You name typed streams, connect them
 into a graph, and ask a machine to realize that graph.
 
 The same graph can run in the reference interpreter, lower to portable C99,
-lower to integer-only C, lower to CUDA, lower to HIP (CUDA-equivalent opcode
-set), emit Rust (F/I subset, T refused), become structural Verilog, or drive an
-RV32IM machine.
+lower to integer-only C, lower to CUDA, lower to HIP (51-op CUDA slice from the
+`d98dfe2` base), emit Rust (F/I subset, T refused), become structural Verilog,
+or drive an RV32IM machine.
 
 That sounds like portability. The deeper idea is **trust**. A program is a
 claim. The machine is a witness. The result is not “it compiled” — it is a
@@ -243,7 +243,7 @@ Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-386/386 workspace tests
+388/388 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 

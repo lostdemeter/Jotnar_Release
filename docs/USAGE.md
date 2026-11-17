@@ -42,8 +42,9 @@ The CUDA build finds the toolkit relative to `nvcc`; set `NVCC` if it is not
 on `PATH`.
 The HIP build uses `hipcc` on `PATH` (falling back to `/opt/rocm/bin/hipcc`);
 set `HIPCC` to override and `HIP_ARCH` (for example `gfx1100`) to pin the
-offload target. The HIP target is a correctness-first port of the CUDA opcode
-set; see `docs/ROCM_FEASIBILITY.md` in the node checkout for the spike report.
+offload target. The HIP target is a correctness-first port of the 51-mnemonic
+CUDA slice as of `d98dfe2`; current CUDA has 65 mnemonics. See
+`docs/ROCM_FEASIBILITY.md` for the spike report and the 14-op gap list.
 
 ## Status and evidence
 
@@ -62,7 +63,8 @@ What works today:
   Rust (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT
   over F/I; LAYERNORM eps comes from CONFIG eps_ln);
   T refused, DECONV/INTERP/GATHER fail loud until the next slice). HIP ports
-  the CUDA opcode set only; it is not the full mnemonic surface.
+  the 51-mnemonic CUDA slice as of `d98dfe2`; current CUDA has 65, and neither
+  is the full 105-mnemonic surface.
 - Differential parity:
 
 ```text
@@ -75,8 +77,11 @@ HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness o
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          386/386
+workspace tests          388/388
 ```
+
+The GPU parity gates fail if `nvcc`/`hipcc` is unavailable. Set `NVCC`/`HIPCC`
+or install the toolchain; a missing toolchain is not a pass.
 
 Float `F` paths can differ from numpy in the last ulp on some platforms
 (different SIMD reduction order); triples and integer paths are compared
@@ -341,7 +346,7 @@ src/
     c.rs        C99 patterns
     nonfpu.rs   integer-only patterns + baked tables + float trap
     cuda.rs     CUDA kernels and driver
-    hip.rs      HIP kernels and driver (CUDA-equivalent opcode set)
+    hip.rs      HIP kernels and driver (51-op CUDA slice from d98dfe2)
   rv32.rs       RV32IM machine + DOOM MMIO/checkpointing
   protocol.rs   in-process node protocol + frame codec
   showcase/     demos: language, image, Futhark, protocol, analog, DOOM
