@@ -147,7 +147,8 @@ pub fn decode_stream(spec: &StreamSpec, payload: &[u8]) -> Result<Value> {
 
 #[derive(Clone, Debug)]
 struct Program {
-    bound: crate::ir::BoundProgram,
+    /// Shared with snapshots, so submitting a job does not copy the binding.
+    bound: Arc<crate::ir::BoundProgram>,
     /// Canonical hash of the listing bytes as published.
     hash: u64,
 }
@@ -156,7 +157,8 @@ struct Program {
 struct Stored {
     /// What the node checked when the blob was written.
     admission: Admission,
-    payload: Vec<u8>,
+    /// Shared with snapshots, so submitting a job does not copy the bytes.
+    payload: Arc<Vec<u8>>,
 }
 
 impl Stored {
@@ -210,6 +212,38 @@ impl Node {
         self
     }
 
+    /// Snapshot the registries for one job.
+    ///
+    /// Programs and blob payloads live behind `Arc`, so this copies keys and
+    /// shares the immutable bodies. Execution state is fresh: a job gets its
+    /// own boundary arena, stream arena, and plan cache, while later
+    /// `program`/`store`/`drop` updates cannot change what the job sees.
+    pub fn snapshot(&self) -> Node {
+        Node {
+            allowed: self.allowed.clone(),
+            token: self.token.clone(),
+            programs: self.programs.clone(),
+            stores: self.stores.clone(),
+            arena: JobArena::new(),
+            stream_arena: crate::stream_arena::StreamArena::new(),
+            plans: HashMap::new(),
+        }
+    }
+
+    /// Check a request header against the configured shared token.
+    ///
+    /// Empty or whitespace-only tokens are treated as misconfiguration and
+    /// never authorize a request, even if the caller sends no `auth` header.
+    pub fn authorize(&self, header: &Json) -> bool {
+        match &self.token {
+            None => true,
+            Some(want) => {
+                let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
+                !want.trim().is_empty() && got == want.as_str()
+            }
+        }
+    }
+
     fn err_into(out: &mut Vec<u8>, id: &Json, code: &str, msg: impl Into<String>) {
         let h = json!({"v": PROTO_V, "id": id, "type": "error", "ok": false,
                        "error": {"code": code, "msg": msg.into()}});
@@ -243,12 +277,9 @@ impl Node {
         };
         let zero = json!(0);
         let id = header.get("id").unwrap_or(&zero);
-        if let Some(want) = &self.token {
-            let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
-            if want.trim().is_empty() || got != want.as_str() {
-                Self::err_into(out, id, "unauthorized", "bad or missing auth token");
-                return;
-            }
+        if !self.authorize(&header) {
+            Self::err_into(out, id, "unauthorized", "bad or missing auth token");
+            return;
         }
         let typ = header.get("type").and_then(|x| x.as_str()).unwrap_or("");
         let result = match typ {
@@ -325,8 +356,13 @@ impl Node {
         let bound = asm::assemble(listing, &asm::AsmOptions::new("."))
             .map_err(|e| (e.to_string(), "npattern"))?;
         let hash = hash_bytes(listing.as_bytes());
-        self.programs
-            .insert(name.to_string(), Program { bound, hash });
+        self.programs.insert(
+            name.to_string(),
+            Program {
+                bound: Arc::new(bound),
+                hash,
+            },
+        );
         Self::ok_into(
             out,
             id,
@@ -364,7 +400,7 @@ impl Node {
             name.to_string(),
             Stored {
                 admission,
-                payload: bytes,
+                payload: Arc::new(bytes),
             },
         );
         Self::ok_into(

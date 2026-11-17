@@ -1,7 +1,9 @@
 //! The reference interpreter: execute a bound program over typed streams.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::asm::{self, AsmOptions};
@@ -40,6 +42,52 @@ impl Default for ExecOptions {
 /// Bump when the mapping from shape+threads to work blocks changes, so
 /// receipts from different schedules can be told apart.
 pub const SCHED_VERSION: u64 = 1;
+
+thread_local! {
+    /// Cooperative cancellation token for the current worker thread. The job
+    /// server installs one per running job; the interpreter and arena runner
+    /// check it between instructions and between `REPEAT` iterations.
+    static CANCEL_FLAG: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// RAII guard that installs a cooperative cancellation flag on the current
+/// thread for the lifetime of the guard.
+///
+/// Cancellation is *cooperative*: a long single operation (one large
+/// `MATMUL`, for example) runs to completion before the next check. The job
+/// server documents this as bounded, non-preemptive cancellation.
+pub struct CancelGuard {
+    previous: Option<Arc<AtomicBool>>,
+}
+
+impl CancelGuard {
+    pub fn install(flag: Arc<AtomicBool>) -> Self {
+        let previous = CANCEL_FLAG.with(|slot| slot.borrow_mut().replace(flag));
+        CancelGuard { previous }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CANCEL_FLAG.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+#[inline]
+pub(crate) fn check_cancel() -> Result<()> {
+    let canceled = CANCEL_FLAG.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    });
+    if canceled {
+        Err(Error::runtime("job canceled"))
+    } else {
+        Ok(())
+    }
+}
 
 /// How a caller at the job-server/CLI boundary chooses a thread budget.
 ///
@@ -296,6 +344,7 @@ fn run_impl(
     mut profile: Option<&mut Profile>,
 ) -> Result<Feeds> {
     let threads = opts.threads.max(1);
+    check_cancel()?;
     if profile.is_none() && threads == 1 && crate::stream_arena::enabled() {
         match run_arena(bound, payload) {
             Some(r) => {
@@ -325,6 +374,7 @@ fn run_impl(
     let mut loop_stack: Vec<(usize, usize, i64)> = Vec::new();
 
     while i < prog.len() {
+        check_cancel()?;
         let ins = &prog[i];
         if ins.is_repeat() {
             let nv = &ins.args[0];
@@ -525,6 +575,7 @@ pub fn repeat(
     let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
 
     for it in 0..n {
+        check_cancel()?;
         let mut feeds = Feeds::new();
         for name in &in_names {
             if bound.state.contains(name) {
@@ -576,4 +627,35 @@ pub fn repeat(
     }
     let last = histories.last().cloned().unwrap_or_default();
     Ok((histories, last))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asm::AsmOptions;
+    use crate::value::Value;
+    use ndarray::{ArrayD, IxDyn};
+
+    fn scalar(v: i64) -> Value {
+        Value::I64(ArrayD::from_elem(IxDyn(&[1]), v))
+    }
+
+    #[test]
+    fn cooperative_cancel_interrupts_repeat() {
+        let listing = "IN X\nIN N\nREPEAT N\nOUT = IADD(X, 1)\nEND\n";
+        let bound = crate::asm::assemble(listing, &AsmOptions::new(".")).unwrap();
+        let mut feeds = Feeds::new();
+        feeds.insert("X".to_string(), scalar(0));
+        feeds.insert("N".to_string(), scalar(2_000_000_000));
+        let flag = Arc::new(AtomicBool::new(false));
+        let setter = flag.clone();
+        let worker = std::thread::spawn(move || {
+            let _guard = CancelGuard::install(flag);
+            run(&bound, &feeds)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        setter.store(true, Ordering::SeqCst);
+        let err = worker.join().unwrap().unwrap_err();
+        assert!(err.to_string().contains("canceled"), "{err}");
+    }
 }

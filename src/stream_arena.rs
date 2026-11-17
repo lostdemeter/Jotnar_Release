@@ -2138,6 +2138,7 @@ impl Plan {
 
         let cfg = &self.config;
         for step in &self.steps {
+            crate::runtime::check_cancel()?;
             let (head, tail) = arena.words_mut().split_at_mut(step.dst);
             let head: &[i64] = head;
             let out = &mut tail[..step.dst_len];
