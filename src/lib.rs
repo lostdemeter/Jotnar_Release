@@ -28,6 +28,7 @@ pub mod builder;
 pub mod codegen;
 pub mod error;
 pub mod flat;
+pub mod fusion;
 pub mod ir;
 pub mod lattice;
 pub mod layout;

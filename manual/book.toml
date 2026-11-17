@@ -33,7 +33,7 @@ chapters = [
 id = "instruction-set"
 number = "II"
 title = "THE INSTRUCTION SET"
-deck = "Eighty-six mnemonics, five families, one fail-loud registry. Exact in the middle, float at the edge."
+deck = "One hundred and one mnemonics, five families, one fail-loud registry. Exact in the middle, float at the edge."
 theme = "dark"
 chapters = [
   "content/07-integers.md",

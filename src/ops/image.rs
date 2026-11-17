@@ -339,6 +339,14 @@ pub fn op_conv2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::F64(from_flat(&[ho, wo, cout], out)?)])
 }
 
+pub fn op_conv2d_relu(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
+    let mut out = op_conv2d(args, config)?;
+    if let Some(Value::F64(a)) = out.first_mut() {
+        *a = a.mapv(|v| v.max(0.0));
+    }
+    Ok(out)
+}
+
 pub fn op_deconv2d(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let x = arg_f64_array(args, 0, "DECONV2D")?;
     let w = arg_f64_array(args, 1, "DECONV2D")?;

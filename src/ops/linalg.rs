@@ -8,7 +8,7 @@ use crate::lattice::{self, BIAS, NLVL, PHI};
 use crate::value::{Arg, Triple, Value};
 
 use super::element::{binop_fixed, sigmoid_trip, tmul};
-use super::{arg_f64_array, arg_i64, arg_i64_array, arg_triple, scales};
+use super::{arg_f64, arg_f64_array, arg_i64, arg_i64_array, arg_triple, scales};
 
 fn flat<T: Copy>(a: &ArrayD<T>) -> Vec<T> {
     a.iter().copied().collect()
@@ -247,6 +247,94 @@ pub fn op_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
 
 pub fn op_batch_matmul(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     op_matmul_any(args, config, "BATCH_MATMUL")
+}
+
+/// `C = A @ B + bias + residual`, all rank-2 float data.
+pub fn op_matmul_bias_residual(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let a = arg_f64_array(args, 0, "MATMUL_BIAS_RESIDUAL")?;
+    let b = arg_f64_array(args, 1, "MATMUL_BIAS_RESIDUAL")?;
+    let bias = arg_f64_array(args, 2, "MATMUL_BIAS_RESIDUAL")?;
+    let residual = arg_f64_array(args, 3, "MATMUL_BIAS_RESIDUAL")?;
+    let c = matmul_f64(&a, &b, "MATMUL_BIAS_RESIDUAL")?;
+    if residual.shape() != c.shape() {
+        return Err(Error::runtime(format!(
+            "MATMUL_BIAS_RESIDUAL: residual shape {:?} != output {:?}",
+            residual.shape(),
+            c.shape()
+        )));
+    }
+    let n = c.shape()[1];
+    if bias.len() != n {
+        return Err(Error::runtime(format!(
+            "MATMUL_BIAS_RESIDUAL: bias length {} != output width {n}",
+            bias.len()
+        )));
+    }
+    let bc = bias.broadcast(c.raw_dim()).ok_or_else(|| {
+        Error::runtime("MATMUL_BIAS_RESIDUAL: bias is not broadcastable")
+    })?;
+    Ok(vec![Value::F64(&(&c + &bc) + &residual)])
+}
+
+/// `C = GELU(A @ B + bias)`.
+pub fn op_matmul_bias_gelu(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let a = arg_f64_array(args, 0, "MATMUL_BIAS_GELU")?;
+    let b = arg_f64_array(args, 1, "MATMUL_BIAS_GELU")?;
+    let bias = arg_f64_array(args, 2, "MATMUL_BIAS_GELU")?;
+    let c = matmul_f64(&a, &b, "MATMUL_BIAS_GELU")?;
+    let n = c.shape()[1];
+    if bias.len() != n {
+        return Err(Error::runtime(format!(
+            "MATMUL_BIAS_GELU: bias length {} != output width {n}",
+            bias.len()
+        )));
+    }
+    let bc = bias.broadcast(c.raw_dim()).ok_or_else(|| {
+        Error::runtime("MATMUL_BIAS_GELU: bias is not broadcastable")
+    })?;
+    let v = &c + &bc;
+    Ok(vec![Value::F64(v.mapv(gelu_approx_f64))])
+}
+
+/// `C = A @ B^T` for two rank-2 float matrices.
+pub fn op_matmul_t(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let a = arg_f64_array(args, 0, "MATMUL_T")?;
+    let b = arg_f64_array(args, 1, "MATMUL_T")?;
+    if a.ndim() != 2 || b.ndim() != 2 {
+        return Err(Error::runtime(format!(
+            "MATMUL_T: need rank-2 A/B, got {:?}/{:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    if a.shape()[1] != b.shape()[1] {
+        return Err(Error::runtime(format!(
+            "MATMUL_T: inner dims {:?} vs {:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    let bt = b.t().to_owned();
+    Ok(vec![Value::F64(matmul_f64(&a, &bt, "MATMUL_T")?)])
+}
+
+/// `C = A @ B + bias`, with a per-column bias on the output.
+pub fn op_matmul_bias(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let a = arg_f64_array(args, 0, "MATMUL_BIAS")?;
+    let b = arg_f64_array(args, 1, "MATMUL_BIAS")?;
+    let bias = arg_f64_array(args, 2, "MATMUL_BIAS")?;
+    let c = matmul_f64(&a, &b, "MATMUL_BIAS")?;
+    let n = c.shape()[1];
+    if bias.len() != n {
+        return Err(Error::runtime(format!(
+            "MATMUL_BIAS: bias length {} != output width {n}",
+            bias.len()
+        )));
+    }
+    let bc = bias.broadcast(c.raw_dim()).ok_or_else(|| {
+        Error::runtime("MATMUL_BIAS: bias is not broadcastable to output")
+    })?;
+    Ok(vec![Value::F64(&c + &bc)])
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,6 +1609,231 @@ pub fn op_attn(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     Ok(vec![Value::F64(from_flat(&[rows, nh * dh], out)?)])
 }
 
+pub fn op_self_attn(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let q = arg_f64_array(args, 0, "SELF_ATTN")?;
+    let k = arg_f64_array(args, 1, "SELF_ATTN")?;
+    let v = arg_f64_array(args, 2, "SELF_ATTN")?;
+    let nh = arg_i64(args, 3, "SELF_ATTN", "nh")?;
+    let dh = arg_i64(args, 4, "SELF_ATTN", "dh")?;
+    let scale = arg_f64(args, 5, "SELF_ATTN", "scale")?;
+    if nh <= 0 || dh <= 0 || !scale.is_finite() {
+        return Err(Error::runtime("SELF_ATTN: bad nh/dh/scale"));
+    }
+    let (nh, dh) = (nh as usize, dh as usize);
+    let qsh = q.shape();
+    if qsh.len() != 2 || k.shape() != qsh || v.shape() != qsh {
+        return Err(Error::runtime(format!(
+            "SELF_ATTN: need equal 2D Q/K/V, got {:?}/{:?}/{:?}",
+            qsh,
+            k.shape(),
+            v.shape()
+        )));
+    }
+    let (n, h) = (qsh[0], qsh[1]);
+    if h != nh * dh {
+        return Err(Error::runtime(format!(
+            "SELF_ATTN: width {h} != nh*dh {}",
+            nh * dh
+        )));
+    }
+    let qf = flat(&q);
+    let kf = flat(&k);
+    let vf = flat(&v);
+    let mut out = vec![0f64; n * h];
+    let mut scores = vec![0f64; n];
+    for head in 0..nh {
+        let hb = head * dh;
+        for i in 0..n {
+            let mut mx = f64::NEG_INFINITY;
+            for j in 0..n {
+                let mut acc = 0.0;
+                for d in 0..dh {
+                    acc += qf[i * h + hb + d] * kf[j * h + hb + d];
+                }
+                let s = acc * scale;
+                scores[j] = s;
+                if s > mx {
+                    mx = s;
+                }
+            }
+            let mut se = 0.0;
+            for s in scores.iter_mut() {
+                *s = (*s - mx).exp();
+                se += *s;
+            }
+            for d in 0..dh {
+                let mut acc = 0.0;
+                for j in 0..n {
+                    acc += (scores[j] / se) * vf[j * h + hb + d];
+                }
+                out[i * h + hb + d] = acc;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[n, h], out)?)])
+}
+
+fn gelu_approx_f64(x: f64) -> f64 {
+    let s = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * ax);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736)
+            * t
+            + 0.254829592)
+            * t
+            * (-ax * ax).exp();
+    s * y
+}
+
+fn softplus_f64(x: f64) -> f64 {
+    if x > 20.0 {
+        x
+    } else {
+        x.exp().ln_1p()
+    }
+}
+
+/// LINEAR_ATTN(Q,K,V, W1,B1,W2,B2, LNQ_W,LNQ_B,LNK_W,LNK_B,TEMP, NH, DH)
+///
+/// Per-head normalized-key linear attention with a shared positive feature
+/// MLP. Reference implementation for parity with the CUDA target.
+pub fn op_linear_attn(args: &[Arg], _config: &Config) -> Result<Vec<Value>> {
+    let q = arg_f64_array(args, 0, "LINEAR_ATTN")?;
+    let k = arg_f64_array(args, 1, "LINEAR_ATTN")?;
+    let v = arg_f64_array(args, 2, "LINEAR_ATTN")?;
+    let w1 = arg_f64_array(args, 3, "LINEAR_ATTN")?;
+    let b1 = arg_f64_array(args, 4, "LINEAR_ATTN")?;
+    let w2 = arg_f64_array(args, 5, "LINEAR_ATTN")?;
+    let b2 = arg_f64_array(args, 6, "LINEAR_ATTN")?;
+    let lnq_w = arg_f64_array(args, 7, "LINEAR_ATTN")?;
+    let lnq_b = arg_f64_array(args, 8, "LINEAR_ATTN")?;
+    let lnk_w = arg_f64_array(args, 9, "LINEAR_ATTN")?;
+    let lnk_b = arg_f64_array(args, 10, "LINEAR_ATTN")?;
+    let temp = arg_f64_array(args, 11, "LINEAR_ATTN")?;
+    let nh = arg_i64(args, 12, "LINEAR_ATTN", "nh")?;
+    let dh = arg_i64(args, 13, "LINEAR_ATTN", "dh")?;
+    if nh <= 0 || dh <= 0 {
+        return Err(Error::runtime("LINEAR_ATTN: bad nh/dh"));
+    }
+    let (nh, dh) = (nh as usize, dh as usize);
+    let qsh = q.shape();
+    if qsh.len() != 2 || k.shape() != qsh || v.shape() != qsh {
+        return Err(Error::runtime("LINEAR_ATTN: need equal 2D Q/K/V"));
+    }
+    let (n, h) = (qsh[0], qsh[1]);
+    if h != nh * dh {
+        return Err(Error::runtime(format!(
+            "LINEAR_ATTN: width {h} != nh*dh {}",
+            nh * dh
+        )));
+    }
+    if w1.shape().len() != 2 || w1.shape()[0] != dh {
+        return Err(Error::runtime("LINEAR_ATTN: W1 must be (dh,hid)"));
+    }
+    let hid = w1.shape()[1];
+    if w2.shape().len() != 2 || w2.shape()[0] != hid {
+        return Err(Error::runtime("LINEAR_ATTN: W2 must be (hid,m)"));
+    }
+    let m = w2.shape()[1];
+    if b1.shape() != [hid]
+        || b2.shape() != [m]
+        || lnq_w.shape() != [dh]
+        || lnq_b.shape() != [dh]
+        || lnk_w.shape() != [dh]
+        || lnk_b.shape() != [dh]
+        || temp.shape() != [nh]
+    {
+        return Err(Error::runtime(
+            "LINEAR_ATTN: bias/norm/temp shapes do not match",
+        ));
+    }
+    let qf = flat(&q);
+    let kf = flat(&k);
+    let vf = flat(&v);
+    let w1f = flat(&w1);
+    let b1f = flat(&b1);
+    let w2f = flat(&w2);
+    let b2f = flat(&b2);
+    let lnqw = flat(&lnq_w);
+    let lnqb = flat(&lnq_b);
+    let lnkw = flat(&lnk_w);
+    let lnkb = flat(&lnk_b);
+    let tempf = flat(&temp);
+    let mut out = vec![0f64; n * h];
+    let mut fq = vec![0f64; n * m];
+    let mut fk = vec![0f64; n * m];
+    let mut qn = vec![0f64; dh];
+    let mut kn = vec![0f64; dh];
+    for head in 0..nh {
+        let hb = head * dh;
+        let qt = tempf[head].exp();
+        for i in 0..n {
+            let mut sq = 0.0;
+            let mut sk = 0.0;
+            for d in 0..dh {
+                let a = qf[i * h + hb + d];
+                let b = kf[i * h + hb + d];
+                sq += a * a;
+                sk += b * b;
+            }
+            let meanq = (0..dh).map(|d| qf[i * h + hb + d]).sum::<f64>() / dh as f64;
+            let meank = (0..dh).map(|d| kf[i * h + hb + d]).sum::<f64>() / dh as f64;
+            let rsq = 1.0 / ((sq / dh as f64 - meanq * meanq) + 1e-5).sqrt();
+            let rsk = 1.0 / ((sk / dh as f64 - meank * meank) + 1e-5).sqrt();
+            for d in 0..dh {
+                qn[d] = ((qf[i * h + hb + d] - meanq) * rsq * lnqw[d] + lnqb[d]) * qt;
+                kn[d] = (kf[i * h + hb + d] - meank) * rsk * lnkw[d] + lnkb[d];
+            }
+            for mm in 0..m {
+                let mut aq = b2f[mm];
+                let mut ak = b2f[mm];
+                for j in 0..hid {
+                    let mut hq = b1f[j];
+                    let mut hk = b1f[j];
+                    for d in 0..dh {
+                        let w = w1f[d * hid + j];
+                        hq += qn[d] * w;
+                        hk += kn[d] * w;
+                    }
+                    aq += 0.5 * hq * (1.0 + gelu_approx_f64(hq / std::f64::consts::SQRT_2))
+                        * w2f[j * m + mm];
+                    ak += 0.5 * hk * (1.0 + gelu_approx_f64(hk / std::f64::consts::SQRT_2))
+                        * w2f[j * m + mm];
+                }
+                fq[i * m + mm] = softplus_f64(aq) + 1e-3;
+                fk[i * m + mm] = softplus_f64(ak) + 1e-3;
+            }
+        }
+        let mut s = vec![0f64; m * dh];
+        let mut z = vec![0f64; m];
+        for i in 0..n {
+            for mm in 0..m {
+                let f = fk[i * m + mm];
+                z[mm] += f;
+                for d in 0..dh {
+                    s[mm * dh + d] += f * vf[i * h + hb + d];
+                }
+            }
+        }
+        for i in 0..n {
+            let mut den = 0.0;
+            for mm in 0..m {
+                den += fq[i * m + mm] * z[mm];
+            }
+            den = den.max(1e-6);
+            for d in 0..dh {
+                let mut acc = 0.0;
+                for mm in 0..m {
+                    acc += fq[i * m + mm] * s[mm * dh + d];
+                }
+                out[i * h + hb + d] = acc / den;
+            }
+        }
+    }
+    Ok(vec![Value::F64(from_flat(&[n, h], out)?)])
+}
+
 pub fn op_bmmv(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
     let a = arg_triple(args, 0, "BMMV")?;
     let b = arg_triple(args, 1, "BMMV")?;
@@ -1637,4 +1950,40 @@ pub fn op_bmmv(args: &[Arg], config: &Config) -> Result<Vec<Value>> {
         from_flat(&[bb * m, n], flat(&out.e))?,
         from_flat(&[bb * m, n], flat(&out.z))?,
     )?)])
+}
+
+#[cfg(test)]
+mod linear_attn_tests {
+    use super::*;
+
+    fn f(v: Vec<f64>, shape: &[usize]) -> Arg {
+        Arg::Stream(Value::F64(
+            ArrayD::from_shape_vec(IxDyn(shape), v).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn uniform_features_average_v() {
+        let (n, nh, dh, hid, m) = (2usize, 1usize, 2usize, 2usize, 1usize);
+        let q = f(vec![0.0; n * dh], &[n, dh]);
+        let k = f(vec![0.0; n * dh], &[n, dh]);
+        let v = f(vec![1.0, 2.0, 3.0, 4.0], &[n, dh]);
+        let w1 = f(vec![0.0; dh * hid], &[dh, hid]);
+        let b1 = f(vec![0.0; hid], &[hid]);
+        let w2 = f(vec![0.0; hid * m], &[hid, m]);
+        let b2 = f(vec![0.0; m], &[m]);
+        let lnw = f(vec![1.0; dh], &[dh]);
+        let lnb = f(vec![0.0; dh], &[dh]);
+        let temp = f(vec![0.0; nh], &[nh]);
+        let args = vec![
+            q, k, v, w1, b1, w2, b2, lnw.clone(), lnb.clone(), lnw, lnb, temp,
+            Arg::Literal(nh as f64), Arg::Literal(dh as f64),
+        ];
+        let out = op_linear_attn(&args, &Config::new()).unwrap();
+        let Value::F64(a) = &out[0] else { panic!("not F64") };
+        for row in 0..n {
+            assert!((a[[row, 0]] - 2.0).abs() < 1e-9);
+            assert!((a[[row, 1]] - 3.0).abs() < 1e-9);
+        }
+    }
 }

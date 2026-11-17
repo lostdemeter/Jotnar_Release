@@ -1,6 +1,7 @@
 //! Rust emitter parity: reference interpreter vs emitted Rust binary.
 use std::fs;
-use std::process::Command;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 
 use jotnar::asm::AsmOptions;
 use jotnar::codegen::{build, compile_program, CompileOptions, Target};
@@ -36,6 +37,22 @@ fn write_i64(dir: &std::path::Path, name: &str, v: i64) -> String {
 }
 fn read_i64(p: &str) -> i64 {
     i64::from_le_bytes(fs::read(p).unwrap()[..8].try_into().unwrap())
+}
+fn write_f64(dir: &std::path::Path, name: &str, v: &[f64]) -> String {
+    let p = dir.join(name);
+    let mut b = Vec::new();
+    for x in v {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    fs::write(&p, b).unwrap();
+    p.to_string_lossy().into_owned()
+}
+fn read_f64(p: &str) -> Vec<f64> {
+    fs::read(p)
+        .unwrap()
+        .chunks(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 #[test]
@@ -589,6 +606,104 @@ fn conv2d_matches_interpreter() {
 }
 
 #[test]
+fn conv2d_threads_are_byte_identical() {
+    // Threading partitions independent output rows; each output element keeps
+    // the serial accumulation order. The F64 bytes must not depend on the
+    // worker count.
+    let listing = "IN X AS F:HWC\nIN W AS F:CONV\nIN B AS F:SEQ\nOUT = CONV2D(X, W, B, 1, 1)\n";
+    let xs: Vec<f64> = (0..4 * 5 * 2).map(|i| (i as f64 * 0.37).sin()).collect();
+    let ws: Vec<f64> = (0..3 * 3 * 4 * 2)
+        .map(|i| (i as f64 * 0.11).cos() * 0.5)
+        .collect();
+    let bs = [0.1, -0.2, 0.3, 0.4];
+    let f = feeds(&[
+        ("X", fvalue(&[4, 5, 2], &xs)),
+        ("W", fvalue(&[4, 3, 3, 2], &ws)),
+        ("B", fvalue(&[4], &bs)),
+    ]);
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile conv2d threads");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "conv2d_threads", Target::Rust).expect("build");
+    let x = write_f64(dir.path(), "x.f64", &xs);
+    let w = write_f64(dir.path(), "w.f64", &ws);
+    let b = write_f64(dir.path(), "b.f64", &bs);
+    let serial = dir.path().join("serial.f64").to_string_lossy().into_owned();
+    let threaded = dir
+        .path()
+        .join("threaded.f64")
+        .to_string_lossy()
+        .into_owned();
+    for (threads, out) in [("1", &serial), ("4", &threaded)] {
+        assert!(Command::new(&exe)
+            .args([&x, &w, &b, out])
+            .env("JOTNAR_THREADS", threads)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert_eq!(fs::read(&serial).unwrap(), fs::read(&threaded).unwrap());
+}
+
+#[test]
+fn serve_mode_matches_one_shot() {
+    // The listing declares the frame boundary; the emitted binary must keep
+    // weights loaded and produce the same bytes as the one-shot argv mode.
+    let listing = "\
+CONFIG serve_input X
+CONFIG serve_output OUT
+IN X AS F:HWC
+IN W AS F:CONV
+IN B AS F:SEQ
+OUT = CONV2D(X, W, B, 1, 1)
+";
+    let xs: Vec<f64> = (0..4 * 5 * 2).map(|i| (i as f64 * 0.37).sin()).collect();
+    let ws: Vec<f64> = (0..4 * 3 * 3 * 2)
+        .map(|i| (i as f64 * 0.11).cos() * 0.5)
+        .collect();
+    let bs = [0.1, -0.2, 0.3, 0.4];
+    let f = feeds(&[
+        ("X", fvalue(&[4, 5, 2], &xs)),
+        ("W", fvalue(&[4, 3, 3, 2], &ws)),
+        ("B", fvalue(&[4], &bs)),
+    ]);
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile serve");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "serve", Target::Rust).expect("build serve");
+    let x = write_f64(dir.path(), "x.f64", &xs);
+    let w = write_f64(dir.path(), "w.f64", &ws);
+    let b = write_f64(dir.path(), "b.f64", &bs);
+    let out = dir.path().join("out.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([&x, &w, &b, &out])
+        .status()
+        .unwrap()
+        .success());
+    let want = fs::read(&out).unwrap();
+
+    let mut child = Command::new(&exe)
+        .args(["--serve", &x, &w, &b])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut cin = child.stdin.take().unwrap();
+    let mut cout = child.stdout.take().unwrap();
+    for _ in 0..2 {
+        let mut frame = Vec::with_capacity(xs.len() * 8);
+        for v in &xs {
+            frame.extend_from_slice(&v.to_le_bytes());
+        }
+        cin.write_all(&frame).unwrap();
+        cin.flush().unwrap();
+        let mut got = vec![0u8; want.len()];
+        cout.read_exact(&mut got).unwrap();
+        assert_eq!(got, want);
+    }
+    drop(cin);
+    child.wait().unwrap();
+}
+
+#[test]
 fn deconv2d_matches_interpreter() {
     // Transposed conv with stride and bias (the neck's reassemble resize).
     let listing = "IN X AS F:HWC\nIN W AS F:CONV\nIN B AS F:SEQ\nOUT = DECONV2D(X, W, B, 2, 1)\n";
@@ -715,4 +830,26 @@ fn scalar_left_refused_loudly() {
         err.contains("first operand") || err.contains("unknown stream"),
         "got {err}"
     );
+}
+
+#[test]
+fn concat3d_hwc_channel_matches() {
+    // Portable U-Net skip concat: HWC axis 2.
+    let listing = "IN A AS F:HWC\nIN B AS F:HWC\nOUT = CONCAT(A, B, 2)\n";
+    let f = feeds(&[
+        ("A", fvalue(&[1, 2, 2], &[1.0, 2.0, 3.0, 4.0])),
+        ("B", fvalue(&[1, 2, 1], &[9.0, 8.0])),
+    ]);
+    let art = compile_program(listing, &opts(&["OUT"]), f).expect("compile concat3d");
+    let dir = tempfile::tempdir().unwrap();
+    let exe = build(&art.source, dir.path(), "concat3d", Target::Rust).expect("build concat3d");
+    let a = write_f64(dir.path(), "a3.f64", &[1.0, 2.0, 3.0, 4.0]);
+    let b = write_f64(dir.path(), "b3.f64", &[9.0, 8.0]);
+    let out = dir.path().join("o3.f64").to_string_lossy().into_owned();
+    assert!(Command::new(&exe)
+        .args([&a, &b, &out])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(read_f64(&out), vec![1.0, 2.0, 9.0, 3.0, 4.0, 8.0]);
 }

@@ -176,6 +176,49 @@ pub fn feeds_from_json(v: &Json) -> Result<Feeds> {
     Ok(feeds)
 }
 
+
+/// Shape-only payload for `jotnar build`/`emit-*`: no data arrays are read,
+/// zero-valued streams are created from the declared shapes.
+pub fn feeds_from_json_shapes(v: &Json) -> Result<Feeds> {
+    let obj = v
+        .get("streams")
+        .and_then(|s| s.as_object())
+        .ok_or_else(|| Error::runtime("payload needs a 'streams' object"))?;
+    let mut feeds = BTreeMap::new();
+    for (name, sv) in obj {
+        let kind = sv
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| Error::runtime(format!("stream '{name}': missing kind")))?;
+        let shape = shape_of(sv)?;
+        let val = match kind {
+            "F64" | "F" => Value::F64(ArrayD::zeros(ndarray::IxDyn(&shape))),
+            "F32" => Value::F32(ArrayD::zeros(ndarray::IxDyn(&shape))),
+            "I64" | "I" => Value::I64(ArrayD::zeros(ndarray::IxDyn(&shape))),
+            "U8" => Value::U8(ArrayD::zeros(ndarray::IxDyn(&shape))),
+            "Bool" => Value::Bool(ArrayD::from_elem(ndarray::IxDyn(&shape), false)),
+            "T" => {
+                return Err(Error::runtime(format!(
+                    "stream '{name}': shape-only T payload is not supported"
+                )))
+            }
+            other => {
+                return Err(Error::runtime(format!(
+                    "stream '{name}': unknown kind '{other}'"
+                )))
+            }
+        };
+        feeds.insert(name.clone(), val);
+    }
+    Ok(feeds)
+}
+
+pub fn read_payload_shapes(path: &Path) -> Result<Feeds> {
+    let text = std::fs::read_to_string(path)?;
+    let v: Json = serde_json::from_str(&text)?;
+    feeds_from_json_shapes(&v)
+}
+
 pub fn read_payload(path: &Path) -> Result<Feeds> {
     let text = std::fs::read_to_string(path)?;
     let v: Json = serde_json::from_str(&text)?;

@@ -25,11 +25,18 @@ cargo test --workspace
 ```
 
 Targets: `c` (default), `nonfpu`, `cuda`, `rust`. Add `--fp16` to CUDA builds to
-read F inputs from half-precision files (FP32 compute, smaller files).
+read F inputs from half-precision files (FP32 compute, smaller files). CUDA
+`CONV2D` uses cuDNN NHWC when available (set `JOTNAR_CUDNN=0` to force the
+im2col + cuBLAS fallback).
 `emit-rust` and `build --target rust` need `rustc` on PATH; they emit a
 self-contained std-only Rust program (F as f64, I as i64). Rust is an
 F/I subset: T (triple) streams are refused loudly — the emitter may
-change the schedule, not the arithmetic.
+change the schedule, not the arithmetic. Emitted `CONV2D` uses all available
+cores by default; set `JOTNAR_THREADS=N` to cap the worker count. Output bytes
+are independent of the thread count. `jotnar build` writes a sibling
+`<name>.manifest.json` declaring the target, dtype, stream shapes, and optional
+`serve_input`/`serve_output`; emitted Rust artifacts with those config keys also
+support a warm `--serve` framing mode.
 The CUDA build finds the toolkit relative to `nvcc`; set `NVCC` if it is not
 on `PATH`.
 
@@ -39,7 +46,7 @@ What works today:
 
 - `IMPORT` / `DEF` / `CALL` textual macro expansion with per-call-site
   namespacing, `REPEAT` / `BREAK`, `CONFIG`, layouts, `STATE`, `RANGE`.
-- Registry binding for **all 94 mnemonics**, including `SADD`, `IMAX`,
+- Registry binding for **all 101 mnemonics**, including `SADD`, `IMAX`,
   `ISAR`, `IDIVU`, `IMODU`, `IEQ`, `ILT`, `ISELECT`.
 - The static layout verifier with honest coverage reporting.
 - The reference interpreter over `F32`/`F64`, `I64`, `U8`, bool masks,
@@ -89,6 +96,36 @@ JOTNAR_ARENA=1 ./scripts/arena_soak.sh     # interpreter vs arena, whole listing
 T and T2 streams, `F32`/`U8`/`Bool` payloads, and mnemonics without arena
 kernels are not arena-backed; `docs/ARENA.md` records why, what is
 covered, and the measured allocation numbers.
+
+### CUDA liveness arena
+
+The runtime stream arena above is interpreter-only. The compiled CUDA target has
+its own opt-in liveness pool: `CONFIG cuda_arena 1` in the listing, or
+`JOTNAR_ARENA=1` at **build** time (an already-built artifact does not read the
+env). One `cudaMalloc` holds the intermediates and graph outputs; inputs stay
+separate. On the DAV2-S 518 graph this turns 823 per-stream allocations
+(2.2 GB sum) into one 93.3 MB pool, with bit-identical output. `CONFIG
+cuda_arena 0` / no flag keeps the per-stream behavior.
+
+## Linear attention (opt-in op)
+
+`LINEAR_ATTN(Q,K,V,W1,B1,W2,B2,LNQ_W,LNQ_B,LNK_W,LNK_B,TEMP,NH,DH)` is a
+per-head normalized-key linear attention with a shared positive feature MLP:
+
+```text
+q = LayerNorm(Q_head) * exp(TEMP[head])
+k = LayerNorm(K_head)
+fq = softplus(GELU(q W1 + B1) W2 + B2) + 1e-3
+fk = softplus(GELU(k W1 + B1) W2 + B2) + 1e-3
+out_head = fq (fk^T V_head) / (fq sum fk)
+```
+
+`Q/K/V` are `(N, NH*DH)`; `W1` is `(DH,HID)`, `W2` is `(HID,M)`, the LayerNorm
+vectors are `(DH)`, and `TEMP` is `(NH)`. There is no `N x N` score matrix:
+compute is `O(N*M*DH)` and feature memory is `O(N*M)`. The CUDA target and the
+interpreter have reference implementations; the Rust/C/T2 targets refuse.
+A distilled linear student is not in the tree yet; this op is the runtime
+contract for it.
 
 ## T2 phi-float (opt-in)
 

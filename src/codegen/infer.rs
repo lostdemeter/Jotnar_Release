@@ -589,7 +589,7 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     },
                 );
             }
-            "CONV2D" => {
+            "CONV2D" | "CONV2D_RELU" => {
                 let x = get(&streams, a(0))?;
                 let w = get(&streams, a(1))?;
                 let b = get(&streams, a(2))?;
@@ -721,6 +721,123 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     },
                 );
             }
+            "MATMUL_T" => {
+                let x = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                if !matches!(x.kind, CKind::F | CKind::T) || x.kind != y.kind {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: MATMUL_T needs same-kind inputs"
+                    )));
+                }
+                if x.shape.len() != 2 || y.shape.len() != 2 {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_T needs 2D inputs, got {:?}/{:?}",
+                        x.shape, y.shape
+                    )));
+                }
+                if x.shape[1] != y.shape[1] {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_T inner dims {:?} vs {:?}",
+                        x.shape, y.shape
+                    )));
+                }
+                streams.insert(
+                    o,
+                    StreamInfo {
+                        kind: x.kind,
+                        shape: vec![x.shape[0], y.shape[0]],
+                    },
+                );
+            }
+            "MATMUL_BIAS" => {
+                let x = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                let b = get(&streams, a(2))?;
+                if x.kind != CKind::F || y.kind != CKind::F || b.kind != CKind::F {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: MATMUL_BIAS needs F inputs"
+                    )));
+                }
+                let (Some(m), Some(k), Some(n)) = (
+                    x.shape.first().copied().flatten(),
+                    x.shape.get(1).copied().flatten(),
+                    y.shape.get(1).copied().flatten(),
+                ) else {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS needs static 2D shapes"
+                    )));
+                };
+                if x.shape.len() != 2 || y.shape.len() != 2 || y.shape[0] != Some(k) {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS shape mismatch {:?}/{:?}",
+                        x.shape, y.shape
+                    )));
+                }
+                if b.shape.last().copied().flatten() != Some(n) || b.elems() != Some(n) {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS bias must have {n} elements"
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(vec![Some(m), Some(n)]));
+            }
+            "MATMUL_BIAS_RESIDUAL" => {
+                let x = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                let b = get(&streams, a(2))?;
+                let r = get(&streams, a(3))?;
+                if x.kind != CKind::F || y.kind != CKind::F || b.kind != CKind::F || r.kind != CKind::F {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: MATMUL_BIAS_RESIDUAL needs F inputs"
+                    )));
+                }
+                let (Some(m), Some(k), Some(n)) = (
+                    x.shape.first().copied().flatten(),
+                    x.shape.get(1).copied().flatten(),
+                    y.shape.get(1).copied().flatten(),
+                ) else {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS_RESIDUAL needs static 2D shapes"
+                    )));
+                };
+                if x.shape.len() != 2
+                    || y.shape.len() != 2
+                    || y.shape[0] != Some(k)
+                    || r.shape != vec![Some(m), Some(n)]
+                    || b.elems() != Some(n)
+                {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS_RESIDUAL shape mismatch"
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(vec![Some(m), Some(n)]));
+            }
+            "MATMUL_BIAS_GELU" => {
+                let x = get(&streams, a(0))?;
+                let y = get(&streams, a(1))?;
+                let b = get(&streams, a(2))?;
+                if x.kind != CKind::F || y.kind != CKind::F || b.kind != CKind::F {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: MATMUL_BIAS_GELU needs F inputs"
+                    )));
+                }
+                let (Some(m), Some(k), Some(n)) = (
+                    x.shape.first().copied().flatten(),
+                    x.shape.get(1).copied().flatten(),
+                    y.shape.get(1).copied().flatten(),
+                ) else {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS_GELU needs static 2D shapes"
+                    )));
+                };
+                if x.shape.len() != 2 || y.shape.len() != 2 || y.shape[0] != Some(k)
+                    || b.elems() != Some(n)
+                {
+                    return Err(Error::asm(format!(
+                        "{where_}: MATMUL_BIAS_GELU shape mismatch"
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(vec![Some(m), Some(n)]));
+            }
             "BMMV" => {
                 let x = get(&streams, a(0))?;
                 let y = get(&streams, a(1))?;
@@ -794,6 +911,127 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     return Err(Error::asm(format!("{where_}: ATTN geometry mismatch")));
                 }
                 streams.insert(o, StreamInfo::f(vec![Some(1), Some((nh * dh) as usize)]));
+            }
+            "SELF_ATTN" => {
+                let q = get(&streams, a(0))?;
+                let k = get(&streams, a(1))?;
+                let v = get(&streams, a(2))?;
+                if q.kind != CKind::F || k.kind != CKind::F || v.kind != CKind::F {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: SELF_ATTN needs F Q/K/V"
+                    )));
+                }
+                let nh = int_lit(a(3), &format!("{where_} SELF_ATTN"))?;
+                let dh = int_lit(a(4), &format!("{where_} SELF_ATTN"))?;
+                if nh <= 0 || dh <= 0 {
+                    return Err(Error::asm(format!(
+                        "{where_}: SELF_ATTN needs positive nh/dh"
+                    )));
+                }
+                if !is_literal(a(5)) {
+                    return Err(Error::asm(format!(
+                        "{where_}: SELF_ATTN scale must be a literal"
+                    )));
+                }
+                let scale: f64 = a(5)
+                    .parse()
+                    .map_err(|_| Error::asm(format!("{where_}: SELF_ATTN bad scale")))?;
+                if !scale.is_finite() {
+                    return Err(Error::asm(format!(
+                        "{where_}: SELF_ATTN scale must be finite"
+                    )));
+                }
+                if q.shape.len() != 2 || k.shape != q.shape || v.shape != q.shape {
+                    return Err(Error::asm(format!(
+                        "{where_}: SELF_ATTN needs equal 2D Q/K/V"
+                    )));
+                }
+                if q.shape[1] != Some((nh * dh) as usize) {
+                    return Err(Error::asm(format!(
+                        "{where_}: SELF_ATTN width {:?} != nh*dh {}",
+                        q.shape[1],
+                        nh * dh
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(q.shape.clone()));
+            }
+            "LINEAR_ATTN" => {
+                let q = get(&streams, a(0))?;
+                let k = get(&streams, a(1))?;
+                let v = get(&streams, a(2))?;
+                if q.kind != CKind::F || k.kind != CKind::F || v.kind != CKind::F {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: LINEAR_ATTN needs F Q/K/V"
+                    )));
+                }
+                let nh = int_lit(a(12), &format!("{where_} LINEAR_ATTN nh"))?;
+                let dh = int_lit(a(13), &format!("{where_} LINEAR_ATTN dh"))?;
+                if nh <= 0 || dh <= 0 {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN needs positive nh/dh"
+                    )));
+                }
+                if q.shape.len() != 2 || k.shape != q.shape || v.shape != q.shape {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN needs equal 2D Q/K/V"
+                    )));
+                }
+                if q.shape[1] != Some((nh * dh) as usize) {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN width {:?} != nh*dh {}",
+                        q.shape[1],
+                        nh * dh
+                    )));
+                }
+                let w1 = get(&streams, a(3))?;
+                let b1 = get(&streams, a(4))?;
+                let w2 = get(&streams, a(5))?;
+                let b2 = get(&streams, a(6))?;
+                let lnq_w = get(&streams, a(7))?;
+                let lnq_b = get(&streams, a(8))?;
+                let lnk_w = get(&streams, a(9))?;
+                let lnk_b = get(&streams, a(10))?;
+                let temp = get(&streams, a(11))?;
+                for (name, s) in [
+                    ("W1", w1), ("B1", b1), ("W2", w2), ("B2", b2),
+                    ("LNQ_W", lnq_w), ("LNQ_B", lnq_b),
+                    ("LNK_W", lnk_w), ("LNK_B", lnk_b), ("TEMP", temp),
+                ] {
+                    if s.kind != CKind::F {
+                        return Err(Error::asm(format!(
+                            "{where_}: LINEAR_ATTN {name} must be F"
+                        )));
+                    }
+                }
+                if w1.shape.len() != 2 || w1.shape[0] != Some(dh as usize) {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN W1 must be (dh,hid)"
+                    )));
+                }
+                let hid = w1.shape[1].ok_or_else(|| {
+                    Error::asm(format!("{where_}: LINEAR_ATTN W1 needs baked hid"))
+                })?;
+                if w2.shape.len() != 2 || w2.shape[0] != Some(hid) {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN W2 must be (hid,m)"
+                    )));
+                }
+                let m = w2.shape[1].ok_or_else(|| {
+                    Error::asm(format!("{where_}: LINEAR_ATTN W2 needs baked m"))
+                })?;
+                if b1.shape != vec![Some(hid)]
+                    || b2.shape != vec![Some(m)]
+                    || lnq_w.shape != vec![Some(dh as usize)]
+                    || lnq_b.shape != vec![Some(dh as usize)]
+                    || lnk_w.shape != vec![Some(dh as usize)]
+                    || lnk_b.shape != vec![Some(dh as usize)]
+                    || temp.shape != vec![Some(nh as usize)]
+                {
+                    return Err(Error::asm(format!(
+                        "{where_}: LINEAR_ATTN bias/norm/temp shapes do not match"
+                    )));
+                }
+                streams.insert(o, StreamInfo::f(q.shape.clone()));
             }
             "LUMA" => {
                 let x = get(&streams, a(0))?;
@@ -1335,25 +1573,80 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 } else {
                     Some(int_lit(a(2), &format!("{where_} axis"))?)
                 };
-                if !matches!(x.kind, CKind::F | CKind::T)
-                    || x.kind != y.kind
-                    || x.shape.len() != 2
-                    || ax != Some(1)
-                    || x.shape[0] != y.shape[0]
-                    || x.shape[1].is_none()
-                    || y.shape[1].is_none()
-                {
+                if !matches!(x.kind, CKind::F | CKind::T) || x.kind != y.kind {
                     return Err(Error::unimplemented(format!(
-                        "{where_}: v0.2 CONCAT handles 2D ax1 same-kind, same rows, baked widths"
+                        "{where_}: CONCAT needs same-kind F/T"
                     )));
                 }
-                streams.insert(
-                    o,
-                    StreamInfo {
-                        kind: x.kind,
-                        shape: vec![x.shape[0], Some(x.shape[1].unwrap() + y.shape[1].unwrap())],
-                    },
-                );
+                if x.shape.len() == 2 && y.shape.len() == 2 && ax == Some(1) {
+                    if x.shape[0] != y.shape[0]
+                        || x.shape[1].is_none()
+                        || y.shape[1].is_none()
+                    {
+                        return Err(Error::unimplemented(format!(
+                            "{where_}: 2D CONCAT needs same rows and baked widths"
+                        )));
+                    }
+                    streams.insert(
+                        o,
+                        StreamInfo {
+                            kind: x.kind,
+                            shape: vec![
+                                x.shape[0],
+                                Some(x.shape[1].unwrap() + y.shape[1].unwrap()),
+                            ],
+                        },
+                    );
+                } else if x.shape.len() == 2 && y.shape.len() == 2 && ax == Some(0) {
+                    // Row concat (prepend/append). Used by the DAV2 patch-embed
+                    // prefix to place the CLS token before the patch tokens.
+                    if x.shape[1].is_none()
+                        || y.shape[1].is_none()
+                        || x.shape[1] != y.shape[1]
+                        || x.shape[0].is_none()
+                        || y.shape[0].is_none()
+                    {
+                        return Err(Error::unimplemented(format!(
+                            "{where_}: 2D axis-0 CONCAT needs same baked width"
+                        )));
+                    }
+                    streams.insert(
+                        o,
+                        StreamInfo {
+                            kind: x.kind,
+                            shape: vec![
+                                Some(x.shape[0].unwrap() + y.shape[0].unwrap()),
+                                x.shape[1],
+                            ],
+                        },
+                    );
+                } else if x.shape.len() == 3 && y.shape.len() == 3 && ax == Some(2) {
+                    if x.shape[0] != y.shape[0] || x.shape[1] != y.shape[1] {
+                        return Err(Error::unimplemented(format!(
+                            "{where_}: HWC CONCAT needs same H/W"
+                        )));
+                    }
+                    if x.shape[2].is_none() || y.shape[2].is_none() {
+                        return Err(Error::unimplemented(format!(
+                            "{where_}: HWC CONCAT needs baked channels"
+                        )));
+                    }
+                    streams.insert(
+                        o,
+                        StreamInfo {
+                            kind: x.kind,
+                            shape: vec![
+                                x.shape[0],
+                                x.shape[1],
+                                Some(x.shape[2].unwrap() + y.shape[2].unwrap()),
+                            ],
+                        },
+                    );
+                } else {
+                    return Err(Error::unimplemented(format!(
+                        "{where_}: CONCAT handles 2D ax0/ax1 or HWC ax2, same-kind"
+                    )));
+                }
             }
             other => {
                 return Err(Error::unimplemented(format!(

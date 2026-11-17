@@ -10,7 +10,7 @@ between the two codebases explicit so the port stays reviewable.
 | `chain/asm.py:expand/parse/assemble/verify` | `src/asm.rs` | textual macro expansion, origins, REPEAT, layout replay |
 | `chain/asm.py:_check_layouts/_resolve` | `src/layout.rs` | `$VAR`, `$VAR^T`, `*`, UNKNOWN |
 | `chain/asm.py:run/_check_shapes` | `src/runtime.rs` | loops, BREAK, kind cross-check, per-op shape rules |
-| `chain/asm_ops.py:REGISTRY/SIGS` | `src/ops/mod.rs` | all 94 mnemonics and signatures, including `SADD/IMAX/ISAR/IDIVU/IMODU/IEQ/ILT/ISELECT` |
+| `chain/asm_ops.py:REGISTRY/SIGS` | `src/ops/mod.rs` | all 101 mnemonics and signatures, including `SADD/IMAX/ISAR/IDIVU/IMODU/IEQ/ILT/ISELECT` |
 | `chain/asm_ops.py:op_*` | `src/ops/*.rs` | reference semantics |
 | `chain/emit_c.py` | `src/codegen/{c,infer}.rs` | C99 patterns + static shapes |
 | `chain/emit_nonfpu.py` | `src/codegen/nonfpu.rs` | integer-only patterns and tables |
@@ -37,7 +37,7 @@ between the two codebases explicit so the port stays reviewable.
    `Triple`, exact compare/clip/bin helpers, and the core numpy-style ops.
    Jotnar consumes it through re-exports; image-specific substrate helpers
    are the next migration pass.
-1. **Runtime parity**: frontend + interpreter + all 94 op semantics.
+1. **Runtime parity**: frontend + interpreter + all 101 op semantics.
    Gated by `scripts/parity_ops.py` and `scripts/parity_programs.py`.
 2. **C emitter**: done for the reference lowering set, plus ROPE/SWIGLU/
    ATTN/TOPK extensions. Gated by `scripts/parity_emit.py` and the headt /
@@ -64,3 +64,28 @@ between the two codebases explicit so the port stays reviewable.
 ## Rust target
 
 `--target rust` / `emit-rust` is an F/I-subset target (see manual 14-emitters). Needs `rustc` on PATH; emit uses `--edition 2021`. DPT float path: `CONV2D`/`DECONV2D`/`RESIZE2D`/`RELU` landed. Legacy `DECONV`/`INTERP`/`GATHER` still fail loud.
+
+`CONV2D` partitions independent output rows across `std::thread::scope`
+workers. Each output element keeps the serial accumulation order, so the F64
+bytes do not depend on the worker count; `JOTNAR_THREADS=N` overrides the
+default `available_parallelism()` count. `tests/rust_emit.rs` gates 1-vs-4
+thread byte identity.
+
+A listing can declare `CONFIG serve_input X` and `CONFIG serve_output OUT`.
+The emitted Rust binary then supports `--serve <input files...>`, reading raw
+frame bytes on stdin and writing raw output bytes on stdout while keeping
+weights loaded. One-shot argv mode remains available. `jotnar build` also
+writes `<name>.manifest.json` with target, dtype, inputs/outputs, shapes, argv
+count, and serve declaration.
+
+## CUDA target
+
+`--target cuda` is FP32. It covers `CONV2D`, `RELU`, `RESIZE2D`, and 3D HWC
+`CONCAT` in addition to the transformer ops. The input files are raw
+little-endian f32, not the Rust target's f64. `CONV2D` uses cuDNN NHWC
+(`CUDNN_TENSOR_NHWC` + `CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM`) when the
+toolkit has cuDNN; otherwise it falls back to im2col + cuBLAS. Set
+`JOTNAR_CUDNN=0` at build time to force the fallback. The target supports the
+same `CONFIG serve_input`/`serve_output` warm loop as Rust, and `jotnar build`
+writes a target manifest. Descriptor/plan caching is the remaining performance
+lever.

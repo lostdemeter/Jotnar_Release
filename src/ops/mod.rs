@@ -231,6 +231,28 @@ fn build_registry() -> Registry {
 
     // --- triples arithmetic / transformer ---
     add("MATMUL", 2, 1, sig(&["*", "*"], &["*"]), Some(op_matmul));
+    add("MATMUL_T", 2, 1, sig(&["*", "*"], &["*"]), Some(op_matmul_t));
+    add(
+        "MATMUL_BIAS",
+        3,
+        1,
+        sig(&["*", "*", "F:*"], &["*"]),
+        Some(op_matmul_bias),
+    );
+    add(
+        "MATMUL_BIAS_RESIDUAL",
+        4,
+        1,
+        sig(&["*", "*", "F:*", "*"], &["*"]),
+        Some(op_matmul_bias_residual),
+    );
+    add(
+        "MATMUL_BIAS_GELU",
+        3,
+        1,
+        sig(&["*", "*", "F:*"], &["*"]),
+        Some(op_matmul_bias_gelu),
+    );
     add(
         "BATCH_MATMUL",
         2,
@@ -297,6 +319,23 @@ fn build_registry() -> Registry {
             &["$A"],
         ),
         Some(op_attn),
+    );
+    add(
+        "SELF_ATTN",
+        6,
+        1,
+        sig(
+            &["$A", "$A", "$A", "F:SCALAR", "F:SCALAR", "F:SCALAR"],
+            &["$A"],
+        ),
+        Some(op_self_attn),
+    );
+    add(
+        "LINEAR_ATTN",
+        14,
+        1,
+        None,
+        Some(op_linear_attn),
     );
     add("BMMV", 13, 1, None, Some(op_bmmv));
 
@@ -426,6 +465,13 @@ fn build_registry() -> Registry {
         1,
         sig(&["*", "*", "*", "F:SCALAR", "F:SCALAR"], &["*"]),
         Some(op_conv2d),
+    );
+    add(
+        "CONV2D_RELU",
+        5,
+        1,
+        sig(&["*", "*", "*", "F:SCALAR", "F:SCALAR"], &["*"]),
+        Some(op_conv2d_relu),
     );
     add(
         "DECONV2D",

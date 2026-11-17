@@ -40,6 +40,24 @@ impl Target {
             ))),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::C => "c",
+            Target::NonFpu => "nonfpu",
+            Target::Cuda => "cuda",
+            Target::Rust => "rust",
+        }
+    }
+
+    /// Storage type read by the emitted program's argv files.
+    pub fn dtype(self) -> &'static str {
+        match self {
+            Target::Cuda => "f32",
+            Target::NonFpu => "u64",
+            Target::C | Target::Rust => "f64",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +85,8 @@ pub struct Artifact {
     pub streams: HashMap<String, infer::StreamInfo>,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    pub source_inputs: Vec<String>,
+    pub source_outputs: Vec<String>,
     pub config: crate::ir::Config,
     pub n_argv: usize,
 }
@@ -332,6 +352,8 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         return rust::compile_rust(text, opts, sample);
     }
     let nonfpu = opts.target == Target::NonFpu;
+    let source_inputs: Vec<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
+    let source_outputs = opts.outputs.clone();
     let mut sample = sample;
     let mut outputs = opts.outputs.clone();
     sanitize_cnames(&mut bound, &mut outputs, &mut sample)?;
@@ -556,6 +578,8 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         streams,
         inputs: in_names,
         outputs,
+        source_inputs,
+        source_outputs,
         config: bound.config.clone(),
         n_argv,
     })

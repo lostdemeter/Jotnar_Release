@@ -14,8 +14,9 @@ fn usage() -> &'static str {
        jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--threads N] [--stdlib DIR]\n\
        jotnar emit-c <file.asm> --payload FILE --outputs a,b [--out FILE.c] [--stdlib DIR]\n\
        jotnar emit-rust <file.asm> --payload FILE --outputs a,b [--out FILE.rs] [--stdlib DIR] (needs rustc)\n\
-       jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR]\n\
+       jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR] [--shape-only]\n\
        jotnar repeat <file.asm> --payload FILE [--grow a,b] [--out FILE] [--stdlib DIR]\n\
+       jotnar fusion <file.asm> --plan FILE --out FILE [--provenance FILE] [--stdlib DIR]\n\
        jotnar ops\n"
 }
 
@@ -32,7 +33,10 @@ struct Args {
     target: String,
     fp16: bool,
     grow: Option<Vec<String>>,
+    plan: Option<PathBuf>,
+    provenance: Option<PathBuf>,
     threads: usize,
+    shape_only: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -58,7 +62,10 @@ fn parse_args() -> Result<Args, String> {
             target: "c".to_string(),
             fp16: false,
             grow: None,
+            plan: None,
+            provenance: None,
             threads: 1,
+            shape_only: false,
         });
     }
     let file = if args.is_empty() {
@@ -79,7 +86,10 @@ fn parse_args() -> Result<Args, String> {
         target: "c".to_string(),
         fp16: false,
         grow: None,
+        plan: None,
+        provenance: None,
         threads: 1,
+        shape_only: false,
     };
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -104,6 +114,7 @@ fn parse_args() -> Result<Args, String> {
             "--name" => a.name = Some(it.next().ok_or("--name needs a value")?),
             "--target" => a.target = it.next().ok_or("--target needs a value")?,
             "--fp16" => a.fp16 = true,
+            "--shape-only" => a.shape_only = true,
             "--threads" => {
                 let s = it.next().ok_or("--threads needs a count")?;
                 a.threads = s
@@ -116,6 +127,14 @@ fn parse_args() -> Result<Args, String> {
             "--grow" => {
                 let s = it.next().ok_or("--grow needs a comma list")?;
                 a.grow = Some(s.split(',').map(|x| x.trim().to_string()).collect());
+            }
+            "--plan" => {
+                a.plan = Some(PathBuf::from(it.next().ok_or("--plan needs a file")?))
+            }
+            "--provenance" => {
+                a.provenance = Some(PathBuf::from(
+                    it.next().ok_or("--provenance needs a file")?,
+                ))
             }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
@@ -167,6 +186,32 @@ fn real_main() -> Result<(), String> {
     let text = std::fs::read_to_string(&args.file)
         .map_err(|e| format!("cannot read {}: {e}", args.file.display()))?;
     let opts = options_for(&args.file, args.stdlib);
+
+    if args.cmd == "fusion" {
+        let plan_path = args.plan.as_ref().ok_or("fusion: --plan is required")?;
+        let out = args.out.as_ref().ok_or("fusion: --out is required")?;
+        let plan_text = std::fs::read_to_string(plan_path)
+            .map_err(|e| format!("cannot read {}: {e}", plan_path.display()))?;
+        let plan: serde_json::Value = serde_json::from_str(&plan_text)
+            .map_err(|e| format!("bad fusion plan JSON: {e}"))?;
+        let (fused, provenance) = jotnar::fusion::apply(&text, &plan)
+            .map_err(|e| e.to_string())?;
+        // The fused listing must still assemble and bind before we write it.
+        asm::assemble(&fused, &opts).map_err(|e| e.to_string())?;
+        std::fs::write(out, fused)
+            .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        if let Some(p) = args.provenance.as_ref() {
+            std::fs::write(p, serde_json::to_string_pretty(&provenance).unwrap())
+                .map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+        }
+        let n = provenance["groups"].as_array().map(|a| a.len()).unwrap_or(0);
+        println!(
+            "fusion: {n} group(s), pass {:?}, wrote {}",
+            provenance["pass_version"].as_str().unwrap_or("?"),
+            out.display()
+        );
+        return Ok(());
+    }
 
     match args.cmd.as_str() {
         "check" => {
@@ -252,7 +297,12 @@ fn real_main() -> Result<(), String> {
             let outputs = args
                 .outputs
                 .ok_or_else(|| format!("{cmd}: --outputs is required\n\n{}", usage()))?;
-            let payload = payload::read_payload(&payload_path).map_err(|e| e.to_string())?;
+            let payload = if args.shape_only {
+                payload::read_payload_shapes(&payload_path)
+            } else {
+                payload::read_payload(&payload_path)
+            }
+            .map_err(|e| e.to_string())?;
             let target = if args.cmd == "emit-rust" {
                 Target::Rust
             } else {
@@ -280,7 +330,12 @@ fn real_main() -> Result<(), String> {
             let outputs = args
                 .outputs
                 .ok_or_else(|| format!("build: --outputs is required\n\n{}", usage()))?;
-            let payload = payload::read_payload(&payload_path).map_err(|e| e.to_string())?;
+            let payload = if args.shape_only {
+                payload::read_payload_shapes(&payload_path)
+            } else {
+                payload::read_payload(&payload_path)
+            }
+            .map_err(|e| e.to_string())?;
             let target = Target::parse(&args.target).map_err(|e| e.to_string())?;
             let opts = CompileOptions {
                 target,
@@ -293,6 +348,38 @@ fn real_main() -> Result<(), String> {
             let name = args.name.unwrap_or_else(|| "prog".to_string());
             let exe = codegen::build(&art.source, &workdir, &name, opts.target)
                 .map_err(|e| e.to_string())?;
+            let mut shapes = serde_json::Map::new();
+            for (src, san) in art.source_inputs.iter().zip(art.inputs.iter()) {
+                if let Some(s) = art.streams.get(san) {
+                    shapes.insert(src.clone(), serde_json::json!(s.shape));
+                }
+            }
+            for (src, san) in art.source_outputs.iter().zip(art.outputs.iter()) {
+                if let Some(s) = art.streams.get(san) {
+                    shapes.insert(src.clone(), serde_json::json!(s.shape));
+                }
+            }
+            let manifest = serde_json::json!({
+                "target": opts.target.as_str(),
+                "dtype": opts.target.dtype(),
+                "inputs": art.source_inputs,
+                "outputs": art.source_outputs,
+                "shapes": shapes,
+                "argv": art.n_argv,
+                "executable": exe.file_name()
+                    .map(|x| x.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "serve": {
+                    "input": art.config.get("serve_input"),
+                    "output": art.config.get("serve_output"),
+                    "shm": art.config.get("serve_shm")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false),
+                },
+            });
+            let mpath = workdir.join(format!("{name}.manifest.json"));
+            std::fs::write(&mpath, serde_json::to_string_pretty(&manifest).unwrap())
+                .map_err(|e| format!("cannot write {}: {e}", mpath.display()))?;
             println!("{}", exe.display());
             Ok(())
         }

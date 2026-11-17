@@ -131,6 +131,7 @@ the scale. This is a model/contract parameter, not a hidden constant.
 | `TBETA` | `$A -> $A` | constant `beta_b` field of the input shape | both |
 | `BETA` | `$A -> $A` | constant `beta` field | both |
 | `ATTN` | 8 args -> `$A` | multi-head attention with a mask (F64 path) | C |
+| `LINEAR_ATTN` | 14 args -> `$A` | normalized-key linear attention with a positive feature MLP (F; no N² scores) | CUDA, interpreter |
 
 ### Bridges
 

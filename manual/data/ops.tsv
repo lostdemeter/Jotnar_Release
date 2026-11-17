@@ -37,6 +37,10 @@ ISHR	2	1	I:*, F:SCALAR -> I:*	int	Logical right shift by a scalar 0..63.
 F2I	1	1	F:* -> I:*	int	Float to integer, truncating toward zero.
 I2F	1	1	I:* -> F:*	int	Integer to F64.
 MATMUL	2	1	*, * -> *	linalg	2D matrix multiply with fixed-point accumulation.
+MATMUL_T	2	1	*, * -> *	linalg	2D matrix multiply with transposed right operand [M,K]*[N,K]^T -> [M,N].
+MATMUL_BIAS	3	1	*, *, F:* -> *	linalg	2D matrix multiply plus a per-column bias: A[M,K]*B[K,N]+b[N].
+MATMUL_BIAS_RESIDUAL	4	1	*, *, F:*, * -> *	linalg	2D matrix multiply plus bias and a same-shape residual.
+MATMUL_BIAS_GELU	3	1	*, *, F:* -> *	linalg	2D matrix multiply plus bias and a GELU epilogue.
 BATCH_MATMUL	2	1	*, * -> *	linalg	Batched matmul over leading batch dimensions.
 SOFTMAX	1	1	$A -> $A	linalg	Softmax over the last axis at BIAS scale.
 SOFTMAX_WIDE	1	1	$A -> $A	linalg	Softmax with the wide fixed-point range.
@@ -51,6 +55,7 @@ ROTARY	2	1	$X, * -> $X	linalg	Rotary embedding over triple pairs by position.
 ROPE	4	1	$A, *, F:SCALAR, F:SCALAR -> $A	linalg	Float RoPE over (rows, heads * head_dim).
 SWIGLU	2	1	$A, F:SCALAR -> $A	linalg	Gated MLP: silu(gate) * up.
 ATTN	8	1	$A,$A,$A,I:*,F:SCALAR,F:SCALAR,F:SCALAR,F:SCALAR -> $A	linalg	Multi-head attention with a causal/validity mask.
+SELF_ATTN	6	1	$A,$A,$A,F:SCALAR,F:SCALAR,F:SCALAR -> $A	linalg	Fused multi-head self-attention: softmax(scale*QK^T)V, no mask.
 BMMV	13	1	*13 -> *	linalg	Fused batched matrix-vector kernel with explicit strides.
 TRANSPOSE	1	1	$A -> $A^T	move	Swap the last two dimensions; layout becomes ^T.
 GAUSS	3	1	$A, F:SCALAR, F:SCALAR -> $A	move	Gaussian blur with radius and sigma.
@@ -76,6 +81,7 @@ DECONV	4	1	*, *, F:SCALAR, F:SCALAR -> *	move	Transposed convolution with stride
 INTERP	3	1	*, F:SCALAR, F:SCALAR -> *	move	Bilinear resize by dyadic scales.
 CONV	2	1	*, * -> *	move	2D convolution with an explicit kernel.
 CONV2D	5	1	*, *, *, F:SCALAR, F:SCALAR -> *	move	Multi-channel HWC convolution with stride, padding, and bias.
+CONV2D_RELU	5	1	*, *, *, F:SCALAR, F:SCALAR -> *	move	CONV2D with a fused bias + ReLU epilogue.
 DECONV2D	5	1	*, *, *, F:SCALAR, F:SCALAR -> *	move	Multi-channel HWC transposed convolution with stride, padding, and bias.
 RESIZE2D	4	1	*, F:SCALAR, F:SCALAR, F:SCALAR -> *	move	Bilinear resize to an explicit size with an align_corners flag.
 IWINDOW	3	1	I:*, *, F:SCALAR -> I:*	bytes	Slice a 1D integer/byte stream [start, start+len).
@@ -92,3 +98,4 @@ T2I	1	1	T:* -> I:*	int	Decode a phi-ladder triple stream to int64, round half aw
 IGET	2	1	I:*, F:SCALAR -> I:SCALAR	int	Extract one integer element as a scalar stream; index must be a literal in range.
 IMATMUL	2	1	I:*, I:* -> I:*	int	Exact 2D integer matrix multiply [M,K]*[K,N] -> [M,N], 64-bit wrap.
 IREDUCE_SUM	1	1	I:* -> I:SCALAR	int	Exact sum of every element of an integer stream; output is a scalar.
+LINEAR_ATTN	14	1	$A,$A,$A,$A,$A,$A,$A,$A,$A,$A,$A,$A,F:SCALAR,F:SCALAR -> $A	linalg	Per-head normalized-key linear attention with a positive feature MLP; O(N) memory.
