@@ -1,0 +1,42 @@
+[package]
+name = "jotnar-node-tools"
+version = "0.1.0"
+edition = "2021"
+description = "JotnarOS node daemon, payload supervisor, and payload control client"
+license = "GPL-3.0-only"
+
+[dependencies]
+jotnar = { path = "../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+sha2 = "0.10"
+mdns-sd = "0.22"
+
+[build-dependencies]
+jotnar = { path = "../.." }
+serde_json = "1"
+
+[[bin]]
+name = "jotnar-noded"
+path = "src/bin/jotnar-noded.rs"
+
+[[bin]]
+name = "jotnar-net"
+path = "src/bin/jotnar-net.rs"
+
+[[bin]]
+name = "jotnar-supervisord"
+path = "src/bin/jotnar-supervisord.rs"
+
+[[bin]]
+name = "jotnar-payload"
+path = "src/bin/jotnar-payload.rs"
+
+[[bin]]
+name = "jotnar-osd"
+path = "src/bin/jotnar-osd.rs"
+
+[profile.release]
+opt-level = 2
+lto = false

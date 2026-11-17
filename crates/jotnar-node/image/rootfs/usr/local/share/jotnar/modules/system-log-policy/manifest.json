@@ -1,0 +1,9 @@
+{
+  "name": "system-log-policy",
+  "program": "policy.asm",
+  "state_version": 1,
+  "autostart": true,
+  "capabilities": [
+    {"cap": "system", "ops": ["log"]}
+  ]
+}

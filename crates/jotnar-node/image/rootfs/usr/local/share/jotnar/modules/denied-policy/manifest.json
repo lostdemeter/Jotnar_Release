@@ -1,0 +1,7 @@
+{
+  "name": "denied-policy",
+  "program": "policy.asm",
+  "state_version": 1,
+  "autostart": true,
+  "capabilities": []
+}

@@ -1,0 +1,237 @@
+#!/bin/sh
+# JotnarOS node init.
+#
+# Runs as PID 1 from the initramfs (rdinit=/init). The root filesystem is the
+# Alpine minirootfs in RAM; persistent configuration/logs/state live on the
+# "jotnar-data" ext4 partition when present.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+LOG_FILE=/var/log/init.log
+mkdir -p /var/log 2>/dev/null || true
+: >"$LOG_FILE" 2>/dev/null || LOG_FILE=/dev/null
+
+log() {
+    msg="jotnar-init: $*"
+    [ "$LOG_FILE" = /dev/null ] || echo "$msg" >>"$LOG_FILE" 2>/dev/null || true
+    echo "$msg"
+    # PID 1's stdout is /dev/console (ttyS0 here). Write explicitly to the
+    # local GOP console too, so the Dell user sees the same status.
+    [ -c /dev/tty0 ] && echo "$msg" >/dev/tty0
+    return 0
+}
+
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts /run /tmp /var/log /var/lib/jotnar
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+
+hostname jotnar-node 2>/dev/null || true
+log "starting (kernel $(uname -r))"
+
+# --- kernel modules -------------------------------------------------------
+# virtio: QEMU. e1000e: physical I219. ext4/sd_mod: data partition. simpledrm:
+# GOP console. USB HID: physical keyboard. There is no udev, so everything the
+# node needs at boot must be listed here.
+KVER=$(uname -r)
+for mod in virtio_pci virtio_blk virtio_net e1000e ext4 simpledrm \
+           xhci_pci ehci_pci ohci_pci usbhid hid_generic evdev \
+           usb_storage uas sd_mod; do
+    modprobe "$mod" 2>/dev/null || true
+done
+if [ -r /proc/bus/input/devices ]; then
+    log "input devices: $(grep -c '^I:' /proc/bus/input/devices 2>/dev/null || echo 0)"
+fi
+
+# --- network --------------------------------------------------------------
+ip link set lo up 2>/dev/null || true
+IFACE=
+for n in /sys/class/net/*; do
+    b=${n##*/}
+    [ "$b" = "lo" ] && continue
+    IFACE=$b
+    break
+done
+
+NODE_IP=
+if [ -n "$IFACE" ]; then
+    log "bringing up $IFACE"
+    ip link set "$IFACE" up 2>/dev/null || true
+    if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -f -q -t 8 -T 3 >/dev/null 2>&1; then
+        log "DHCP lease on $IFACE"
+    else
+        log "DHCP failed on $IFACE; falling back to 10.0.2.15/24 (QEMU user net)"
+        ip addr add 10.0.2.15/24 dev "$IFACE" 2>/dev/null || true
+        ip route add default via 10.0.2.2 dev "$IFACE" 2>/dev/null || true
+    fi
+    for a in $(ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk '{print $4}'); do
+        log "address $IFACE $a"
+    done
+    NODE_IP=$(ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk '{print $4; exit}')
+else
+    log "no network interface found"
+fi
+
+# --- persistent data ------------------------------------------------------
+# USB storage enumerates asynchronously (SCSI scan), so wait for the labeled
+# partition instead of racing it. sd_mod is required to create /dev/sda.
+DATA=
+WAIT=0
+while [ "$WAIT" -lt 20 ]; do
+    DATA=$(findfs LABEL=jotnar-data 2>/dev/null || true)
+    [ -n "$DATA" ] && break
+    WAIT=$((WAIT + 1))
+    sleep 1
+done
+if [ -z "$DATA" ]; then
+    for d in /dev/sda2 /dev/vda2 /dev/nvme0n1p2 /dev/mmcblk0p2; do
+        if [ -b "$d" ]; then DATA=$d; break; fi
+    done
+fi
+if [ -n "$DATA" ]; then
+    if mount -t ext4 "$DATA" /var/lib/jotnar 2>/tmp/jotnar-mount.err; then
+        log "mounted jotnar-data at /var/lib/jotnar ($DATA)"
+    else
+        log "could not mount jotnar-data ($DATA): $(cat /tmp/jotnar-mount.err 2>/dev/null)"
+        log "continuing with RAM state"
+    fi
+else
+    log "no jotnar-data partition found after ${WAIT}s; state is RAM-only"
+fi
+
+# --- configuration --------------------------------------------------------
+if [ ! -f /etc/jotnar/node.conf ]; then
+    log "FATAL: missing /etc/jotnar/node.conf; dropping to shell"
+    exec /bin/sh
+fi
+. /usr/local/lib/jotnar/config.sh
+jotnar_load_config
+
+hostname "$JOTNAR_HOSTNAME" 2>/dev/null || true
+
+mkdir -p "$JOTNAR_LOG_DIR" 2>/dev/null || true
+if cp "$LOG_FILE" "$JOTNAR_LOG_DIR/init.log" 2>/dev/null; then
+    LOG_FILE="$JOTNAR_LOG_DIR/init.log"
+    log "persistent logs: $JOTNAR_LOG_DIR"
+else
+    log "persistent log directory unavailable; logs stay in RAM"
+fi
+chown -R 1000:1000 /home/jotnar 2>/dev/null || true
+
+# --- development SSH ------------------------------------------------------
+# Key-only SSH for the trusted dev LAN. Disable with JOTNAR_SSH=0.
+start_ssh() {
+    [ "$JOTNAR_SSH" = "1" ] || return 0
+    if ! command -v dropbear >/dev/null 2>&1; then
+        log "ssh: dropbear not installed"
+        return 0
+    fi
+    KEYDIR="$JOTNAR_DATA_DIR/etc/dropbear"
+    mkdir -p "$KEYDIR" /root/.ssh /home/jotnar/.ssh 2>/dev/null || true
+    HOSTKEY=$KEYDIR/dropbear_ed25519_host_key
+    if [ ! -s "$HOSTKEY" ]; then
+        if ! dropbearkey -t ed25519 -f "$HOSTKEY" >/tmp/dropbear-key.log 2>&1; then
+            log "ssh: host key generation failed: $(cat /tmp/dropbear-key.log 2>/dev/null)"
+            return 0
+        fi
+    fi
+    chmod 0600 "$HOSTKEY" 2>/dev/null || true
+
+    # Optional persistent key override for development.
+    if [ -f "$JOTNAR_DATA_DIR/etc/ssh/authorized_keys" ]; then
+        cp "$JOTNAR_DATA_DIR/etc/ssh/authorized_keys" /root/.ssh/authorized_keys
+        cp "$JOTNAR_DATA_DIR/etc/ssh/authorized_keys" /home/jotnar/.ssh/authorized_keys
+        chmod 0600 /root/.ssh/authorized_keys /home/jotnar/.ssh/authorized_keys
+        chown -R 1000:1000 /home/jotnar 2>/dev/null || true
+    fi
+
+    # -s: key auth only (no passwords); root and jotnar are allowed by key.
+    dropbear -p "$JOTNAR_SSH_PORT" -s -r "$HOSTKEY" -P /run/dropbear.pid \
+        >/tmp/dropbear.log 2>&1
+    sleep 1
+    if [ -f /run/dropbear.pid ] && kill -0 "$(cat /run/dropbear.pid)" 2>/dev/null; then
+        log "ssh listening on port $JOTNAR_SSH_PORT (key auth: root, jotnar)"
+    else
+        log "ssh failed: $(cat /tmp/dropbear.log 2>/dev/null)"
+    fi
+}
+start_ssh
+
+# --- payload supervisor ---------------------------------------------------
+mkdir -p /run/jotnar 2>/dev/null || true
+if [ "$JOTNAR_SUPERVISOR" = "1" ] && [ -x /usr/local/bin/jotnar-supervisord ]; then
+    /usr/local/bin/jotnar-supervisord \
+        --socket /run/jotnar/supervisor.sock \
+        --data-dir "$JOTNAR_DATA_DIR" \
+        --console "$JOTNAR_CONSOLE" \
+        --log "$JOTNAR_LOG_DIR/supervisor.log" >/dev/null 2>&1 &
+    SUP_PID=$!
+    echo "$SUP_PID" >/run/jotnar-supervisord.pid
+    sleep 0.5
+    if [ -S /run/jotnar/supervisor.sock ]; then
+        log "payload supervisor ready (pid $SUP_PID)"
+    else
+        log "payload supervisor failed to start"
+    fi
+fi
+
+# --- emitted control plane ------------------------------------------------
+if [ "$JOTNAR_OSD" = "1" ] && [ -x /usr/local/bin/jotnar-osd ]; then
+    /usr/local/bin/jotnar-osd --serve \
+        --socket /run/jotnar/osd.sock \
+        --supervisor /run/jotnar/supervisor.sock \
+        --state-root /var/lib/jotnar/osd >/var/log/jotnar-osd.log 2>&1 &
+    OSD_PID=$!
+    echo "$OSD_PID" >/run/jotnar-osd.pid
+    sleep 0.5
+    if [ -S /run/jotnar/osd.sock ]; then
+        log "emitted control plane ready (pid $OSD_PID)"
+    else
+        log "emitted control plane failed to start"
+    fi
+fi
+
+# --- node service ---------------------------------------------------------
+if /usr/local/sbin/jotnar-service start; then
+    log "node log: $JOTNAR_LOG_DIR/node.log"
+    tail -n 5 "$JOTNAR_LOG_DIR/node.log" 2>/dev/null | while IFS= read -r line; do
+        log "$line"
+    done
+else
+    log "node service failed to start; recovery shell follows"
+fi
+
+# Optional console autostart through the emitted control plane. No-op if no
+# bundle has been uploaded.
+if [ "$JOTNAR_CONSOLE_AUTOSTART" = "1" ] && [ -f "$JOTNAR_DATA_DIR/bundles/console.tar.gz" ]; then
+    log "console autostart requested"
+    (
+        i=0
+        while [ "$i" -lt 10 ]; do
+            /usr/local/bin/jotnar-payload --addr 127.0.0.1:9999 \
+                --token "$JOTNAR_TOKEN" module-event console-policy console.start \
+                >/dev/null 2>&1 && break
+            i=$((i + 1))
+            sleep 1
+        done
+    ) &
+fi
+
+log "JotnarOS node ready"
+if [ -n "$NODE_IP" ]; then
+    log "IPv4 $NODE_IP  |  Jotnar TCP $JOTNAR_PORT  |  SSH $JOTNAR_SSH_PORT"
+fi
+log "starting local console shell"
+
+# Local GOP/keyboard console. PID 1's shell stays on /dev/console (serial);
+# the tty0 shell is the physical console. -c makes tty0 the controlling
+# terminal so keystrokes are delivered and job control works.
+if [ -c /dev/tty0 ]; then
+    chvt 1 2>/dev/null || true
+    setsid -c sh -c 'exec /bin/sh' </dev/tty0 >/dev/tty0 2>&1 &
+fi
+
+exec /bin/sh

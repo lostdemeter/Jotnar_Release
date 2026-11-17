@@ -1,0 +1,6 @@
+# timer-policy: EVENT 70 -> arm (11), 71 -> cancel (12), 72 -> fired/log (4).
+IN EVENT
+ISFIRE = IEQ(EVENT, 72)
+ISCANCEL = IEQ(EVENT, 71)
+NOTFIRE = ISELECT(ISCANCEL, 12, 11)
+ACTION = ISELECT(ISFIRE, 4, NOTFIRE)

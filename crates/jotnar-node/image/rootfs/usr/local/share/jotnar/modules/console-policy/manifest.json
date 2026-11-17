@@ -1,0 +1,11 @@
+{
+  "name": "console-policy",
+  "program": "policy.asm",
+  "seed": "seed.json",
+  "state_version": 1,
+  "autostart": true,
+  "capabilities": [
+    {"cap": "console", "ops": ["start", "stop", "status"]},
+    {"cap": "system", "ops": ["log"]}
+  ]
+}

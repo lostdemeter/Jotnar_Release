@@ -1,0 +1,105 @@
+#!/bin/sh
+# Manage the Jotnar node service.
+#
+#   jotnar-service start|stop|restart|status|run|logs
+#
+# Configuration comes from /etc/jotnar/node.conf plus the persistent override
+# at /var/lib/jotnar/etc/node.conf. Logs go to $JOTNAR_LOG_DIR/node.log.
+set -u
+
+. /usr/local/lib/jotnar/config.sh
+jotnar_load_config
+
+PIDFILE=/run/jotnar-node.pid
+LOG_DIR=${JOTNAR_LOG_DIR:-/var/log}
+LOG=$LOG_DIR/node.log
+
+mkdir -p "$LOG_DIR" 2>/dev/null || {
+    LOG_DIR=/var/log
+    LOG=$LOG_DIR/node.log
+    mkdir -p "$LOG_DIR"
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] || return 1
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    [ -n "$pid" ] || return 1
+    # /proc is readable by non-root too, so `status` works as jotnar.
+    [ -d "/proc/$pid" ]
+}
+
+node_args() {
+    args="--bind $JOTNAR_BIND --allow $JOTNAR_ALLOW --max-frame $JOTNAR_MAX_FRAME --token $JOTNAR_TOKEN"
+    if [ -n "${JOTNAR_MODULE_SOCKET:-}" ]; then
+        args="$args --module-socket $JOTNAR_MODULE_SOCKET"
+    fi
+    [ "${JOTNAR_MDNS:-0}" = 1 ] && args="$args --mdns"
+    echo "$args"
+}
+
+start() {
+    if is_running; then
+        echo "jotnar-node already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    if [ -z "$JOTNAR_TOKEN" ]; then
+        echo "jotnar-service: JOTNAR_TOKEN is empty" >&2
+        return 1
+    fi
+    : >>"$LOG"
+    # shellcheck disable=SC2086
+    /usr/local/bin/jotnar-node $(node_args) >>"$LOG" 2>&1 &
+    pid=$!
+    echo "$pid" >"$PIDFILE"
+    sleep 1
+    if is_running; then
+        echo "jotnar-node started (pid $pid, $JOTNAR_BIND)"
+        return 0
+    fi
+    echo "jotnar-service: node failed to start; see $LOG" >&2
+    tail -n 20 "$LOG" >&2 2>/dev/null || true
+    rm -f "$PIDFILE"
+    return 1
+}
+
+stop() {
+    if ! is_running; then
+        echo "jotnar-node is not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    pid=$(cat "$PIDFILE")
+    kill "$pid" 2>/dev/null || true
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+    echo "jotnar-node stopped"
+}
+
+status() {
+    if is_running; then
+        echo "jotnar-node running (pid $(cat "$PIDFILE"), $JOTNAR_BIND)"
+        return 0
+    fi
+    echo "jotnar-node stopped"
+    return 1
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 0.5; start ;;
+    status) status ;;
+    run) exec /usr/local/bin/jotnar-node $(node_args) ;;
+    logs) tail -n "${2:-40}" "$LOG" ;;
+    *)
+        echo "usage: $0 start|stop|restart|status|run|logs [lines]" >&2
+        exit 2
+        ;;
+esac
