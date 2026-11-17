@@ -3,6 +3,7 @@
 
 pub mod c;
 pub mod cuda;
+pub mod hip;
 pub mod infer;
 pub mod nonfpu;
 pub mod rust;
@@ -25,6 +26,7 @@ pub enum Target {
     C,
     NonFpu,
     Cuda,
+    Hip,
     Rust,
 }
 
@@ -34,9 +36,10 @@ impl Target {
             "c" => Ok(Target::C),
             "nonfpu" => Ok(Target::NonFpu),
             "cuda" => Ok(Target::Cuda),
+            "hip" => Ok(Target::Hip),
             "rust" => Ok(Target::Rust),
             other => Err(Error::unimplemented(format!(
-                "no '{other}' backend yet (have: c, nonfpu, cuda, rust)"
+                "no '{other}' backend yet (have: c, nonfpu, cuda, hip, rust)"
             ))),
         }
     }
@@ -46,6 +49,7 @@ impl Target {
             Target::C => "c",
             Target::NonFpu => "nonfpu",
             Target::Cuda => "cuda",
+            Target::Hip => "hip",
             Target::Rust => "rust",
         }
     }
@@ -53,7 +57,7 @@ impl Target {
     /// Storage type read by the emitted program's argv files.
     pub fn dtype(self) -> &'static str {
         match self {
-            Target::Cuda => "f32",
+            Target::Cuda | Target::Hip => "f32",
             Target::NonFpu => "u64",
             Target::C | Target::Rust => "f64",
         }
@@ -348,6 +352,9 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     if opts.target == Target::Cuda {
         return cuda::compile_cuda(text, opts, sample);
     }
+    if opts.target == Target::Hip {
+        return hip::compile_hip(text, opts, sample);
+    }
     if opts.target == Target::Rust {
         return rust::compile_rust(text, opts, sample);
     }
@@ -594,6 +601,9 @@ fn lattice_from_vec(shape: &[usize], v: Vec<f64>) -> Result<crate::value::Triple
 pub fn build(source: &str, workdir: &Path, name: &str, target: Target) -> Result<PathBuf> {
     if target == Target::Cuda {
         return cuda::build_cu(source, workdir, name);
+    }
+    if target == Target::Hip {
+        return hip::build_hip(source, workdir, name);
     }
     if target == Target::Rust {
         return build_rust(source, workdir, name);

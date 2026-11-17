@@ -12,6 +12,7 @@ need the exact command or path.
 | Rust stable + Cargo | everything |
 | `gcc` | C backend, native DOOM core, Verilog test fixture |
 | CUDA toolkit + GPU | CUDA target and GPU migration parity |
+| ROCm + `hipcc` + AMD GPU | HIP target and `scripts/parity_hip.py` |
 | SDL2 runtime | playable DOOM window |
 | DOOM image + WAD | live DOOM; `run_doom_demo.sh` falls back otherwise |
 | Python 3 + NumPy/Pillow | parity harnesses against the Python oracle |
@@ -24,10 +25,10 @@ cargo build --release
 cargo test --workspace
 ```
 
-Targets: `c` (default), `nonfpu`, `cuda`, `rust`. Add `--fp16` to CUDA builds to
-read F inputs from half-precision files (FP32 compute, smaller files). CUDA
-`CONV2D` uses cuDNN NHWC when available (set `JOTNAR_CUDNN=0` to force the
-im2col + cuBLAS fallback).
+Targets: `c` (default), `nonfpu`, `cuda`, `hip`, `rust`. Add `--fp16` to CUDA
+or HIP builds to read F inputs from half-precision files (FP32 compute, smaller
+files). CUDA `CONV2D` uses cuDNN NHWC when available (set `JOTNAR_CUDNN=0` to
+force the im2col + cuBLAS fallback).
 `emit-rust` and `build --target rust` need `rustc` on PATH; they emit a
 self-contained std-only Rust program (F as f64, I as i64). Rust is an
 F/I subset: T (triple) streams are refused loudly — the emitter may
@@ -39,6 +40,10 @@ are independent of the thread count. `jotnar build` writes a sibling
 support a warm `--serve` framing mode.
 The CUDA build finds the toolkit relative to `nvcc`; set `NVCC` if it is not
 on `PATH`.
+The HIP build uses `hipcc` on `PATH` (falling back to `/opt/rocm/bin/hipcc`);
+set `HIPCC` to override and `HIP_ARCH` (for example `gfx1100`) to pin the
+offload target. The HIP target is a correctness-first port of the CUDA opcode
+set; see `docs/ROCM_FEASIBILITY.md` in the node checkout for the spike report.
 
 ## Status and evidence
 
@@ -53,10 +58,11 @@ What works today:
   lattice triples, and `None` history.
 - The lattice substrate (`encode`/`decode`/fixed-point/LUTs) matching the
   Python formulas.
-- Four code generators: C99, integer-only C with a float trap, CUDA, and Rust
-  (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT
+- Five code generators: C99, integer-only C with a float trap, CUDA, HIP, and
+  Rust (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT
   over F/I; LAYERNORM eps comes from CONFIG eps_ln);
-  T refused, DECONV/INTERP/GATHER fail loud until the next slice).
+  T refused, DECONV/INTERP/GATHER fail loud until the next slice). HIP ports
+  the CUDA opcode set only; it is not the full mnemonic surface.
 - Differential parity:
 
 ```text
@@ -65,6 +71,7 @@ What works today:
 32/32 emitter cases     scripts/parity_emit.py
 flagship + xf_block     scripts/parity_programs.py
 CUDA units/iext/…       scripts/parity_cuda.py
+HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness only
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
@@ -309,6 +316,7 @@ python3 scripts/parity_ops.py --bin target/release/jotnar
 python3 scripts/parity_programs.py --bin target/release/jotnar
 python3 scripts/parity_emit.py --bin target/release/jotnar
 python3 scripts/parity_cuda.py --bin target/release/jotnar   # nvcc/GPU
+python3 scripts/parity_hip.py --bin target/release/jotnar    # hipcc/AMD GPU
 python3 scripts/parity_futhark.py
 python3 scripts/parity_doom_native.py --gpu-work /tmp/opencode/doom_overlay
 ```
@@ -333,6 +341,7 @@ src/
     c.rs        C99 patterns
     nonfpu.rs   integer-only patterns + baked tables + float trap
     cuda.rs     CUDA kernels and driver
+    hip.rs      HIP kernels and driver (CUDA-equivalent opcode set)
   rv32.rs       RV32IM machine + DOOM MMIO/checkpointing
   protocol.rs   in-process node protocol + frame codec
   showcase/     demos: language, image, Futhark, protocol, analog, DOOM

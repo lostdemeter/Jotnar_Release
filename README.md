@@ -7,7 +7,8 @@ of instructions that mutates a machine. You name typed streams, connect them
 into a graph, and ask a machine to realize that graph.
 
 The same graph can run in the reference interpreter, lower to portable C99,
-lower to integer-only C, lower to CUDA, emit Rust (F/I subset, T refused), become structural Verilog, or drive an
+lower to integer-only C, lower to CUDA, lower to HIP (CUDA-equivalent opcode
+set), emit Rust (F/I subset, T refused), become structural Verilog, or drive an
 RV32IM machine.
 
 That sounds like portability. The deeper idea is **trust**. A program is a
@@ -51,8 +52,9 @@ the move.
   travel with values. The listing order is for the reader; the dataflow is the
   program.
 - **Keep the meaning across targets.** The same listing runs on C, integer-only
-  C, CUDA, Rust (F/I subset; T refused), Verilog, and an RV32IM machine. Integer paths are compared
-  exactly; float paths carry an explicit agreement class; Rust refuses T rather than guessing.
+  C, CUDA, HIP, Rust (F/I subset; T refused), Verilog, and an RV32IM machine.
+  Integer paths are compared exactly; float paths carry an explicit agreement
+  class; Rust refuses T rather than guessing.
 - **Gate the claim.** Every realization has an independent check, a scope, and
   a certificate. “Same bytes” is a stronger promise than “looks right.”
 - **Refuse loudly.** Unknown mnemonics, arity mismatches, use-before-def,

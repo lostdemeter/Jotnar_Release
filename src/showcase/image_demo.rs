@@ -188,7 +188,7 @@ fn write_inputs(
             crate::codegen::infer::CKind::F => {
                 let a = v.as_f64(n)?;
                 let path = dir.join(format!("in_{n}.bin"));
-                if target == Target::Cuda {
+                if target == Target::Cuda || target == Target::Hip {
                     let mut bytes = Vec::with_capacity(a.len() * 4);
                     for x in a.iter() {
                         bytes.extend_from_slice(&(*x as f32).to_le_bytes());
