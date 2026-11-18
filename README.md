@@ -77,9 +77,17 @@ That is the interesting part: one binary, one ISA, two engines. The image is
 produced by a CPU executing a real program, not by a renderer pretending to be
 one.
 
+The same frame can also be split across two GPU nodes: node A runs the RV32IM
+core, and the CUDA and HIP nodes each run the same Jotnar upscale program on
+one half. The coordinator stitches the halves and records per-frame latency.
+
+[Two-node cooperative GIF](showcase/doom/doom_two_nodes.gif) ·
+[Two-node details](docs/DOOM_TWO_NODE.md)
+
 ```sh
 ./run_doom_demo.sh                 # playable
 ./run_doom_demo.sh --frames 100    # headless
+python3 scripts/doom_two_gpu_gate.py
 ```
 
 [Behind the scenes](showcase/doom/) · [RV32IM source](src/rv32.rs)

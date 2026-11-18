@@ -15,6 +15,7 @@ jotnar-osd           emitted control-plane daemon and step harness
 jotnar-net           multi-node scheduler / discovery client
 jotnar-native-runner model-blind native/process executor
 jotnar-workload      model-aware bundle/stage/checkpoint controller
+jotnar-doom-coord    cooperative two-node DOOM frame coordinator
 ```
 
 In the image, `jotnar-noded` is installed as `/usr/local/bin/jotnar-node` so
@@ -184,6 +185,12 @@ The gate runs frame 1 on one native executor, transfers the checkpoint to a
 second executor, resumes for frame 2, and compares the full RV32IM state with
 a single-node reference. See
 [`docs/WORKLOAD_CONTROLLER.md`](../../docs/WORKLOAD_CONTROLLER.md).
+
+`jotnar-doom-coord` is the streaming companion. It runs the RV32IM core on the
+coordinator host, sends one overlapping half of each frame to the CUDA and HIP
+runners, runs the same Jotnar `INTERP` listing on both, and stitches the
+results. `scripts/doom_two_gpu_gate.py` records the annotated GIF and latency
+receipt. See [`docs/DOOM_TWO_NODE.md`](../../docs/DOOM_TWO_NODE.md).
 
 `crates/jotnar-node/test/sched_two_nodes.sh` is the host gate.
 `crates/jotnar-node/test/qemu_two_nodes.sh` boots two disposable QEMU nodes.

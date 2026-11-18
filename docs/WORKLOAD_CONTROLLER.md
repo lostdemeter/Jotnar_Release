@@ -203,3 +203,12 @@ job ids, and comparison hashes.
   failure and the run can be resumed after the cause is fixed.
 - Only the native executor kind is implemented in the first bundle schema.
   CPU/GPU stages can be added without moving planning into those executors.
+
+## Streaming companion
+
+The bundle/stage layer is batch-oriented. The cooperative two-node DOOM demo
+uses a separate streaming coordinator, `jotnar-doom-coord`, because a game
+frame is a per-frame request rather than a whole-file stage. It keeps the same
+executor contract and adds frame splitting, stitching, and latency receipts.
+See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md). A general streaming stage ABI
+is future work.

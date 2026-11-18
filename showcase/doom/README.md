@@ -63,6 +63,43 @@ framebuffer: BYTE-IDENTICAL
 The native C core produces the same instruction count, PC, registers,
 first 64 MB of memory, and framebuffer.
 
+## Two-node cooperative frame path
+
+The next step after checkpoint handoff is per-frame cooperation. The RV32IM
+core runs on node A; the CUDA and HIP runners are nodes B and C. Each GPU gets
+one overlapping half of the framebuffer and runs the same Jotnar program
+(`upscale-half.asm`: `INTERP(X, 2.0, 2.0)`). The coordinator stitches the two
+320x400 results into one 640x400 frame.
+
+```sh
+cargo build --release -p jotnar-node-tools --bin jotnar-doom-coord
+python3 scripts/doom_two_gpu_gate.py
+```
+
+The gate writes [`doom_two_nodes.gif`](doom_two_nodes.gif) and records
+per-frame latency. The checked run on the live fleet:
+
+```text
+node A  RV32IM native        core p50 33 ms
+node B  CUDA 192.168.1.116   p50 71 ms, p95 77 ms
+node C  HIP  192.168.1.195   p50 19 ms
+total                        p50 71 ms, p95 77 ms
+frame budget at 12 fps       83 ms
+real time at target          yes
+```
+
+The warm worker removes process startup from the per-frame path. The first
+job still pays artifact build/worker startup (about 6.6 s CUDA and 2.3 s HIP
+on this fleet); later frames are the Jotnar op plus buffer copies. The two
+halves overlap by one input column so bilinear upscaling stays continuous at
+the split.
+
+This is the first cooperative streaming path: the game core and the Jotnar
+program run on different nodes, and the coordinator measures the cost of
+moving a frame between them. It is not yet a general streaming workload
+contract; the batch bundle/stage layer is documented in
+[`docs/WORKLOAD_CONTROLLER.md`](../../docs/WORKLOAD_CONTROLLER.md).
+
 ## Checkpoint / migration gate
 
 ```sh

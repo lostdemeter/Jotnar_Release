@@ -205,6 +205,17 @@ python3 scripts/doom_two_node_gate.py
 
 See [`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md).
 
+The cooperative streaming demo runs the RV32IM core on one node and splits
+each frame between the CUDA and HIP nodes, each running the Jotnar
+`INTERP` upscale. It records a GIF and per-frame latency:
+
+```sh
+python3 scripts/doom_two_gpu_gate.py
+```
+
+See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md) and
+[`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif).
+
 The Rust SDL player has intermittent frame-time spikes not seen in the
 original Python/C player. This is recorded as future work; add a frame-time
 trace and p99/max gate before calling the frontend finished.
@@ -251,6 +262,7 @@ jotnar-net  [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] --pa
 jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token T] [--mdns]
 jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]
 jotnar-workload run --bundle PATH --ledger DIR --program FILE [--executor ADDR]... [--place STAGE=ADDR]...
+jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
 jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
 jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>

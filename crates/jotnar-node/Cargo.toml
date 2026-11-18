@@ -34,6 +34,10 @@ name = "jotnar-workload"
 path = "src/bin/jotnar-workload.rs"
 
 [[bin]]
+name = "jotnar-doom-coord"
+path = "src/bin/jotnar-doom-coord.rs"
+
+[[bin]]
 name = "jotnar-supervisord"
 path = "src/bin/jotnar-supervisord.rs"
 

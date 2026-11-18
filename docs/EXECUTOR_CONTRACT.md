@@ -119,3 +119,8 @@ The workload controller uses the capability list and the `Executor` trait to
 place stages, move checkpoints, and write a ledger/receipt. See
 [`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md). DOOM across two
 nodes is the first acceptance test.
+
+The cooperative per-frame demo uses the same contract from a streaming
+coordinator: node A runs the RV32IM core, and the CUDA and HIP runners execute
+the same Jotnar upscale listing on half a frame each. See
+[`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md).

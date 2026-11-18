@@ -1,6 +1,7 @@
 //! Shared pieces for the JotnarOS node daemon and payload supervisor.
 
 pub mod capability;
+pub mod doom_pipeline;
 pub mod executor;
 pub mod job;
 /// Controller-side bundle/stage/ledger logic. `jotnar-noded` does not call it.
