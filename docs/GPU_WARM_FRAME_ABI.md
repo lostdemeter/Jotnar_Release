@@ -43,6 +43,7 @@ same on CUDA and HIP.
 ## Non-goals
 
 - Dynamic shapes, T/triple streams, or fp16 warm frames.
+- `CONFIG profile` in warm mode; the combination is rejected.
 - Multiple GPUs in one worker.
 - Cross-host shared memory.
 - TLS, artifact signing, or GPU passthrough.
@@ -211,14 +212,17 @@ Lifecycle:
 - start on first frame for the key;
 - reuse for every matching frame;
 - serialize frames per worker with a lock;
+- keep at most `--warm-cache-workers` workers (default 8), evicting the
+  least-recently-used key;
 - restart on nonzero status or child exit;
-- kill on idle timeout or runner shutdown;
+- on shutdown, send the stop token, wait two seconds, then kill;
+- sweep `/dev/shm/jotnar-warm-*` directories whose owner pid is gone at
+  runner startup;
 - keep the compiled artifact cache independent, so a runner restart does not
   require a rebuild.
 
-The first version uses one warm worker per runner process. Multiple runner
-processes per GPU host remain the scheduling unit; a runner-side worker pool is
-a later extension.
+Multiple runner processes per GPU host remain the scheduling unit. Within one
+runner, the pool is bounded per artifact/layout key.
 
 ## Runner response
 
