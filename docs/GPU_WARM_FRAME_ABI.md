@@ -248,15 +248,36 @@ The runner response grows:
 The scheduler ledger records `warm` and `frame_ms` as defaulted fields so old
 ledgers remain readable.
 
+### Batch frames
+
+The runner also accepts `run-batch` for warm workers:
+
+```json
+{"v":1, "id":1, "type":"run-batch", "target":"hip", "outputs":["OUT"],
+ "frames":8, "payload_id":"...", "output_format":"binary", "auth":"..."}
+```
+
+- frames run serially on one worker;
+- the binary response is `run-batch-ok` with a `frames` count and descriptors
+  carrying a `frame` index;
+- `frame_ms` becomes an array, one entry per frame;
+- the scheduler opt-in is `--batch-frames N` (default 1, maximum 64).
+
+If the batch request fails or the runner does not support it, the scheduler
+falls back to the normal per-job path. Placement, retry, ledger, and
+cross-target comparison semantics are unchanged.
+
 ## Scheduler impact
 
-No protocol change is required. The scheduler still sends a listing, payload,
-outputs, and count. The runner decides whether to use a warm worker.
+The scheduler uploads the payload once with `payload-put` and sends a
+`payload_id` per request. `--batch-frames N` groups jobs into `run-batch`
+requests; the default remains one frame per request. The runner decides
+whether to use a warm worker.
 
 Later scheduler work:
 
-- report warm/startup/frame timings in the batch summary;
-- use the worker pool size as a placement hint;
+- report batch/chunk timings separately in the summary;
+- use the worker pool size and runner health as placement hints;
 - keep retry/ledger semantics unchanged.
 
 Do not move warm-frame logic into `jotnar-noded`.
@@ -276,9 +297,10 @@ layout and sizes before writing any buffer.
 ## Implementation status
 
 The CUDA and HIP emitters now support `CONFIG warm_frame 1`, and the runner
-uses warm workers automatically for eligible artifacts. `--no-warm` falls back
-to process-per-job execution. The phases below are the implementation record;
-the remaining work is payload transport and the formal performance gate.
+uses warm workers automatically for eligible artifacts. Payload and artifact
+caches, binary output transport, and opt-in batch frames are implemented.
+`--no-warm` falls back to process-per-job execution. The remaining work is the
+formal performance gate and the open controller/capability decision.
 
 ## Implementation phases
 

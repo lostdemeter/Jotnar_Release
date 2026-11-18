@@ -31,6 +31,19 @@ u32BE length || JSON header || '\n' || payload
 response header; the Rust scheduler requests it. Without it the response body
 is the JSON stream form used by the debug scripts.
 
+`run-batch` runs N frames on one warm worker in one request:
+
+```json
+{"v":1, "id":1, "type":"run-batch", "target":"hip", "outputs":["OUT"],
+ "frames":8, "payload_id":"a86e11ef3b2b8bf5",
+ "output_format":"binary", "auth":"..."}
+```
+
+The binary response uses `type:"run-batch-ok"`, a `frames` count, and one
+descriptor per frame with a `frame` index. Without binary transport the body
+is `{"frames":[{"outputs":...}, ...], "timing":...}`. The runner executes the
+frames serially on the warm worker and returns per-frame `frame_ms`.
+
 payload:
 
 ```json
@@ -134,10 +147,13 @@ companion to `jotnar-net`; the CPU node remains model-blind.
 runner per target and compares outputs using the scheduler's `atol`/`rtol`.
 Repeated `--runner` entries form a pool; jobs are assigned round-robin across
 the pool for each selected target. `--count` submits N copies and `--parallel`
-sets the number of concurrent job workers. `--ledger` defaults to
-`artifacts/gpu-batches`; a repeated `--batch-id` resumes pending jobs and
-replays a completed batch from its cached summary. Failures retry across the
-target pool up to `--max-attempts`.
+sets the number of concurrent job workers. `--batch-frames N` sends up to N
+jobs per `run-batch` request (default 1, maximum 64); `--parallel` is the
+number of concurrent chunks. `--ledger` defaults to `artifacts/gpu-batches`; a
+repeated `--batch-id` resumes pending jobs and replays a completed batch from
+its cached summary. Failures retry across the target pool up to
+`--max-attempts`. If a batch request fails or the runner does not support it,
+those jobs fall back to the normal per-job request path.
 
 The controller uploads the batch payload once per runner with
 `payload-put`, then sends only the payload id per job. The runner caches parsed
