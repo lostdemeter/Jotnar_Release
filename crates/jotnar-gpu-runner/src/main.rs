@@ -580,19 +580,34 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
         }
         "job-status" => {
             if let Err(e) = job_status(&mut stream, cfg, &id, &header) {
-                send_error(&mut stream, &id, "job-status-failed", &e)?;
+                let code = if e.starts_with("unknown job") {
+                    "unknown-job"
+                } else {
+                    "job-status-failed"
+                };
+                send_error(&mut stream, &id, code, &e)?;
             }
             Ok(())
         }
         "job-result" => {
             if let Err(e) = job_result(&mut stream, cfg, &id, &header) {
-                send_error(&mut stream, &id, "job-result-failed", &e)?;
+                let code = if e.starts_with("unknown job") {
+                    "unknown-job"
+                } else {
+                    "job-result-failed"
+                };
+                send_error(&mut stream, &id, code, &e)?;
             }
             Ok(())
         }
         "job-cancel" => {
             if let Err(e) = job_cancel(&mut stream, cfg, &id, &header) {
-                send_error(&mut stream, &id, "job-cancel-failed", &e)?;
+                let code = if e.starts_with("unknown job") {
+                    "unknown-job"
+                } else {
+                    "job-cancel-failed"
+                };
+                send_error(&mut stream, &id, code, &e)?;
             }
             Ok(())
         }
