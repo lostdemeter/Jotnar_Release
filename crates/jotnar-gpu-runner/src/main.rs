@@ -1807,3 +1807,66 @@ mod job_store_tests {
         assert!(store.jobs.contains_key("done-b"));
     }
 }
+
+#[cfg(test)]
+mod async_job_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    fn test_config(dir: &Path) -> Config {
+        Config {
+            bind: "127.0.0.1:0".to_string(),
+            token: None,
+            target: Target::Cuda,
+            max_frame: DEFAULT_MAX_FRAME,
+            cache_dir: dir.to_path_buf(),
+            build_lock: Arc::new(Mutex::new(())),
+            mdns: false,
+            warm: false,
+            warm_idle: None,
+            warm_cache: Arc::new(Mutex::new(warm::WarmCache::new(1))),
+            payload_cache: Arc::new(Mutex::new(PayloadCache::new(1024))),
+            artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(2))),
+            jobs: Arc::new(Mutex::new(JobStore::new(4))),
+            self_addr: "127.0.0.1:0".to_string(),
+        }
+    }
+
+    fn read_frame(stream: &mut TcpStream) -> (Json, Vec<u8>) {
+        let mut hdr = [0u8; 4];
+        stream.read_exact(&mut hdr).unwrap();
+        let n = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; n];
+        stream.read_exact(&mut body).unwrap();
+        let mut full = Vec::with_capacity(4 + n);
+        full.extend_from_slice(&hdr);
+        full.extend_from_slice(&body);
+        let (header, payload) = decode_frame(&full).unwrap();
+        (header, payload.to_vec())
+    }
+
+    #[test]
+    fn missing_async_jobs_return_unknown_job_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        for typ in ["job-status", "job-result", "job-cancel"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut client = TcpStream::connect(addr).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let thread_cfg = cfg.clone();
+            let handler = std::thread::spawn(move || handle(server, &thread_cfg));
+            let frame = encode_frame(
+                &json!({"v": PROTO_V, "id": 1, "type": typ, "job_id": "missing"}),
+                &[],
+            )
+            .unwrap();
+            client.write_all(&frame).unwrap();
+            let (reply, _) = read_frame(&mut client);
+            handler.join().unwrap().unwrap();
+            assert_eq!(reply["type"], "error", "{typ}: {reply}");
+            assert_eq!(reply["error"]["code"], "unknown-job", "{typ}: {reply}");
+        }
+    }
+}

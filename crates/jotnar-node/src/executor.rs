@@ -71,3 +71,111 @@ impl Executor for RemoteExecutor {
         self.client.cancel(job_id)
     }
 }
+
+/// Validate binary result descriptors against their payload.
+///
+/// A controller should call this before trusting a result header from a remote
+/// executor. It checks bounds, frame indices, known kinds, shape products, and
+/// element widths.
+pub fn validate_binary_result(header: &Json, body: &[u8]) -> Result<(), String> {
+    let frames = header.get("frames").and_then(|x| x.as_u64()).unwrap_or(1) as usize;
+    if frames == 0 {
+        return Err("result has zero frames".to_string());
+    }
+    let descs = header
+        .get("outputs")
+        .and_then(|x| x.as_array())
+        .ok_or("binary result has no outputs")?;
+    for d in descs {
+        let frame = d.get("frame").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        if frame >= frames {
+            return Err(format!("descriptor frame {frame} exceeds {frames}"));
+        }
+        let name = d
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or("descriptor has no name")?;
+        let kind = d
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| format!("descriptor {name:?} has no kind"))?;
+        let width = match kind {
+            "F32" => 4usize,
+            "F64" | "I64" => 8,
+            "U8" | "Bool" => 1,
+            other => return Err(format!("descriptor {name:?} has unknown kind {other:?}")),
+        };
+        let shape = d
+            .get("shape")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| format!("descriptor {name:?} has no shape"))?;
+        let mut values = 1usize;
+        for dim in shape {
+            let dim = dim
+                .as_u64()
+                .ok_or_else(|| format!("descriptor {name:?} has non-integer shape"))?
+                as usize;
+            values = values
+                .checked_mul(dim)
+                .ok_or_else(|| format!("descriptor {name:?} shape overflows"))?;
+        }
+        let expected = values
+            .checked_mul(width)
+            .ok_or_else(|| format!("descriptor {name:?} byte count overflows"))?;
+        let len = d
+            .get("bytes")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| format!("descriptor {name:?} has no byte count"))?
+            as usize;
+        if len != expected {
+            return Err(format!(
+                "descriptor {name:?} shape needs {expected} bytes, header says {len}"
+            ));
+        }
+        let off = d.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| format!("descriptor {name:?} range overflows"))?;
+        if end > body.len() {
+            return Err(format!(
+                "descriptor {name:?} range {off}..{end} exceeds body {}",
+                body.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validates_binary_descriptors() {
+        let header = json!({
+            "frames": 1,
+            "outputs": [{"frame": 0, "name": "OUT", "kind": "F32",
+                         "shape": [2], "off": 0, "bytes": 8}],
+        });
+        validate_binary_result(&header, &[0u8; 8]).unwrap();
+        let short = json!({
+            "frames": 1,
+            "outputs": [{"frame": 0, "name": "OUT", "kind": "F32",
+                         "shape": [2], "off": 0, "bytes": 4}],
+        });
+        assert!(validate_binary_result(&short, &[0u8; 8]).is_err());
+        let truncated = json!({
+            "frames": 1,
+            "outputs": [{"frame": 0, "name": "OUT", "kind": "F32",
+                         "shape": [2], "off": 4, "bytes": 8}],
+        });
+        assert!(validate_binary_result(&truncated, &[0u8; 8]).is_err());
+        let bad_frame = json!({
+            "frames": 1,
+            "outputs": [{"frame": 1, "name": "OUT", "kind": "F32",
+                         "shape": [2], "off": 0, "bytes": 8}],
+        });
+        assert!(validate_binary_result(&bad_frame, &[0u8; 8]).is_err());
+    }
+}

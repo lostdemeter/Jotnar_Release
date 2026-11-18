@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
 
-use jotnar_node_tools::executor::{Executor, RemoteExecutor};
+use jotnar_node_tools::executor::{validate_binary_result, Executor, RemoteExecutor};
 
 #[path = "../sched.rs"]
 mod sched;
@@ -362,6 +362,10 @@ fn run_gpu(cfg: &Config, args: Vec<String>) -> Result<Json, String> {
         let (header, bytes) = executor
             .result(&job_id)
             .map_err(|(code, msg)| format!("job-result {code}: {msg}"))?;
+        if header.get("output_format").and_then(|x| x.as_str()) == Some("binary") {
+            validate_binary_result(&header, &bytes)
+                .map_err(|e| format!("invalid result from {addr}: {e}"))?;
+        }
         jobs.push(json!({
             "job_id": job_id,
             "state": state,

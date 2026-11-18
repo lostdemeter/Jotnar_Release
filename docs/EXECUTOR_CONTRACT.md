@@ -30,6 +30,8 @@ fn cancel(&self, job_id: &str) -> Result<Json, (String, String)>;
 ```
 
 `RemoteExecutor` pairs a discovery capability record with a `JobClient`.
+`validate_binary_result` checks descriptor bounds, frame indices, kinds,
+shapes, and byte widths before a controller trusts a binary result.
 
 ## CPU node
 
@@ -69,8 +71,8 @@ jotnar-net --token T gpu listing.asm \
 
 If `--addr` is omitted it selects a matching `kind:gpu` capability from
 discovery. `--addr` pins one runner. The command submits, polls status, fetches
-the result, and prints a summary. It does not compile, schedule batches, or
-interpret the model.
+the result, validates binary descriptors, and prints a summary. It does not
+compile, schedule batches, or interpret the model.
 
 ## Boundaries
 

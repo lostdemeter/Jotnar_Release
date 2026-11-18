@@ -154,7 +154,8 @@ jotnar-osd --events 10,11,12          # stateful sequence
   [`docs/CAPABILITY_EXCHANGE.md`](../../docs/CAPABILITY_EXCHANGE.md).
 - `gpu` routes one stage to a GPU runner through the common executor contract
   (`submit`/`job-status`/`job-result`/`job-cancel`), selecting a runner from
-  discovery unless `--addr` is given. See
+  discovery unless `--addr` is given. Binary result descriptors are validated
+  before reporting. See
   [`docs/EXECUTOR_CONTRACT.md`](../../docs/EXECUTOR_CONTRACT.md).
 
 `crates/jotnar-node/test/sched_two_nodes.sh` is the host gate.
