@@ -35,6 +35,14 @@ Headless frame runs use a frame count:
 The script finds the DOOM assets, builds the Rust core, and opens the
 window. If no display is available it falls back to a headless frame.
 
+To play across the CUDA and HIP nodes with the live HUD:
+
+```sh
+./demos/doom_two_nodes.sh
+```
+
+See [`demos/README.md`](../../demos/README.md) for options and troubleshooting.
+
 ## Player
 
 The player is `src/bin/jotnar-doom-player.rs`. It uses the same Rust core and

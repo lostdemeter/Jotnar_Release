@@ -78,6 +78,12 @@ python3 scripts/doom_two_gpu_gate.py
 
 ## Interactive viewer
 
+The quick launcher is:
+
+```sh
+./demos/doom_two_nodes.sh
+```
+
 Start the coordinator with a viewer listener and open the SDL window on this
 machine:
 

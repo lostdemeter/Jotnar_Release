@@ -217,7 +217,13 @@ python3 scripts/doom_two_gpu_gate.py
 See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md) and
 [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif).
 The same coordinator can open an SDL viewer with a live node/latency HUD and
-forward keys:
+forward keys. The one-command launcher is:
+
+```sh
+./demos/doom_two_nodes.sh
+```
+
+or run the pieces directly:
 
 ```sh
 jotnar-doom-coord ... --viewer-listen 127.0.0.1:10000
