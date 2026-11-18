@@ -14,14 +14,16 @@
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
 
 #[path = "../sched.rs"]
 mod sched;
 
-use sched::{batch_ledger_path, discover, health, run_batch, BatchSpec, NodeSpec};
+use sched::{
+    batch_ledger_path, discover, discover_capabilities, health, run_batch, BatchSpec, NodeSpec,
+};
 
 fn usage() -> &'static str {
     "jotnar-net - multi-node scheduler for Jotnar jobs\n\
@@ -35,10 +37,13 @@ fn usage() -> &'static str {
          [--threads N] [--timeout-ms N] [--wait-ms N] [--poll-ms N] \\\n\
          [--max-attempts N] [--batch-id ID] [--receipts FILE]\n\
        jotnar-net [--token T] [--discover] [--discover-timeout-ms N] discover\n\
+       jotnar-net [--discover-timeout-ms N] capabilities\n\
      \n\
      --node may be repeated; --nodes reads one 'addr [token]' per line.\n\
      --ledger defaults to artifacts/batches. --discover browses\n\
-     _jotnar-node._tcp and adds discovered ads; tokens are trusted-LAN secrets.\n"
+     _jotnar-node._tcp and adds discovered ads; tokens are trusted-LAN secrets.\n\
+     capabilities merges _jotnar-node and _jotnar-gpu ads into one capability\n\
+     list; it is discovery only and never bypasses a node token check.\n"
 }
 
 struct Config {
@@ -337,6 +342,11 @@ fn real_main() -> Result<(), String> {
         });
     }
     match cmd.as_str() {
+        "capabilities" => {
+            let out = discover_capabilities(Duration::from_millis(cfg.discover_timeout_ms.max(1)))?;
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            Ok(())
+        }
         "discover" => {
             let out = discover(std::time::Duration::from_millis(
                 cfg.discover_timeout_ms.max(1),
