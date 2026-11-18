@@ -44,6 +44,19 @@ descriptor per frame with a `frame` index. Without binary transport the body
 is `{"frames":[{"outputs":...}, ...], "timing":...}`. The runner executes the
 frames serially on the warm worker and returns per-frame `frame_ms`.
 
+`warm-prepare` compiles/builds and starts the warm worker without running a
+frame:
+
+```json
+{"v":1, "id":1, "type":"warm-prepare", "target":"hip", "outputs":["OUT"],
+ "payload_id":"a86e11ef3b2b8bf5", "auth":"..."}
+```
+
+It returns `warm-prepare-ok` with `warm`, `worker_start_ms`,
+`worker_reused`, `compile_ms`, `build_ms`, and `cache_hit`. Repeated prepares
+reuse the worker. If the runner is started with `--no-warm`, it returns
+`warm:false` after the build.
+
 payload:
 
 ```json
@@ -152,7 +165,9 @@ Repeated `--runner` entries form a pool; jobs are assigned round-robin across
 the pool for each selected target. `--count` submits N copies and `--parallel`
 sets the number of concurrent job workers. `--batch-frames N` sends up to N
 jobs per `run-batch` request (default 1, maximum 64); `--parallel` is the
-number of concurrent chunks. `--ledger` defaults to `artifacts/gpu-batches`; a
+number of concurrent chunks. `--prewarm` prepares every selected runner before
+the measured batch, so worker startup is reported separately as `prewarm_ms`
+and excluded from `wall_ms`. `--ledger` defaults to `artifacts/gpu-batches`; a
 repeated `--batch-id` resumes pending jobs and replays a completed batch from
 its cached summary. Failures retry across the target pool up to
 `--max-attempts`. If a batch request fails or the runner does not support it,
@@ -186,10 +201,11 @@ outputs, and reports medians and p95:
   --runner cuda=192.168.1.116:9997 \
   --runner cuda=192.168.1.116:9996 --token "$TOKEN" \
   --probe-dir artifacts/gpu-runner/warm-frame/probe \
-  --repeats 5 --parallel 4
+  --repeats 5 --parallel 4 --prewarm
 ```
 
 Batch mode auto-sizes frames to `ceil(count / parallel)`. The gate fails unless
 every expected run used a warm worker; pass `--allow-cold` for a process-per-job
-pool. Use batch frames for small jobs where connection overhead dominates;
+pool. `--prewarm` removes worker startup from the measured wall time. Use batch
+frames for small jobs where connection overhead dominates;
 large outputs remain bandwidth-bound and usually favor the per-job path.

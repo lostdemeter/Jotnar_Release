@@ -78,7 +78,7 @@ HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness o
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          410/410
+workspace tests          411/411
 ```
 
 The GPU parity gates fail if `nvcc`/`hipcc` is unavailable. Set `NVCC`/`HIPCC`
@@ -178,7 +178,8 @@ TCP parity only for single-job, small-output T2.
 The HIP/CUDA GPU runner and scheduler live in `crates/jotnar-gpu-runner`:
 `jotnar-gpu-runner` compiles and runs listings on a local GPU host and
 `jotnar-gpu-net` discovers runners, places batches, retries failures, and keeps
-a resumable ledger. `--batch-frames N` sends up to N warm frames per request.
+a resumable ledger. `--batch-frames N` sends up to N warm frames per request,
+and `--prewarm` starts the workers before the measured batch.
 Warm-frame workers are opt-in with `CONFIG warm_frame 1`; the reproducible
 gate is [`scripts/gpu_warm_gate.py`](../scripts/gpu_warm_gate.py). See
 [`crates/jotnar-gpu-runner/README.md`](../crates/jotnar-gpu-runner/README.md).

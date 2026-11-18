@@ -267,6 +267,15 @@ If the batch request fails or the runner does not support it, the scheduler
 falls back to the normal per-job path. Within a batch, later jobs and chunks
 skip runners that already failed; if all runners for a target have failed, the
 group is retried.
+
+### Prewarm
+
+`warm-prepare` compiles/builds and starts the worker without running a frame.
+The scheduler's `--prewarm` calls it once per selected runner before the
+measured batch and reports `prewarm_ms` separately from `wall_ms`. A failed
+prewarm marks that runner failed for the batch, so jobs go straight to a live
+runner. With `--no-warm`, the request still builds the artifact and returns
+`warm:false`.
 Placement, retry, ledger, and cross-target comparison semantics are unchanged.
 
 ## Scheduler impact
