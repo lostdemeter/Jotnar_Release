@@ -165,3 +165,23 @@ Warm frames are implemented for CUDA and HIP. The runner uses a persistent
 worker automatically for eligible artifacts; `--no-warm` forces the old
 process-per-job path. The ABI and boundaries are documented in
 [`docs/GPU_WARM_FRAME_ABI.md`](../../docs/GPU_WARM_FRAME_ABI.md).
+
+## Gate
+
+[`scripts/gpu_warm_gate.py`](../../scripts/gpu_warm_gate.py) warms each
+artifact, runs uncached repeats in per-job and batch modes, verifies identical
+outputs, and reports medians and p95:
+
+```sh
+./scripts/gpu_warm_gate.py \
+  --runner hip=192.168.1.195:9997 \
+  --runner hip=192.168.1.195:9996 \
+  --runner cuda=192.168.1.116:9997 \
+  --runner cuda=192.168.1.116:9996 --token "$TOKEN" \
+  --probe-dir artifacts/gpu-runner/warm-frame/probe \
+  --repeats 5 --parallel 4
+```
+
+Batch mode auto-sizes frames to `ceil(count / parallel)`. Use batch frames for
+small jobs where connection overhead dominates; large outputs remain
+bandwidth-bound and usually favor the per-job path.
