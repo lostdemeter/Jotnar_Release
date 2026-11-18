@@ -86,6 +86,8 @@ struct RunRecord {
     build_ms: u64,
     run_ms: u64,
     cache_hit: bool,
+    #[serde(default)]
+    warm: bool,
     output_bytes: usize,
     output_hash: String,
 }
@@ -654,6 +656,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     let identical = failed == 0;
     let mut stats_map: BTreeMap<String, TargetStats> = BTreeMap::new();
     let mut output_bytes = 0usize;
+    let mut warm_runs = 0usize;
     let mut errors = Vec::new();
     for job in &ledger.jobs {
         if let Some(e) = &job.error {
@@ -675,6 +678,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
             s.build_ms += r.build_ms as u128;
             s.run_ms += r.run_ms as u128;
             s.cache_hits += if r.cache_hit { 1 } else { 0 };
+            warm_runs += if r.warm { 1 } else { 0 };
             output_bytes += r.output_bytes;
         }
     }
@@ -705,6 +709,9 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         "output_bytes": output_bytes,
         "wall_ms": wall_ms,
         "parallel": workers,
+        "batch_frames": run.batch_frames,
+        "chunks": if run.batch_frames > 1 { chunks.len() } else { 0 },
+        "warm_runs": warm_runs,
         "jobs_per_s": if wall_ms == 0 { 0.0 } else { run.count as f64 * 1000.0 / wall_ms as f64 },
         "cached": false,
         "resumed": resumed,
@@ -861,6 +868,7 @@ fn run_batch_chunk(
                 },
                 run_ms,
                 cache_hit: i == 0 && meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true),
+                warm: meta.get("warm").and_then(|x| x.as_bool()) == Some(true),
                 output_bytes: bytes,
                 output_hash,
             });
@@ -919,6 +927,7 @@ fn run_one_job(
                         build_ms: meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0),
                         run_ms: meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0),
                         cache_hit: meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true),
+                        warm: meta.get("warm").and_then(|x| x.as_bool()) == Some(true),
                         output_bytes: bytes,
                         output_hash,
                     });

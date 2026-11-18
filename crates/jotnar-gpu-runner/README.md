@@ -159,7 +159,9 @@ for a target has failed, the scheduler tries the group again.
 
 The controller uploads the batch payload once per runner with
 `payload-put`, then sends only the payload id per job. The runner caches parsed
-payloads and compiled artifacts; large outputs use binary transport.
+payloads and compiled artifacts; large outputs use binary transport. The summary
+reports `batch_frames`, `chunks`, and `warm_runs` alongside wall time and
+throughput.
 
 ## Warm frames
 

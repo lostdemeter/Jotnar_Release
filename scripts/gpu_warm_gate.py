@@ -104,6 +104,8 @@ def run_gate(args, size, mode, count, batch_id, batch_frames):
         "wall_s": round(wall_s, 3),
         "jobs_per_s": summary["jobs_per_s"],
         "retries": summary.get("retries", 0),
+        "warm_runs": summary.get("warm_runs", 0),
+        "chunks": summary.get("chunks", 0),
         "output_bytes": summary.get("output_bytes", 0),
         "targets": summary.get("targets", []),
         "stderr": proc.stderr.strip(),
