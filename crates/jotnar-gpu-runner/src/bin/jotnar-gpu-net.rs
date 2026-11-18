@@ -4,14 +4,16 @@
 //! model-blind; this controller is explicitly target-aware and runs the same
 //! listing on selected GPU runners, comparing outputs with a tolerance policy.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use jotnar::value::hash_bytes;
 use jotnar_gpu_runner::client::{RunReply, Runner};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 
 fn usage() -> &'static str {
@@ -23,9 +25,11 @@ fn usage() -> &'static str {
        jotnar-gpu-net [--token T] [--runner hip=ADDR] [--runner cuda=ADDR] \\\n\
          [--atol X] [--rtol X] run <listing.asm> --payload FILE \\\n\
          --outputs a,b [--target hip|cuda|both] [--count N] [--parallel N]\n\
+         [--ledger DIR] [--batch-id ID] [--max-attempts N]\n\
      \n\
      --runner may be repeated. --target both runs the same job on one runner\n\
-     of each target and compares the outputs. --count runs N copies.\n"
+     of each target and compares the outputs. --count runs N copies. --ledger\n\
+     defaults to artifacts/gpu-batches; a repeated batch id resumes a batch.\n"
 }
 
 struct Config {
@@ -41,6 +45,9 @@ struct RunArgs {
     target: String,
     count: usize,
     parallel: usize,
+    ledger: PathBuf,
+    batch_id: String,
+    max_attempts: usize,
 }
 
 #[derive(Default)]
@@ -53,6 +60,50 @@ struct TargetStats {
     build_ms: u128,
     run_ms: u128,
     cache_hits: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct LedgerSpec {
+    target: String,
+    listing_hash: String,
+    payload_hash: String,
+    outputs: Vec<String>,
+    count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RunRecord {
+    target: String,
+    addr: String,
+    attempts: usize,
+    compile_ms: u64,
+    build_ms: u64,
+    run_ms: u64,
+    cache_hit: bool,
+    output_bytes: usize,
+    output_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LedgerJob {
+    index: usize,
+    state: String,
+    error: Option<String>,
+    #[serde(default)]
+    retries: usize,
+    runs: Vec<RunRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Ledger {
+    v: u32,
+    batch_id: String,
+    spec: LedgerSpec,
+    created_ms: u64,
+    updated_ms: u64,
+    complete: bool,
+    jobs: Vec<LedgerJob>,
+    summary: Option<Json>,
 }
 
 fn main() -> ExitCode {
@@ -143,6 +194,47 @@ fn real_main() -> Result<(), String> {
     }
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn default_batch_id() -> String {
+    format!("gpu-batch-{}-{}", now_ms() / 1000, std::process::id())
+}
+
+fn batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
+    let safe: String = batch_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("{safe}.json"))
+}
+
+fn save_ledger(path: &Path, ledger: &Ledger) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(ledger).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
+fn record_hash(reply: &RunReply) -> (usize, String) {
+    let outputs = reply.outputs.get("outputs").cloned().unwrap_or(Json::Null);
+    let body = serde_json::to_vec(&outputs).unwrap_or_default();
+    (body.len(), format!("{:016x}", hash_bytes(&body)))
+}
+
 fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut it = args.into_iter();
     let listing = PathBuf::from(it.next().ok_or("run needs <listing.asm>")?);
@@ -151,6 +243,9 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut target = "both".to_string();
     let mut count = 1usize;
     let mut parallel = 1usize;
+    let mut ledger = PathBuf::from("artifacts/gpu-batches");
+    let mut batch_id = None;
+    let mut max_attempts = 3usize;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--payload" => {
@@ -181,6 +276,15 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
                     .parse()
                     .map_err(|_| "--parallel must be an integer")?
             }
+            "--ledger" => ledger = PathBuf::from(it.next().ok_or("--ledger needs a dir")?),
+            "--batch-id" => batch_id = Some(it.next().ok_or("--batch-id needs a value")?),
+            "--max-attempts" => {
+                max_attempts = it
+                    .next()
+                    .ok_or("--max-attempts needs a number")?
+                    .parse()
+                    .map_err(|_| "--max-attempts must be an integer")?
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown run argument '{other}'")),
         }
@@ -195,6 +299,9 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
         target,
         count: count.max(1),
         parallel: parallel.max(1),
+        ledger,
+        batch_id: batch_id.unwrap_or_else(default_batch_id),
+        max_attempts: max_attempts.max(1),
     })
 }
 
@@ -229,6 +336,59 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         .map_err(|e| format!("read {}: {e}", run.payload.display()))?;
     let payload: Json = serde_json::from_str(&payload_text).map_err(|e| e.to_string())?;
 
+    let spec = LedgerSpec {
+        target: run.target.clone(),
+        listing_hash: format!("{:016x}", hash_bytes(listing.as_bytes())),
+        payload_hash: format!("{:016x}", hash_bytes(payload_text.as_bytes())),
+        outputs: run.outputs.clone(),
+        count: run.count,
+    };
+    let path = batch_ledger_path(&run.ledger, &run.batch_id);
+    let existed = path.exists();
+    let ledger = if existed {
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let l: Ledger =
+            serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+        if l.spec != spec {
+            return Err(format!(
+                "ledger {} is for a different spec (target/outputs/count/listing/payload)",
+                path.display()
+            ));
+        }
+        l
+    } else {
+        Ledger {
+            v: 1,
+            batch_id: run.batch_id.clone(),
+            spec,
+            created_ms: now_ms(),
+            updated_ms: now_ms(),
+            complete: false,
+            jobs: (0..run.count)
+                .map(|i| LedgerJob {
+                    index: i,
+                    state: "pending".to_string(),
+                    error: None,
+                    retries: 0,
+                    runs: Vec::new(),
+                })
+                .collect(),
+            summary: None,
+        }
+    };
+
+    if ledger.complete {
+        if let Some(mut summary) = ledger.summary.clone() {
+            if let Some(o) = summary.as_object_mut() {
+                o.insert("cached".into(), json!(true));
+            }
+            println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+            return Ok(());
+        }
+    }
+    let resumed = existed && ledger.jobs.iter().any(|j| j.state == "done");
+
     let hip: Vec<usize> = cfg
         .runners
         .iter()
@@ -257,124 +417,83 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         return Err(format!("no runner for target {}", run.target));
     }
 
-    let mut selected: Vec<usize> = groups.iter().flatten().copied().collect();
-    selected.sort_unstable();
-    selected.dedup();
-    let stat_index: HashMap<usize, usize> = selected
+    let pending: Vec<usize> = ledger
+        .jobs
         .iter()
-        .enumerate()
-        .map(|(si, &ri)| (ri, si))
+        .filter(|j| j.state != "done")
+        .map(|j| j.index)
         .collect();
-    let mut initial_stats = Vec::with_capacity(selected.len());
-    for &ri in &selected {
-        let r = &cfg.runners[ri];
-        initial_stats.push(TargetStats {
-            target: r.target.clone(),
-            addr: r.addr.clone(),
-            ..Default::default()
-        });
-    }
-
-    let workers = run.parallel.min(run.count).max(1);
+    let pending_len = pending.len();
+    let workers = run.parallel.min(pending_len.max(1)).max(1);
     let next = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
-    let failed = AtomicUsize::new(0);
-    let output_bytes = AtomicUsize::new(0);
-    let identical = AtomicBool::new(true);
-    let errors = Mutex::new(Vec::<String>::new());
-    let stats = Mutex::new(initial_stats);
+    let ledger_lock = Mutex::new(ledger);
     let started = Instant::now();
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| loop {
-                let job = next.fetch_add(1, Ordering::SeqCst);
-                if job >= run.count {
+                let pos = next.fetch_add(1, Ordering::SeqCst);
+                if pos >= pending_len {
                     break;
                 }
-                let plan: Vec<usize> = groups.iter().map(|g| g[job % g.len()]).collect();
-                let mut replies: Vec<RunReply> = Vec::new();
-                let mut job_ok = true;
-                for &ri in &plan {
-                    let r = &cfg.runners[ri];
-                    match r.run(&listing, &payload, &run.outputs) {
-                        Ok(reply) => {
-                            let meta = &reply.header;
-                            let si = stat_index[&ri];
-                            {
-                                let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
-                                s[si].jobs += 1;
-                                s[si].compile_ms +=
-                                    meta.get("compile_ms").and_then(|x| x.as_u64()).unwrap_or(0)
-                                        as u128;
-                                s[si].build_ms +=
-                                    meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0)
-                                        as u128;
-                                s[si].run_ms +=
-                                    meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0)
-                                        as u128;
-                                if meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true) {
-                                    s[si].cache_hits += 1;
-                                }
-                            }
-                            output_bytes.fetch_add(
-                                serde_json::to_vec(&reply.outputs)
-                                    .map(|v| v.len())
-                                    .unwrap_or(0),
-                                Ordering::Relaxed,
-                            );
-                            replies.push(reply);
-                        }
-                        Err(e) => {
-                            job_ok = false;
-                            let si = stat_index[&ri];
-                            {
-                                let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
-                                s[si].failed += 1;
-                            }
-                            errors
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(format!("job {job} {} {}: {e}", r.target, r.addr));
-                        }
-                    }
-                }
-                if job_ok && replies.len() == plan.len() && replies.len() > 1 {
-                    for idx in 1..replies.len() {
-                        if let Err(e) = compare_replies(
-                            &replies[0],
-                            &replies[idx],
-                            &run.outputs,
-                            cfg.atol,
-                            cfg.rtol,
-                        ) {
-                            job_ok = false;
-                            identical.store(false, Ordering::SeqCst);
-                            let a = &cfg.runners[plan[0]];
-                            let b = &cfg.runners[plan[idx]];
-                            errors
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(format!(
-                                    "job {job} {} {} vs {} {}: {e}",
-                                    a.target, a.addr, b.target, b.addr
-                                ));
-                        }
-                    }
-                }
-                if job_ok {
-                    done.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    failed.fetch_add(1, Ordering::SeqCst);
+                let job = pending[pos];
+                let (state, error, retries, runs) = run_one_job(
+                    job,
+                    &groups,
+                    cfg,
+                    &listing,
+                    &payload,
+                    &run.outputs,
+                    run.max_attempts,
+                );
+                let mut l = ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
+                l.jobs[job] = LedgerJob {
+                    index: job,
+                    state,
+                    error,
+                    retries,
+                    runs,
+                };
+                l.updated_ms = now_ms();
+                if let Err(e) = save_ledger(&path, &l) {
+                    eprintln!("ledger save: {e}");
                 }
             });
         }
     });
 
-    let wall_ms = started.elapsed().as_millis();
-    let stats = stats.into_inner().unwrap_or_else(|e| e.into_inner());
-    let targets: Vec<Json> = stats
-        .iter()
+    let mut ledger = ledger_lock.into_inner().unwrap_or_else(|e| e.into_inner());
+    let done = ledger.jobs.iter().filter(|j| j.state == "done").count();
+    let failed = ledger.jobs.len() - done;
+    let identical = failed == 0;
+    let mut stats_map: BTreeMap<String, TargetStats> = BTreeMap::new();
+    let mut output_bytes = 0usize;
+    let mut errors = Vec::new();
+    for job in &ledger.jobs {
+        if let Some(e) = &job.error {
+            errors.push(format!("job {}: {e}", job.index));
+        }
+        if job.state != "done" {
+            continue;
+        }
+        for r in &job.runs {
+            let s = stats_map
+                .entry(r.addr.clone())
+                .or_insert_with(|| TargetStats {
+                    target: r.target.clone(),
+                    addr: r.addr.clone(),
+                    ..Default::default()
+                });
+            s.jobs += 1;
+            s.compile_ms += r.compile_ms as u128;
+            s.build_ms += r.build_ms as u128;
+            s.run_ms += r.run_ms as u128;
+            s.cache_hits += if r.cache_hit { 1 } else { 0 };
+            output_bytes += r.output_bytes;
+        }
+    }
+    let targets: Vec<Json> = stats_map
+        .values()
         .map(|s| {
             json!({
                 "target": s.target,
@@ -388,28 +507,111 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
             })
         })
         .collect();
-    let done = done.load(Ordering::SeqCst);
-    let failed = failed.load(Ordering::SeqCst);
-    let identical = identical.load(Ordering::SeqCst);
-    let output_bytes = output_bytes.load(Ordering::SeqCst);
-    let errors = errors.into_inner().unwrap_or_else(|e| e.into_inner());
-    let summary = json!({
+    let wall_ms = started.elapsed().as_millis();
+    let retries: usize = ledger.jobs.iter().map(|j| j.retries).sum();
+    let mut summary = json!({
         "targets": targets,
         "submitted": run.count,
         "done": done,
         "failed": failed,
+        "retries": retries,
         "identical_outputs": identical,
         "output_bytes": output_bytes,
         "wall_ms": wall_ms,
         "parallel": workers,
         "jobs_per_s": if wall_ms == 0 { 0.0 } else { run.count as f64 * 1000.0 / wall_ms as f64 },
+        "cached": false,
+        "resumed": resumed,
         "errors": errors,
     });
+    ledger.complete = failed == 0;
+    ledger.updated_ms = now_ms();
+    if ledger.complete {
+        ledger.summary = Some(summary.clone());
+    }
+    save_ledger(&path, &ledger)?;
+    if let Some(o) = summary.as_object_mut() {
+        o.insert("cached".into(), json!(false));
+        o.insert("resumed".into(), json!(resumed));
+    }
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
     if failed > 0 || !identical {
         return Err("GPU batch failed or outputs differed".to_string());
     }
     Ok(())
+}
+
+fn run_one_job(
+    job: usize,
+    groups: &[Vec<usize>],
+    cfg: &Config,
+    listing: &str,
+    payload: &Json,
+    outputs: &[String],
+    max_attempts: usize,
+) -> (String, Option<String>, usize, Vec<RunRecord>) {
+    let mut replies: Vec<RunReply> = Vec::new();
+    let mut runs = Vec::new();
+    let mut errors = Vec::new();
+    let mut retries = 0usize;
+    let mut all_ok = true;
+    for group in groups {
+        let mut got = false;
+        let mut last_err = String::new();
+        for attempt in 1..=max_attempts {
+            let ri = group[(job + attempt - 1) % group.len()];
+            let r = &cfg.runners[ri];
+            match r.run(listing, payload, outputs) {
+                Ok(reply) => {
+                    let (bytes, output_hash) = record_hash(&reply);
+                    let meta = &reply.header;
+                    runs.push(RunRecord {
+                        target: r.target.clone(),
+                        addr: r.addr.clone(),
+                        attempts: attempt,
+                        compile_ms: meta.get("compile_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+                        build_ms: meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+                        run_ms: meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+                        cache_hit: meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true),
+                        output_bytes: bytes,
+                        output_hash,
+                    });
+                    replies.push(reply);
+                    got = true;
+                    break;
+                }
+                Err(e) => {
+                    retries += 1;
+                    last_err = e;
+                }
+            }
+        }
+        if !got {
+            all_ok = false;
+            errors.push(format!(
+                "{} after {max_attempts} attempt(s): {last_err}",
+                cfg.runners[group[0]].target
+            ));
+        }
+    }
+    if all_ok && replies.len() > 1 {
+        for idx in 1..replies.len() {
+            if let Err(e) = compare_replies(&replies[0], &replies[idx], outputs, cfg.atol, cfg.rtol)
+            {
+                errors.push(format!(
+                    "{} vs {}: {e}",
+                    cfg.runners[groups[0][0]].target, cfg.runners[groups[idx][0]].target
+                ));
+            }
+        }
+    }
+    let state = if errors.is_empty() { "done" } else { "failed" };
+    let error = if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    };
+    (state.to_string(), error, retries, runs)
 }
 
 fn compare_replies(
@@ -538,4 +740,39 @@ mod tests {
         let z = json!({"kind":"F32","shape":[2],"data":[1.0,2.1]});
         assert!(compare_stream("OUT", &x, &z, 1e-4, 1e-4).is_err());
     }
+}
+
+#[test]
+fn ledger_path_and_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = batch_ledger_path(dir.path(), "a/b c");
+    assert_eq!(path.file_name().unwrap(), "a_b_c.json");
+    let ledger = Ledger {
+        v: 1,
+        batch_id: "a/b c".to_string(),
+        spec: LedgerSpec {
+            target: "both".to_string(),
+            listing_hash: "01".to_string(),
+            payload_hash: "02".to_string(),
+            outputs: vec!["OUT".to_string()],
+            count: 1,
+        },
+        created_ms: 1,
+        updated_ms: 2,
+        complete: false,
+        jobs: vec![LedgerJob {
+            index: 0,
+            state: "pending".to_string(),
+            error: None,
+            retries: 0,
+            runs: Vec::new(),
+        }],
+        summary: None,
+    };
+    save_ledger(&path, &ledger).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let back: Ledger = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.batch_id, "a/b c");
+    assert_eq!(back.jobs.len(), 1);
+    assert_eq!(back.spec.count, 1);
 }

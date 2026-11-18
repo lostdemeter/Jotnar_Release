@@ -108,11 +108,15 @@ companion to `jotnar-net`; the CPU node remains model-blind.
 ./jotnar-gpu-net --runner hip=192.168.1.195:9997 \
   --runner cuda=192.168.1.116:9997 --token "$TOKEN" \
   run job.asm --payload payload.json --outputs OUT \
-  --target both --count 20 --parallel 4
+  --target both --count 20 --parallel 4 \
+  --ledger artifacts/gpu-batches --batch-id demo --max-attempts 3
 ```
 
 `--target hip` or `--target cuda` runs only that target. `both` runs one
 runner per target and compares outputs using the scheduler's `atol`/`rtol`.
 Repeated `--runner` entries form a pool; jobs are assigned round-robin across
 the pool for each selected target. `--count` submits N copies and `--parallel`
-sets the number of concurrent job workers.
+sets the number of concurrent job workers. `--ledger` defaults to
+`artifacts/gpu-batches`; a repeated `--batch-id` resumes pending jobs and
+replays a completed batch from its cached summary. Failures retry across the
+target pool up to `--max-attempts`.

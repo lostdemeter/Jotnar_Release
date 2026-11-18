@@ -78,7 +78,7 @@ HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness o
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          391/391
+workspace tests          392/392
 ```
 
 The GPU parity gates fail if `nvcc`/`hipcc` is unavailable. Set `NVCC`/`HIPCC`
