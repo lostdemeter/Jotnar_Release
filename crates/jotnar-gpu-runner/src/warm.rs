@@ -1,12 +1,12 @@
 //! Runner-side warm worker pool for CUDA/HIP artifacts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use jotnar::codegen::infer::CKind;
 use jotnar::codegen::{Artifact, Target};
@@ -41,26 +41,80 @@ pub struct WarmRun {
 
 pub struct WarmCache {
     workers: HashMap<String, Arc<Mutex<WarmWorker>>>,
+    order: VecDeque<String>,
+    limit: usize,
 }
 
 impl WarmCache {
-    pub fn new() -> Self {
+    pub fn new(limit: usize) -> Self {
+        sweep_stale_workers();
         Self {
             workers: HashMap::new(),
+            order: VecDeque::new(),
+            limit: limit.max(1),
         }
     }
 
     pub fn get_or_create(&mut self, spec: &WarmSpec) -> Result<Arc<Mutex<WarmWorker>>, String> {
         if let Some(w) = self.workers.get(&spec.key) {
+            touch(&mut self.order, &spec.key);
             return Ok(w.clone());
+        }
+        while self.workers.len() >= self.limit {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            self.workers.remove(&old);
         }
         let w = Arc::new(Mutex::new(WarmWorker::start(spec.clone())?));
         self.workers.insert(spec.key.clone(), w.clone());
+        self.order.push_back(spec.key.clone());
         Ok(w)
     }
 
     pub fn remove(&mut self, key: &str) {
         self.workers.remove(key);
+        self.order.retain(|k| k != key);
+    }
+}
+
+fn touch(order: &mut VecDeque<String>, key: &str) {
+    if let Some(pos) = order.iter().position(|k| k == key) {
+        order.remove(pos);
+    }
+    order.push_back(key.to_string());
+}
+
+fn warm_base() -> PathBuf {
+    if Path::new("/dev/shm").is_dir() {
+        PathBuf::from("/dev/shm")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+fn sweep_stale_workers() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let base = warm_base();
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("jotnar-warm-") {
+            continue;
+        }
+        let Ok(owner) = std::fs::read_to_string(entry.path().join("owner")) else {
+            continue;
+        };
+        let Ok(pid) = owner.trim().parse::<u32>() else {
+            continue;
+        };
+        if !Path::new("/proc").join(pid.to_string()).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -147,11 +201,7 @@ pub fn spec_from_artifact(
 
 impl WarmWorker {
     fn start(spec: WarmSpec) -> Result<Self, String> {
-        let base = if Path::new("/dev/shm").is_dir() {
-            PathBuf::from("/dev/shm")
-        } else {
-            std::env::temp_dir()
-        };
+        let base = warm_base();
         let dir = tempfile::Builder::new()
             .prefix("jotnar-warm-")
             .tempdir_in(&base)
@@ -189,6 +239,8 @@ impl WarmWorker {
         }
         let cfg_path = dir.path().join("warm.cfg");
         std::fs::write(&cfg_path, cfg).map_err(|e| format!("warm config: {e}"))?;
+        std::fs::write(dir.path().join("owner"), std::process::id().to_string())
+            .map_err(|e| format!("warm owner: {e}"))?;
         let t0 = Instant::now();
         let mut child = Command::new(&spec.exe)
             .arg("--warm-frame")
@@ -283,6 +335,47 @@ impl Drop for WarmWorker {
     fn drop(&mut self) {
         let _ = self.stdin.write_all(&[0]);
         let _ = self.stdin.flush();
-        let _ = self.child.wait();
+        let started = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if started.elapsed() < Duration::from_secs(2) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) | Err(_) => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_warm_dir(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(warm_base())
+            .unwrap()
+    }
+
+    #[test]
+    fn sweep_removes_dead_owner() {
+        let dir = temp_warm_dir("jotnar-warm-test-dead-");
+        std::fs::write(dir.path().join("owner"), "4294967295").unwrap();
+        sweep_stale_workers();
+        assert!(!dir.path().exists());
+    }
+
+    #[test]
+    fn sweep_keeps_live_owner() {
+        let dir = temp_warm_dir("jotnar-warm-test-live-");
+        std::fs::write(dir.path().join("owner"), std::process::id().to_string()).unwrap();
+        sweep_stale_workers();
+        assert!(dir.path().exists());
     }
 }

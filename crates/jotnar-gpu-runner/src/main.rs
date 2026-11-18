@@ -150,6 +150,7 @@ fn real_main() -> Result<(), String> {
     let mut cache_dir = std::env::temp_dir().join("jotnar-gpu-runner-cache");
     let mut mdns = false;
     let mut warm = true;
+    let mut warm_cache_workers = 8usize;
     let mut payload_cache_bytes = 256 * 1024 * 1024usize;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -189,6 +190,14 @@ fn real_main() -> Result<(), String> {
             "--no-warm" => {
                 warm = false;
             }
+            "--warm-cache-workers" => {
+                i += 1;
+                warm_cache_workers = args
+                    .get(i)
+                    .ok_or("--warm-cache-workers needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --warm-cache-workers: {e}"))?;
+            }
             "--payload-cache-bytes" => {
                 i += 1;
                 payload_cache_bytes = args
@@ -221,7 +230,7 @@ fn real_main() -> Result<(), String> {
         build_lock: Arc::new(Mutex::new(())),
         mdns,
         warm,
-        warm_cache: Arc::new(Mutex::new(warm::WarmCache::new())),
+        warm_cache: Arc::new(Mutex::new(warm::WarmCache::new(warm_cache_workers))),
         payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
         artifact_cache: Arc::new(Mutex::new(HashMap::new())),
     };
