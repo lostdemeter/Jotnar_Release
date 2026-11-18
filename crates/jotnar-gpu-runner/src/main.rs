@@ -19,12 +19,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jotnar::asm::AsmOptions;
 use jotnar::codegen::infer::CKind;
@@ -55,6 +56,8 @@ struct Config {
     warm_cache: Arc<Mutex<warm::WarmCache>>,
     payload_cache: Arc<Mutex<PayloadCache>>,
     artifact_cache: Arc<Mutex<ArtifactCache>>,
+    jobs: Arc<Mutex<JobStore>>,
+    self_addr: String,
 }
 
 struct CachedPayload {
@@ -143,6 +146,77 @@ impl ArtifactCache {
             }
         }
     }
+}
+
+const RETAIN_JOBS: usize = 1024;
+
+struct AsyncJob {
+    id: String,
+    state: String,
+    error: Option<String>,
+    created_ms: u128,
+    started_ms: Option<u128>,
+    finished_ms: Option<u128>,
+    result_header: Option<Json>,
+    result_body: Vec<u8>,
+    cancel: Arc<AtomicBool>,
+}
+
+struct JobStore {
+    jobs: HashMap<String, AsyncJob>,
+    order: VecDeque<String>,
+    next_id: u64,
+    limit: usize,
+}
+
+impl JobStore {
+    fn new(limit: usize) -> Self {
+        Self {
+            jobs: HashMap::new(),
+            order: VecDeque::new(),
+            next_id: 1,
+            limit: limit.max(1),
+        }
+    }
+
+    fn next_id(&mut self) -> String {
+        let id = format!("gpu-{}-{}", now_ms(), self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+
+    fn insert(&mut self, job: AsyncJob) {
+        let id = job.id.clone();
+        self.jobs.insert(id.clone(), job);
+        self.order.push_back(id);
+        while self.jobs.len() > self.limit {
+            let mut removed = false;
+            for idx in 0..self.order.len() {
+                let key = self.order[idx].clone();
+                let evict = self
+                    .jobs
+                    .get(&key)
+                    .map(|j| !matches!(j.state.as_str(), "queued" | "running"))
+                    .unwrap_or(true);
+                if evict {
+                    self.order.remove(idx);
+                    self.jobs.remove(&key);
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                break;
+            }
+        }
+    }
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 fn usage() -> &'static str {
@@ -279,7 +353,7 @@ fn real_main() -> Result<(), String> {
             usage()
         ));
     }
-    let cfg = Config {
+    let mut cfg = Config {
         bind,
         token,
         target,
@@ -292,6 +366,8 @@ fn real_main() -> Result<(), String> {
         warm_cache: Arc::new(Mutex::new(warm::WarmCache::new(warm_cache_workers))),
         payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
         artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(artifact_cache_entries))),
+        jobs: Arc::new(Mutex::new(JobStore::new(RETAIN_JOBS))),
+        self_addr: String::new(),
     };
     if cfg.warm {
         if let Some(idle) = cfg.warm_idle {
@@ -316,6 +392,17 @@ fn real_main() -> Result<(), String> {
         .local_addr()
         .map_err(|e| format!("bound address: {e}"))?
         .port();
+    let host = cfg
+        .bind
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or("127.0.0.1");
+    let host = match host {
+        "0.0.0.0" => "127.0.0.1",
+        "[::]" => "[::1]",
+        other => other,
+    };
+    cfg.self_addr = format!("{host}:{port}");
     let _mdns = if cfg.mdns {
         match start_mdns(&cfg, port) {
             Ok(daemon) => {
@@ -485,6 +572,30 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
                 &[],
             )
         }
+        "submit" => {
+            if let Err(e) = submit_job(&mut stream, cfg, &id, &header, payload) {
+                send_error(&mut stream, &id, "submit-failed", &e)?;
+            }
+            Ok(())
+        }
+        "job-status" => {
+            if let Err(e) = job_status(&mut stream, cfg, &id, &header) {
+                send_error(&mut stream, &id, "job-status-failed", &e)?;
+            }
+            Ok(())
+        }
+        "job-result" => {
+            if let Err(e) = job_result(&mut stream, cfg, &id, &header) {
+                send_error(&mut stream, &id, "job-result-failed", &e)?;
+            }
+            Ok(())
+        }
+        "job-cancel" => {
+            if let Err(e) = job_cancel(&mut stream, cfg, &id, &header) {
+                send_error(&mut stream, &id, "job-cancel-failed", &e)?;
+            }
+            Ok(())
+        }
         "run" => {
             if let Err(e) = run(&mut stream, cfg, &id, &header, payload) {
                 send_error(&mut stream, &id, "run-failed", &e)?;
@@ -510,6 +621,338 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             &format!("no such message {other:?}"),
         ),
     }
+}
+
+fn submit_job(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+    payload: &[u8],
+) -> Result<(), String> {
+    let outputs: Vec<String> = header
+        .get("outputs")
+        .and_then(|x| x.as_array())
+        .ok_or("submit needs outputs[]")?
+        .iter()
+        .map(|x| {
+            x.as_str()
+                .map(|s| s.to_string())
+                .ok_or("outputs must be strings")
+        })
+        .collect::<Result<_, _>>()?;
+    if outputs.is_empty() {
+        return send_error(
+            stream,
+            id,
+            "bad-request",
+            "submit needs at least one output",
+        );
+    }
+    let frames = header.get("frames").and_then(|x| x.as_u64()).unwrap_or(1) as usize;
+    if frames == 0 || frames > MAX_BATCH_FRAMES {
+        return send_error(
+            stream,
+            id,
+            "bad-request",
+            &format!("submit frames must be 1..={MAX_BATCH_FRAMES}"),
+        );
+    }
+    let body: Json =
+        serde_json::from_slice(payload).map_err(|e| format!("bad submit body: {e}"))?;
+    let listing = body
+        .get("listing")
+        .and_then(|x| x.as_str())
+        .ok_or("submit body needs listing")?;
+    let _ = listing;
+
+    let typ = if frames > 1 { "run-batch" } else { "run" };
+    let mut inner = json!({
+        "v": PROTO_V,
+        "id": 1,
+        "type": typ,
+        "target": cfg.target.as_str(),
+        "outputs": outputs,
+    });
+    if frames > 1 {
+        inner["frames"] = json!(frames);
+    }
+    if let Some(pid) = header
+        .get("payload_id")
+        .or_else(|| body.get("payload_id"))
+        .and_then(|x| x.as_str())
+    {
+        inner["payload_id"] = json!(pid);
+    }
+    if let Some(fmt) = header.get("output_format").and_then(|x| x.as_str()) {
+        inner["output_format"] = json!(fmt);
+    }
+    if let Some(token) = &cfg.token {
+        inner["auth"] = json!(token);
+    }
+    let inner_body = payload.to_vec();
+    let job_id = {
+        let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let job_id = store.next_id();
+        let cancel = Arc::new(AtomicBool::new(false));
+        store.insert(AsyncJob {
+            id: job_id.clone(),
+            state: "queued".to_string(),
+            error: None,
+            created_ms: now_ms(),
+            started_ms: None,
+            finished_ms: None,
+            result_header: None,
+            result_body: Vec::new(),
+            cancel: cancel.clone(),
+        });
+        (job_id, cancel)
+    };
+    let (job_id, cancel) = job_id;
+    let thread_cfg = cfg.clone();
+    let thread_inner = inner.clone();
+    let thread_id = job_id.clone();
+    thread::spawn(move || {
+        if cancel.load(Ordering::SeqCst) {
+            finish_job(&thread_cfg, &thread_id, "canceled", None, None, Vec::new());
+            return;
+        }
+        mark_running(&thread_cfg, &thread_id);
+        let result = self_request(&thread_cfg, &thread_inner, &inner_body);
+        match result {
+            Ok((reply, body)) if reply.get("ok").and_then(|x| x.as_bool()) == Some(true) => {
+                finish_job(&thread_cfg, &thread_id, "done", None, Some(reply), body);
+            }
+            Ok((reply, _)) => {
+                let err = reply
+                    .get("error")
+                    .cloned()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| reply.to_string());
+                finish_job(
+                    &thread_cfg,
+                    &thread_id,
+                    "failed",
+                    Some(err),
+                    None,
+                    Vec::new(),
+                );
+            }
+            Err(e) => finish_job(&thread_cfg, &thread_id, "failed", Some(e), None, Vec::new()),
+        }
+    });
+
+    send(
+        stream,
+        &json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "submit-ok",
+            "ok": true,
+            "job_id": job_id,
+            "state": "queued",
+        }),
+        &[],
+    )
+}
+
+fn mark_running(cfg: &Config, job_id: &str) {
+    let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = store.jobs.get_mut(job_id) {
+        job.state = "running".to_string();
+        job.started_ms = Some(now_ms());
+    }
+}
+
+fn finish_job(
+    cfg: &Config,
+    job_id: &str,
+    state: &str,
+    error: Option<String>,
+    header: Option<Json>,
+    body: Vec<u8>,
+) {
+    let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = store.jobs.get_mut(job_id) {
+        job.state = state.to_string();
+        job.error = error;
+        job.finished_ms = Some(now_ms());
+        job.result_header = header;
+        job.result_body = body;
+    }
+}
+
+fn self_request(cfg: &Config, header: &Json, body: &[u8]) -> Result<(Json, Vec<u8>), String> {
+    let addrs = cfg
+        .self_addr
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {}: {e}", cfg.self_addr))?;
+    let mut last = None;
+    let mut stream = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| {
+        format!(
+            "connect {}: {}",
+            cfg.self_addr,
+            last.map(|e| e.to_string()).unwrap_or_default()
+        )
+    })?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+    let frame = encode_frame(header, body).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| format!("write: {e}"))?;
+    let mut hdr = [0u8; 4];
+    stream
+        .read_exact(&mut hdr)
+        .map_err(|e| format!("read header: {e}"))?;
+    let n = u32::from_be_bytes(hdr) as usize;
+    if n > 2 * 1024 * 1024 * 1024 {
+        return Err("response too large".to_string());
+    }
+    let mut buf = vec![0u8; n];
+    stream
+        .read_exact(&mut buf)
+        .map_err(|e| format!("read body: {e}"))?;
+    let mut full = Vec::with_capacity(4 + n);
+    full.extend_from_slice(&hdr);
+    full.extend_from_slice(&buf);
+    decode_frame(&full)
+        .map(|(header, payload)| (header, payload.to_vec()))
+        .map_err(|e| e.to_string())
+}
+
+fn job_status(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+) -> Result<(), String> {
+    let job_id = header
+        .get("job_id")
+        .and_then(|x| x.as_str())
+        .ok_or("job-status needs job_id")?;
+    let store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+    let job = store
+        .jobs
+        .get(job_id)
+        .ok_or_else(|| format!("unknown job {job_id:?}"))?;
+    send(
+        stream,
+        &json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "job-status-ok",
+            "ok": true,
+            "job": {
+                "id": job.id,
+                "state": job.state,
+                "error": job.error,
+                "created_ms": job.created_ms,
+                "started_ms": job.started_ms,
+                "finished_ms": job.finished_ms,
+                "bytes": job.result_body.len(),
+            },
+        }),
+        &[],
+    )
+}
+
+fn job_result(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+) -> Result<(), String> {
+    let job_id = header
+        .get("job_id")
+        .and_then(|x| x.as_str())
+        .ok_or("job-result needs job_id")?;
+    let (state, error, reply, body) = {
+        let store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let job = store
+            .jobs
+            .get(job_id)
+            .ok_or_else(|| format!("unknown job {job_id:?}"))?;
+        (
+            job.state.clone(),
+            job.error.clone(),
+            job.result_header.clone(),
+            job.result_body.clone(),
+        )
+    };
+    if state != "done" {
+        return send_error(
+            stream,
+            id,
+            if state == "failed" {
+                "job-failed"
+            } else {
+                "not-ready"
+            },
+            &error.unwrap_or_else(|| format!("job is {state}")),
+        );
+    }
+    let mut reply = reply.ok_or("job has no result")?;
+    if let Some(o) = reply.as_object_mut() {
+        o.insert("id".into(), id.clone());
+        o.insert("type".into(), json!("job-result-ok"));
+        o.insert("ok".into(), json!(true));
+        o.insert("job_id".into(), json!(job_id));
+    }
+    send(stream, &reply, &body)
+}
+
+fn job_cancel(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+) -> Result<(), String> {
+    let job_id = header
+        .get("job_id")
+        .and_then(|x| x.as_str())
+        .ok_or("job-cancel needs job_id")?;
+    let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+    let job = store
+        .jobs
+        .get_mut(job_id)
+        .ok_or_else(|| format!("unknown job {job_id:?}"))?;
+    let previous = job.state.clone();
+    let accepted = if previous == "queued" {
+        job.cancel.store(true, Ordering::SeqCst);
+        job.state = "canceled".to_string();
+        job.finished_ms = Some(now_ms());
+        true
+    } else if previous == "running" {
+        job.cancel.store(true, Ordering::SeqCst);
+        false
+    } else {
+        false
+    };
+    send(
+        stream,
+        &json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "job-cancel-ok",
+            "ok": true,
+            "job_id": job_id,
+            "accepted": accepted,
+            "previous": previous,
+            "state": job.state,
+        }),
+        &[],
+    )
 }
 
 fn run(
@@ -1317,5 +1760,35 @@ mod artifact_cache_tests {
         assert!(cache.get("b").is_none());
         assert!(cache.get("a").is_some());
         assert!(cache.get("c").is_some());
+    }
+}
+
+#[cfg(test)]
+mod job_store_tests {
+    use super::*;
+
+    fn job(id: &str, state: &str) -> AsyncJob {
+        AsyncJob {
+            id: id.to_string(),
+            state: state.to_string(),
+            error: None,
+            created_ms: 0,
+            started_ms: None,
+            finished_ms: None,
+            result_header: None,
+            result_body: Vec::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn job_store_evicts_completed_but_keeps_active() {
+        let mut store = JobStore::new(2);
+        store.insert(job("run", "running"));
+        store.insert(job("done-a", "done"));
+        store.insert(job("done-b", "done"));
+        assert!(store.jobs.contains_key("run"));
+        assert!(!store.jobs.contains_key("done-a"));
+        assert!(store.jobs.contains_key("done-b"));
     }
 }
