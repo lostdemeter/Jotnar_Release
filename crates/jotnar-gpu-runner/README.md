@@ -57,7 +57,7 @@ HIP host:
 env HIPCC=/opt/rocm-7.2.4/bin/hipcc HIP_ARCH=gfx1100 \
   PATH=/opt/rocm-7.2.4/bin:$PATH \
   ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target hip --token "$TOKEN" \
-  --cache-dir /tmp/jotnar-gpu-runner-cache
+  --cache-dir /tmp/jotnar-gpu-runner-cache --mdns
 ```
 
 CUDA host:
@@ -66,7 +66,7 @@ CUDA host:
 env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
   CUDA_ARCH=sm_120 \
   ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target cuda --token "$TOKEN" \
-  --cache-dir /tmp/jotnar-gpu-runner-cache
+  --cache-dir /tmp/jotnar-gpu-runner-cache --mdns
 ```
 
 Client and two-host comparison:
@@ -100,7 +100,10 @@ python3 scripts/gpu_runner_compare.py \
 companion to `jotnar-net`; the CPU node remains model-blind.
 
 ```sh
-# health of each runner
+# auto-discover advertised runners
+./jotnar-gpu-net --discover --discover-timeout-ms 3000 --token "$TOKEN" health
+
+# health of each explicit runner
 ./jotnar-gpu-net --runner hip=192.168.1.195:9997 \
   --runner cuda=192.168.1.116:9997 --token "$TOKEN" health
 

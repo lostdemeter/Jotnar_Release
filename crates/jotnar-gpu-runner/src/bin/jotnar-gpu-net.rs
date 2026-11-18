@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jotnar::value::hash_bytes;
 use jotnar_gpu_runner::client::{RunReply, Runner};
+use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 
@@ -21,9 +22,9 @@ fn usage() -> &'static str {
      \n\
      usage:\n\
        jotnar-gpu-net [--token T] [--runner hip=ADDR] [--runner cuda=ADDR] \\\n\
-         [--atol X] [--rtol X] health\n\
+         [--atol X] [--rtol X] [--discover] health\n\
        jotnar-gpu-net [--token T] [--runner hip=ADDR] [--runner cuda=ADDR] \\\n\
-         [--atol X] [--rtol X] run <listing.asm> --payload FILE \\\n\
+         [--atol X] [--rtol X] [--discover] run <listing.asm> --payload FILE \\\n\
          --outputs a,b [--target hip|cuda|both] [--count N] [--parallel N]\n\
          [--ledger DIR] [--batch-id ID] [--max-attempts N]\n\
      \n\
@@ -122,6 +123,8 @@ fn real_main() -> Result<(), String> {
     let mut token = None;
     let mut atol = 1e-4;
     let mut rtol = 1e-4;
+    let mut discover = false;
+    let mut discover_timeout_ms = 3000u64;
     while let Some(a) = args.first().cloned() {
         match a.as_str() {
             "--runner" => {
@@ -165,6 +168,20 @@ fn real_main() -> Result<(), String> {
                     .map_err(|_| "--rtol must be a number")?;
                 args.remove(0);
             }
+            "--discover" => {
+                args.remove(0);
+                discover = true;
+            }
+            "--discover-timeout-ms" => {
+                args.remove(0);
+                discover_timeout_ms = args
+                    .first()
+                    .cloned()
+                    .ok_or("--discover-timeout-ms needs milliseconds")?
+                    .parse()
+                    .map_err(|_| "--discover-timeout-ms must be an integer")?;
+                args.remove(0);
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             _ => break,
         }
@@ -172,8 +189,27 @@ fn real_main() -> Result<(), String> {
     if args.is_empty() {
         return Err(usage().to_string());
     }
-    if runners.is_empty() {
+    if runners.is_empty() && !discover {
         return Err("at least one --runner hip=ADDR|cuda=ADDR is required".to_string());
+    }
+    if discover {
+        let found = discover_gpu(
+            Duration::from_millis(discover_timeout_ms.max(1)),
+            token.clone(),
+        )?;
+        let before = runners.len();
+        for r in found {
+            if !runners
+                .iter()
+                .any(|x| x.target == r.target && x.addr == r.addr)
+            {
+                runners.push(r);
+            }
+        }
+        eprintln!("discovery added {} runner(s)", runners.len() - before);
+    }
+    if runners.is_empty() {
+        return Err("no GPU runners found".to_string());
     }
     for r in &mut runners {
         r.token = token.clone();
@@ -303,6 +339,49 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
         batch_id: batch_id.unwrap_or_else(default_batch_id),
         max_attempts: max_attempts.max(1),
     })
+}
+
+fn discover_gpu(timeout: Duration, token: Option<String>) -> Result<Vec<Runner>, String> {
+    let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
+    let receiver = daemon
+        .browse("_jotnar-gpu._tcp.local.")
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    let mut found: BTreeMap<String, Runner> = BTreeMap::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let event = match receiver.recv_timeout(remaining) {
+            Ok(event) => event,
+            Err(_) => break,
+        };
+        if let ServiceEvent::ServiceResolved(info) = event {
+            let target = info
+                .get_property_val_str("target")
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if target != "hip" && target != "cuda" {
+                continue;
+            }
+            let port = info.get_port();
+            for ip in info.get_addresses_v4().iter() {
+                if ip.is_loopback() {
+                    continue;
+                }
+                let addr = format!("{ip}:{port}");
+                let key = format!("{target}|{addr}");
+                found.entry(key).or_insert(Runner {
+                    target: target.clone(),
+                    addr,
+                    token: token.clone(),
+                });
+            }
+        }
+    }
+    let _ = daemon.shutdown();
+    Ok(found.into_values().collect())
 }
 
 fn health(cfg: &Config) -> Result<(), String> {

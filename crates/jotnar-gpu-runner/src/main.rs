@@ -16,6 +16,7 @@
 //! Messages are one frame per connection. `ping` is available for capability
 //! checks.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -31,6 +32,7 @@ use jotnar::codegen::{build, compile_program, CompileOptions, Target};
 use jotnar::payload::{feeds_from_json, value_to_json, Feeds};
 use jotnar::protocol::{decode_frame, encode_frame, PROTO_V, RUNTIME_VERSION};
 use jotnar::value::{array_from_vec, Value};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde_json::{json, Value as Json};
 
 const DEFAULT_BIND: &str = "127.0.0.1:9997";
@@ -44,6 +46,7 @@ struct Config {
     max_frame: usize,
     cache_dir: PathBuf,
     build_lock: Arc<Mutex<()>>,
+    mdns: bool,
 }
 
 fn usage() -> &'static str {
@@ -51,7 +54,7 @@ fn usage() -> &'static str {
      \n\
      usage:\n\
        jotnar-gpu-runner --target hip|cuda [--bind ADDR] [--token SECRET]\n\
-                         [--max-frame BYTES] [--cache-dir DIR]\n\
+                         [--max-frame BYTES] [--cache-dir DIR] [--mdns]\n\
      \n\
      The runner compiles and runs Jotnar listings on the local GPU host. Set\n\
      HIPCC / HIP_ARCH for HIP, or NVCC / CUDA_ARCH for CUDA."
@@ -73,6 +76,7 @@ fn real_main() -> Result<(), String> {
     let mut target = None;
     let mut max_frame = DEFAULT_MAX_FRAME;
     let mut cache_dir = std::env::temp_dir().join("jotnar-gpu-runner-cache");
+    let mut mdns = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -105,6 +109,9 @@ fn real_main() -> Result<(), String> {
                 i += 1;
                 cache_dir = PathBuf::from(args.get(i).ok_or("--cache-dir needs a path")?);
             }
+            "--mdns" => {
+                mdns = true;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -118,8 +125,30 @@ fn real_main() -> Result<(), String> {
         max_frame: max_frame.max(1024),
         cache_dir,
         build_lock: Arc::new(Mutex::new(())),
+        mdns,
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("bound address: {e}"))?
+        .port();
+    let _mdns = if cfg.mdns {
+        match start_mdns(&cfg, port) {
+            Ok(daemon) => {
+                eprintln!(
+                    "mdns: advertising _jotnar-gpu._tcp on port {port} as {}",
+                    cfg.target.as_str()
+                );
+                Some(daemon)
+            }
+            Err(e) => {
+                eprintln!("mdns unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     eprintln!(
         "gpu-runner target={} bind={} runtime={}",
         cfg.target.as_str(),
@@ -140,6 +169,49 @@ fn real_main() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn start_mdns(cfg: &Config, port: u16) -> Result<ServiceDaemon, String> {
+    let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
+    let mut props = HashMap::new();
+    props.insert("target".to_string(), cfg.target.as_str().to_string());
+    props.insert(
+        "arch".to_string(),
+        if cfg.target == Target::Hip {
+            std::env::var("HIP_ARCH").unwrap_or_default()
+        } else {
+            std::env::var("CUDA_ARCH").unwrap_or_default()
+        },
+    );
+    props.insert(
+        "toolchain".to_string(),
+        if cfg.target == Target::Hip {
+            "hipcc".to_string()
+        } else {
+            "nvcc".to_string()
+        },
+    );
+    props.insert(
+        "auth".to_string(),
+        if cfg.token.is_some() {
+            "required".to_string()
+        } else {
+            "none".to_string()
+        },
+    );
+    props.insert("runtime_version".to_string(), RUNTIME_VERSION.to_string());
+    props.insert("pid".to_string(), std::process::id().to_string());
+    let host = format!(
+        "jotnar-gpu-{}-{}.local.",
+        cfg.target.as_str(),
+        std::process::id()
+    );
+    let instance = format!("Jotnar GPU {} {}", cfg.target.as_str(), std::process::id());
+    let info = ServiceInfo::new("_jotnar-gpu._tcp.local.", &instance, &host, "", port, props)
+        .map_err(|e| e.to_string())?
+        .enable_addr_auto();
+    daemon.register(info).map_err(|e| e.to_string())?;
+    Ok(daemon)
 }
 
 fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
