@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use jotnar::asm::AsmOptions;
 use jotnar::codegen::infer::CKind;
@@ -51,6 +51,7 @@ struct Config {
     build_lock: Arc<Mutex<()>>,
     mdns: bool,
     warm: bool,
+    warm_idle: Option<Duration>,
     warm_cache: Arc<Mutex<warm::WarmCache>>,
     payload_cache: Arc<Mutex<PayloadCache>>,
     artifact_cache: Arc<Mutex<ArtifactCache>>,
@@ -190,6 +191,7 @@ fn real_main() -> Result<(), String> {
     let mut mdns = false;
     let mut warm = true;
     let mut warm_cache_workers = 8usize;
+    let mut warm_idle_ms = 300_000u64;
     let mut payload_cache_bytes = 256 * 1024 * 1024usize;
     let mut artifact_cache_entries = 64usize;
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -238,6 +240,14 @@ fn real_main() -> Result<(), String> {
                     .parse()
                     .map_err(|e| format!("bad --warm-cache-workers: {e}"))?;
             }
+            "--warm-idle-ms" => {
+                i += 1;
+                warm_idle_ms = args
+                    .get(i)
+                    .ok_or("--warm-idle-ms needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --warm-idle-ms: {e}"))?;
+            }
             "--payload-cache-bytes" => {
                 i += 1;
                 payload_cache_bytes = args
@@ -278,10 +288,29 @@ fn real_main() -> Result<(), String> {
         build_lock: Arc::new(Mutex::new(())),
         mdns,
         warm,
+        warm_idle: (warm_idle_ms > 0).then(|| Duration::from_millis(warm_idle_ms)),
         warm_cache: Arc::new(Mutex::new(warm::WarmCache::new(warm_cache_workers))),
         payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
         artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(artifact_cache_entries))),
     };
+    if cfg.warm {
+        if let Some(idle) = cfg.warm_idle {
+            let cache = Arc::clone(&cfg.warm_cache);
+            let tick = idle
+                .min(Duration::from_secs(30))
+                .max(Duration::from_millis(100));
+            let _ = thread::Builder::new()
+                .name("jotnar-warm-reaper".to_string())
+                .spawn(move || loop {
+                    thread::sleep(tick);
+                    let dropped = {
+                        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+                        cache.remove_idle(idle, Instant::now())
+                    };
+                    drop(dropped);
+                });
+        }
+    }
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     let port = listener
         .local_addr()

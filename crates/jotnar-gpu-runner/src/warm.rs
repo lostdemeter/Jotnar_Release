@@ -39,8 +39,13 @@ pub struct WarmRun {
     pub frame_ms: u128,
 }
 
+struct WarmEntry {
+    worker: Arc<Mutex<WarmWorker>>,
+    last_used: Instant,
+}
+
 pub struct WarmCache {
-    workers: HashMap<String, Arc<Mutex<WarmWorker>>>,
+    workers: HashMap<String, WarmEntry>,
     order: VecDeque<String>,
     limit: usize,
 }
@@ -59,9 +64,10 @@ impl WarmCache {
         &mut self,
         spec: &WarmSpec,
     ) -> Result<(Arc<Mutex<WarmWorker>>, bool), String> {
-        if let Some(w) = self.workers.get(&spec.key) {
+        if let Some(entry) = self.workers.get_mut(&spec.key) {
+            entry.last_used = Instant::now();
             touch(&mut self.order, &spec.key);
-            return Ok((w.clone(), false));
+            return Ok((entry.worker.clone(), false));
         }
         while self.workers.len() >= self.limit {
             let Some(old) = self.order.pop_front() else {
@@ -70,7 +76,13 @@ impl WarmCache {
             self.workers.remove(&old);
         }
         let w = Arc::new(Mutex::new(WarmWorker::start(spec.clone())?));
-        self.workers.insert(spec.key.clone(), w.clone());
+        self.workers.insert(
+            spec.key.clone(),
+            WarmEntry {
+                worker: w.clone(),
+                last_used: Instant::now(),
+            },
+        );
         self.order.push_back(spec.key.clone());
         Ok((w, true))
     }
@@ -79,6 +91,37 @@ impl WarmCache {
         self.workers.remove(key);
         self.order.retain(|k| k != key);
     }
+
+    /// Remove workers idle for at least `idle` and not currently used.
+    ///
+    /// Returns the dropped workers so the caller can release them outside the
+    /// cache lock; dropping a wedged worker can block for the shutdown grace
+    /// period.
+    pub fn remove_idle(&mut self, idle: Duration, now: Instant) -> Vec<Arc<Mutex<WarmWorker>>> {
+        if idle.is_zero() {
+            return Vec::new();
+        }
+        let stale: Vec<String> = self
+            .workers
+            .iter()
+            .filter(|(_, entry)| {
+                idle_expired(now, entry.last_used, idle, Arc::strong_count(&entry.worker))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut dropped = Vec::with_capacity(stale.len());
+        for key in stale {
+            if let Some(entry) = self.workers.remove(&key) {
+                dropped.push(entry.worker);
+            }
+            self.order.retain(|k| k != &key);
+        }
+        dropped
+    }
+}
+
+fn idle_expired(now: Instant, last_used: Instant, idle: Duration, strong: usize) -> bool {
+    strong == 1 && now.saturating_duration_since(last_used) >= idle
 }
 
 fn touch(order: &mut VecDeque<String>, key: &str) {
@@ -401,6 +444,15 @@ mod tests {
         let p = base.join(name);
         std::fs::create_dir(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn idle_expired_needs_timeout_and_exclusive_use() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(10);
+        assert!(idle_expired(now, last, Duration::from_secs(5), 1));
+        assert!(!idle_expired(now, last, Duration::from_secs(20), 1));
+        assert!(!idle_expired(now, last, Duration::from_secs(5), 2));
     }
 
     #[test]
