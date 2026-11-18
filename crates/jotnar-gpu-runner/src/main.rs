@@ -450,6 +450,7 @@ fn run(
     if outputs.is_empty() {
         return send_error(stream, id, "bad-request", "run needs at least one output");
     }
+    let binary_output = header.get("output_format").and_then(|x| x.as_str()) == Some("binary");
     let body: Json = serde_json::from_slice(payload).map_err(|e| format!("bad run body: {e}"))?;
     let listing = body
         .get("listing")
@@ -539,40 +540,23 @@ fn run(
                 return Err(e);
             }
         };
-        let mut out = serde_json::Map::new();
-        for (name, value) in run.outputs {
-            out.insert(name, value_to_json(&value).map_err(|e| e.to_string())?);
-        }
-        let body = json!({
-            "outputs": out,
-            "timing": {
-                "compile_ms": compile_ms,
-                "build_ms": build_ms,
-                "worker_start_ms": run.worker_start_ms,
-                "frame_ms": run.frame_ms,
-                "run_ms": run.frame_ms,
-                "warm": true,
-                "cache_hit": cache_hit,
-            },
+        let timing = json!({
+            "compile_ms": compile_ms,
+            "build_ms": build_ms,
+            "worker_start_ms": run.worker_start_ms,
+            "frame_ms": run.frame_ms,
+            "run_ms": run.frame_ms,
+            "warm": true,
+            "cache_hit": cache_hit,
         });
-        return send(
+        return send_run_outputs(
             stream,
-            &json!({
-                "v": PROTO_V,
-                "id": id,
-                "type": "run-ok",
-                "ok": true,
-                "target": cfg.target.as_str(),
-                "runtime_version": RUNTIME_VERSION,
-                "compile_ms": compile_ms,
-                "build_ms": build_ms,
-                "worker_start_ms": run.worker_start_ms,
-                "frame_ms": run.frame_ms,
-                "run_ms": run.frame_ms,
-                "warm": true,
-                "cache_hit": cache_hit,
-            }),
-            body.to_string().as_bytes(),
+            id,
+            cfg,
+            &artifact,
+            run.outputs,
+            timing,
+            binary_output,
         );
     }
 
@@ -612,35 +596,22 @@ fn run(
             ),
         );
     }
-    let mut out = serde_json::Map::new();
+    let mut values = HashMap::new();
     for (name, path) in output_paths {
         let info = artifact
             .streams
             .get(&name)
             .ok_or_else(|| format!("no stream info for output {name:?}"))?;
         let value = read_value(&path, info.kind, cfg.target, &info.shape)?;
-        out.insert(name, value_to_json(&value).map_err(|e| e.to_string())?);
+        values.insert(name, value);
     }
-    let body = json!({
-        "outputs": out,
-        "timing": {"compile_ms": compile_ms, "build_ms": build_ms, "run_ms": run_ms, "cache_hit": cache_hit},
+    let timing = json!({
+        "compile_ms": compile_ms,
+        "build_ms": build_ms,
+        "run_ms": run_ms,
+        "cache_hit": cache_hit,
     });
-    send(
-        stream,
-        &json!({
-            "v": PROTO_V,
-            "id": id,
-            "type": "run-ok",
-            "ok": true,
-            "target": cfg.target.as_str(),
-            "runtime_version": RUNTIME_VERSION,
-            "compile_ms": compile_ms,
-            "build_ms": build_ms,
-            "run_ms": run_ms,
-            "cache_hit": cache_hit,
-        }),
-        body.to_string().as_bytes(),
-    )
+    send_run_outputs(stream, id, cfg, &artifact, values, timing, binary_output)
 }
 
 fn artifact_key(
@@ -679,6 +650,101 @@ fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
         arch,
         if use_fp16 { 1 } else { 0 }
     )
+}
+
+fn send_run_outputs(
+    stream: &mut TcpStream,
+    id: &Json,
+    cfg: &Config,
+    artifact: &Artifact,
+    values: HashMap<String, Value>,
+    timing: Json,
+    binary: bool,
+) -> Result<(), String> {
+    let field = |k: &str| timing.get(k).cloned().unwrap_or(Json::Null);
+    let static_shapes = artifact.outputs.iter().all(|n| {
+        artifact
+            .streams
+            .get(n)
+            .map(|s| s.shape.iter().all(|d| d.is_some()))
+            .unwrap_or(false)
+    });
+    if binary && static_shapes {
+        let mut descriptors = Vec::new();
+        let mut body = Vec::new();
+        for name in &artifact.outputs {
+            let value = values
+                .get(name)
+                .ok_or_else(|| format!("missing output {name:?}"))?;
+            let info = artifact
+                .streams
+                .get(name)
+                .ok_or_else(|| format!("no stream info for output {name:?}"))?;
+            let bytes = encode_value(value, info.kind, cfg.target)?;
+            let off = body.len();
+            body.extend_from_slice(&bytes);
+            let kind = match info.kind {
+                CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
+                CKind::F => "F64",
+                CKind::I => "I64",
+                CKind::T => "T",
+            };
+            let shape: Vec<usize> = info.shape.iter().map(|d| d.unwrap()).collect();
+            descriptors.push(json!({
+                "name": name,
+                "kind": kind,
+                "shape": shape,
+                "off": off,
+                "bytes": bytes.len(),
+            }));
+        }
+        let header = json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "run-ok",
+            "ok": true,
+            "target": cfg.target.as_str(),
+            "runtime_version": RUNTIME_VERSION,
+            "output_format": "binary",
+            "outputs": descriptors,
+            "compile_ms": field("compile_ms"),
+            "build_ms": field("build_ms"),
+            "worker_start_ms": field("worker_start_ms"),
+            "frame_ms": field("frame_ms"),
+            "run_ms": field("run_ms"),
+            "warm": field("warm"),
+            "cache_hit": field("cache_hit"),
+        });
+        return send(stream, &header, &body);
+    }
+
+    let mut out = serde_json::Map::new();
+    for name in &artifact.outputs {
+        let value = values
+            .get(name)
+            .ok_or_else(|| format!("missing output {name:?}"))?;
+        out.insert(
+            name.clone(),
+            value_to_json(value).map_err(|e| e.to_string())?,
+        );
+    }
+    let body = json!({"outputs": out, "timing": timing});
+    let header = json!({
+        "v": PROTO_V,
+        "id": id,
+        "type": "run-ok",
+        "ok": true,
+        "target": cfg.target.as_str(),
+        "runtime_version": RUNTIME_VERSION,
+        "compile_ms": field("compile_ms"),
+        "build_ms": field("build_ms"),
+        "worker_start_ms": field("worker_start_ms"),
+        "frame_ms": field("frame_ms"),
+        "run_ms": field("run_ms"),
+        "warm": field("warm"),
+        "cache_hit": field("cache_hit"),
+    });
+    send(stream, &header, body.to_string().as_bytes())
 }
 
 fn encode_value(value: &Value, kind: CKind, target: Target) -> Result<Vec<u8>, String> {

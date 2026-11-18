@@ -45,6 +45,63 @@ fn recv_frame(stream: &mut TcpStream, max_frame: usize) -> Result<(Json, Vec<u8>
     Ok((header, payload.to_vec()))
 }
 
+fn decode_binary(header: &Json, body: &[u8]) -> Result<Json, String> {
+    let descs = header
+        .get("outputs")
+        .and_then(|x| x.as_array())
+        .ok_or("binary response has no outputs")?;
+    let mut map = serde_json::Map::new();
+    for d in descs {
+        let name = d
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or("binary output has no name")?;
+        let kind = d
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .ok_or("binary output has no kind")?;
+        let shape = d.get("shape").cloned().unwrap_or(Json::Null);
+        let off = d.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let len = d.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let end = off.checked_add(len).ok_or("binary output range overflow")?;
+        if end > body.len() {
+            return Err("binary output truncated".to_string());
+        }
+        let slice = &body[off..end];
+        let data: Vec<Json> = match kind {
+            "I64" => slice
+                .chunks_exact(8)
+                .map(|b| {
+                    Json::String(
+                        i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+                            .to_string(),
+                    )
+                })
+                .collect(),
+            "F32" => slice
+                .chunks_exact(4)
+                .map(|b| Json::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64))
+                .collect(),
+            "F64" => slice
+                .chunks_exact(8)
+                .map(|b| {
+                    Json::from(f64::from_le_bytes([
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                    ]))
+                })
+                .collect(),
+            "U8" => slice.iter().map(|b| Json::from(*b)).collect(),
+            "Bool" => slice.iter().map(|b| Json::Bool(*b != 0)).collect(),
+            other => return Err(format!("unsupported binary kind {other}")),
+        };
+        map.insert(
+            name.to_string(),
+            json!({"kind": kind, "shape": shape, "data": data}),
+        );
+    }
+    Ok(json!({"outputs": map}))
+}
+
 impl Runner {
     pub fn connect(&self) -> Result<TcpStream, String> {
         let stream =
@@ -106,7 +163,12 @@ impl Runner {
         self.run_body(
             listing,
             body,
-            json!({"target": self.target, "outputs": outputs, "payload_id": payload_id}),
+            json!({
+                "target": self.target,
+                "outputs": outputs,
+                "payload_id": payload_id,
+                "output_format": "binary",
+            }),
         )
     }
 
@@ -119,8 +181,11 @@ impl Runner {
         if reply.get("ok").and_then(|x| x.as_bool()) != Some(true) {
             return Err(format!("{} run failed: {reply}", self.addr));
         }
-        let outputs =
-            serde_json::from_slice::<Json>(&body).map_err(|e| format!("bad run response: {e}"))?;
+        let outputs = if reply.get("output_format").and_then(|x| x.as_str()) == Some("binary") {
+            decode_binary(&reply, &body)?
+        } else {
+            serde_json::from_slice::<Json>(&body).map_err(|e| format!("bad run response: {e}"))?
+        };
         Ok(RunReply {
             header: reply,
             outputs,

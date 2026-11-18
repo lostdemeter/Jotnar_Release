@@ -19,11 +19,17 @@ u32BE length || JSON header || '\n' || payload
 {"v":1, "id":1, "type":"ping", "auth":"..."}
 ```
 
-`run`:
+`payload-put` uploads a parsed payload once; `run` can then use its id:
 
 ```json
-{"v":1, "id":1, "type":"run", "target":"hip", "outputs":["OUT"], "auth":"..."}
+{"v":1, "id":1, "type":"payload-put", "auth":"..."}
+{"v":1, "id":1, "type":"run", "target":"hip", "outputs":["OUT"],
+ "payload_id":"a86e11ef3b2b8bf5", "output_format":"binary", "auth":"..."}
 ```
+
+`output_format:"binary"` returns raw stream bytes plus descriptors in the
+response header; the Rust scheduler requests it. Without it the response body
+is the JSON stream form used by the debug scripts.
 
 payload:
 
@@ -125,6 +131,10 @@ sets the number of concurrent job workers. `--ledger` defaults to
 `artifacts/gpu-batches`; a repeated `--batch-id` resumes pending jobs and
 replays a completed batch from its cached summary. Failures retry across the
 target pool up to `--max-attempts`.
+
+The controller uploads the batch payload once per runner with
+`payload-put`, then sends only the payload id per job. The runner caches parsed
+payloads and compiled artifacts; large outputs use binary transport.
 
 ## Warm frames
 
