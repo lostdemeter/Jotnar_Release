@@ -288,6 +288,50 @@ fn record_hash(reply: &RunReply) -> (usize, String) {
     (body.len(), format!("{:016x}", hash_bytes(&body)))
 }
 
+fn validate_output_body(body: &Json, outputs: &[String]) -> Result<(), String> {
+    let map = body
+        .get("outputs")
+        .and_then(|x| x.as_object())
+        .ok_or("response has no outputs")?;
+    for name in outputs {
+        let stream = map
+            .get(name)
+            .ok_or_else(|| format!("response missing output {name:?}"))?;
+        let kind = stream
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| format!("output {name:?} has no kind"))?;
+        if !matches!(kind, "F32" | "F64" | "I64" | "U8" | "Bool" | "T") {
+            return Err(format!("output {name:?} has unknown kind {kind:?}"));
+        }
+        let shape = stream
+            .get("shape")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| format!("output {name:?} has no shape"))?;
+        let mut expected = 1usize;
+        for dim in shape {
+            let d = dim
+                .as_u64()
+                .ok_or_else(|| format!("output {name:?} has non-integer shape"))?
+                as usize;
+            expected = expected
+                .checked_mul(d)
+                .ok_or_else(|| format!("output {name:?} shape overflows"))?;
+        }
+        let data = stream
+            .get("data")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| format!("output {name:?} has no data"))?;
+        if data.len() != expected {
+            return Err(format!(
+                "output {name:?} shape {shape:?} expects {expected} values, got {}",
+                data.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut it = args.into_iter();
     let listing = PathBuf::from(it.next().ok_or("run needs <listing.asm>")?);
@@ -857,6 +901,12 @@ fn run_batch_chunk(
             header,
             frames: out,
         } = reply;
+        for frame in &out {
+            if let Err(e) = validate_output_body(frame, outputs) {
+                eprintln!("batch response from {} is malformed: {e}", runner.addr);
+                return None;
+            }
+        }
         let replies = out
             .into_iter()
             .map(|outputs| RunReply {
@@ -965,6 +1015,13 @@ fn run_one_job(
             };
             match reply {
                 Ok(reply) => {
+                    if let Err(e) = validate_output_body(&reply.outputs, outputs) {
+                        retries += 1;
+                        let mut failed = failed_runners.lock().unwrap_or_else(|e| e.into_inner());
+                        failed.insert(r.addr.clone());
+                        last_err = e;
+                        continue;
+                    }
                     let (bytes, output_hash) = record_hash(&reply);
                     let meta = &reply.header;
                     runs.push(RunRecord {
@@ -1219,6 +1276,17 @@ fn missing_payload_id_falls_back_to_inline() {
     server.join().unwrap();
     assert_eq!(state, "done", "{error:?}");
     assert_eq!(runs.len(), 1);
+}
+
+#[test]
+fn output_validation_checks_name_and_shape() {
+    let good = json!({"outputs": {"OUT": {"kind": "I64", "shape": [2], "data": ["1", "2"]}}});
+    validate_output_body(&good, &["OUT".to_string()]).unwrap();
+    assert!(validate_output_body(&json!({"outputs": {}}), &["OUT".to_string()]).is_err());
+    let short = json!({"outputs": {"OUT": {"kind": "I64", "shape": [2], "data": ["1"]}}});
+    assert!(validate_output_body(&short, &["OUT".to_string()]).is_err());
+    let bad_kind = json!({"outputs": {"OUT": {"kind": "X", "shape": [1], "data": [1]}}});
+    assert!(validate_output_body(&bad_kind, &["OUT".to_string()]).is_err());
 }
 
 #[test]
