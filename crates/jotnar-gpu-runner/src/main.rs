@@ -444,3 +444,39 @@ fn send_error(stream: &mut TcpStream, id: &Json, code: &str, msg: &str) -> Resul
         &[],
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let p = dir.path().join("ints.bin");
+        let v = Value::I64(array_from_vec(&[2, 2], vec![1, 2, 3, 4]).unwrap());
+        write_value(&p, &v, CKind::I, Target::Cuda).unwrap();
+        let r = read_value(&p, CKind::I, Target::Cuda, &[Some(2), Some(2)]).unwrap();
+        assert_eq!(
+            r.as_i64("test")
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        let p = dir.path().join("floats.bin");
+        let v = Value::F64(array_from_vec(&[2], vec![1.5, 2.5]).unwrap());
+        write_value(&p, &v, CKind::F, Target::Cuda).unwrap();
+        let r = read_value(&p, CKind::F, Target::Cuda, &[Some(2)]).unwrap();
+        assert_eq!(
+            r.as_f64("test")
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1.5, 2.5]
+        );
+    }
+}
