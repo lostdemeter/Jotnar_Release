@@ -125,3 +125,10 @@ sets the number of concurrent job workers. `--ledger` defaults to
 `artifacts/gpu-batches`; a repeated `--batch-id` resumes pending jobs and
 replays a completed batch from its cached summary. Failures retry across the
 target pool up to `--max-attempts`.
+
+## Warm frames
+
+The process-per-job runner is correct but startup-bound. The proposed
+persistent warm-frame ABI (shared buffers, one GPU context per worker, same
+protocol for CUDA and HIP) is documented in
+[`docs/GPU_WARM_FRAME_ABI.md`](../../docs/GPU_WARM_FRAME_ABI.md).
