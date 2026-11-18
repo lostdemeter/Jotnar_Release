@@ -12,10 +12,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jotnar::value::hash_bytes;
-use jotnar_gpu_runner::client::{RunReply, Runner};
+use jotnar_gpu_runner::client::{BatchReply, RunReply, Runner};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
+
+const MAX_BATCH_FRAMES: usize = 64;
 
 fn usage() -> &'static str {
     "jotnar-gpu-net - target-aware controller for HIP/CUDA runners\n\
@@ -49,6 +51,7 @@ struct RunArgs {
     ledger: PathBuf,
     batch_id: String,
     max_attempts: usize,
+    batch_frames: usize,
 }
 
 #[derive(Default)]
@@ -291,6 +294,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut ledger = PathBuf::from("artifacts/gpu-batches");
     let mut batch_id = None;
     let mut max_attempts = 3usize;
+    let mut batch_frames = 1usize;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--payload" => {
@@ -330,6 +334,13 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
                     .parse()
                     .map_err(|_| "--max-attempts must be an integer")?
             }
+            "--batch-frames" => {
+                batch_frames = it
+                    .next()
+                    .ok_or("--batch-frames needs a number")?
+                    .parse()
+                    .map_err(|_| "--batch-frames must be an integer")?
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown run argument '{other}'")),
         }
@@ -347,6 +358,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
         ledger,
         batch_id: batch_id.unwrap_or_else(default_batch_id),
         max_attempts: max_attempts.max(1),
+        batch_frames: batch_frames.clamp(1, MAX_BATCH_FRAMES),
     })
 }
 
@@ -529,7 +541,20 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         .map(|j| j.index)
         .collect();
     let pending_len = pending.len();
-    let workers = run.parallel.min(pending_len.max(1)).max(1);
+    let chunks: Vec<Vec<usize>> = if run.batch_frames > 1 {
+        pending
+            .chunks(run.batch_frames)
+            .map(|c| c.to_vec())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let work = if run.batch_frames > 1 {
+        chunks.len()
+    } else {
+        pending_len
+    };
+    let workers = run.parallel.min(work.max(1)).max(1);
     let next = AtomicUsize::new(0);
     let ledger_lock = Mutex::new(ledger);
     let started = Instant::now();
@@ -538,6 +563,57 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         for _ in 0..workers {
             scope.spawn(|| loop {
                 let pos = next.fetch_add(1, Ordering::SeqCst);
+                if run.batch_frames > 1 {
+                    if pos >= chunks.len() {
+                        break;
+                    }
+                    let chunk = &chunks[pos];
+                    let jobs = match run_batch_chunk(
+                        chunk,
+                        pos,
+                        &groups,
+                        cfg,
+                        &listing,
+                        &payload,
+                        &payload_ids,
+                        &run.outputs,
+                        run.max_attempts,
+                    ) {
+                        Some(jobs) => jobs,
+                        None => chunk
+                            .iter()
+                            .map(|&job| {
+                                let (state, error, retries, runs) = run_one_job(
+                                    job,
+                                    &groups,
+                                    cfg,
+                                    &listing,
+                                    &payload,
+                                    &payload_ids,
+                                    &run.outputs,
+                                    run.max_attempts,
+                                );
+                                LedgerJob {
+                                    index: job,
+                                    state,
+                                    error,
+                                    retries,
+                                    runs,
+                                }
+                            })
+                            .collect(),
+                    };
+                    let mut l = ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    for job in jobs {
+                        let index = job.index;
+                        l.jobs[index] = job;
+                    }
+                    l.updated_ms = now_ms();
+                    if let Err(e) = save_ledger(&path, &l) {
+                        eprintln!("ledger save: {e}");
+                    }
+                    continue;
+                }
                 if pos >= pending_len {
                     break;
                 }
@@ -664,6 +740,116 @@ fn upload_payloads(cfg: &Config, selected: &[usize], payload: &Json) -> HashMap<
         }
     }
     payload_ids
+}
+
+fn run_batch_chunk(
+    chunk: &[usize],
+    batch_index: usize,
+    groups: &[Vec<usize>],
+    cfg: &Config,
+    listing: &str,
+    payload: &Json,
+    payload_ids: &HashMap<String, String>,
+    outputs: &[String],
+    max_attempts: usize,
+) -> Option<Vec<LedgerJob>> {
+    let frames = chunk.len();
+    let mut per_group: Vec<(Runner, usize, Vec<RunReply>)> = Vec::new();
+    for group in groups {
+        let mut got: Option<(Runner, usize, BatchReply)> = None;
+        for attempt in 1..=max_attempts {
+            let ri = group[(batch_index + attempt - 1) % group.len()];
+            let r = &cfg.runners[ri];
+            let reply = match payload_ids.get(&r.addr) {
+                Some(pid) => r.run_batch(listing, Some(pid), None, outputs, frames),
+                None => r.run_batch(listing, None, Some(payload), outputs, frames),
+            };
+            if let Ok(reply) = reply {
+                got = Some((r.clone(), attempt, reply));
+                break;
+            }
+        }
+        let (runner, attempt, reply) = got?;
+        let BatchReply {
+            header,
+            frames: out,
+        } = reply;
+        let replies = out
+            .into_iter()
+            .map(|outputs| RunReply {
+                header: header.clone(),
+                outputs,
+            })
+            .collect::<Vec<_>>();
+        per_group.push((runner, attempt, replies));
+    }
+
+    let mut jobs = Vec::with_capacity(frames);
+    for (i, &index) in chunk.iter().enumerate() {
+        let mut errors = Vec::new();
+        for gi in 1..per_group.len() {
+            if let Err(e) = compare_replies(
+                &per_group[0].2[i],
+                &per_group[gi].2[i],
+                outputs,
+                cfg.atol,
+                cfg.rtol,
+            ) {
+                errors.push(format!(
+                    "{} vs {}: {e}",
+                    per_group[0].0.target, per_group[gi].0.target
+                ));
+            }
+        }
+        let retries: usize = per_group.iter().map(|(_, attempt, _)| attempt - 1).sum();
+        let mut runs = Vec::new();
+        for (runner, attempt, replies) in &per_group {
+            let reply = &replies[i];
+            let (bytes, output_hash) = record_hash(reply);
+            let meta = &reply.header;
+            let run_ms = meta
+                .get("frame_ms")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.get(i))
+                .and_then(|x| x.as_u64())
+                .unwrap_or_else(|| {
+                    meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0) / frames as u64
+                });
+            runs.push(RunRecord {
+                target: runner.target.clone(),
+                addr: runner.addr.clone(),
+                attempts: *attempt,
+                compile_ms: if i == 0 {
+                    meta.get("compile_ms").and_then(|x| x.as_u64()).unwrap_or(0)
+                } else {
+                    0
+                },
+                build_ms: if i == 0 {
+                    meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0)
+                } else {
+                    0
+                },
+                run_ms,
+                cache_hit: i == 0 && meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true),
+                output_bytes: bytes,
+                output_hash,
+            });
+        }
+        let state = if errors.is_empty() { "done" } else { "failed" };
+        let error = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        };
+        jobs.push(LedgerJob {
+            index,
+            state: state.to_string(),
+            error,
+            retries,
+            runs,
+        });
+    }
+    Some(jobs)
 }
 
 fn run_one_job(
@@ -943,6 +1129,113 @@ fn missing_payload_id_falls_back_to_inline() {
     server.join().unwrap();
     assert_eq!(state, "done", "{error:?}");
     assert_eq!(runs.len(), 1);
+}
+
+#[test]
+fn batch_chunk_maps_frames_to_jobs() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut hdr = [0u8; 4];
+        stream.read_exact(&mut hdr).unwrap();
+        let n = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; n];
+        stream.read_exact(&mut body).unwrap();
+        let split = body.iter().position(|b| *b == b'\n').unwrap();
+        let head: Json = serde_json::from_slice(&body[..split]).unwrap();
+        assert_eq!(head["type"], "run-batch");
+        assert_eq!(head["frames"], 2);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&7i64.to_le_bytes());
+        out.extend_from_slice(&9i64.to_le_bytes());
+        let reply = json!({
+            "v": 1,
+            "id": 1,
+            "type": "run-batch-ok",
+            "ok": true,
+            "target": "cuda",
+            "output_format": "binary",
+            "frames": 2,
+            "outputs": [
+                {"frame": 0, "name": "OUT", "kind": "I64", "shape": [1], "off": 0, "bytes": 8},
+                {"frame": 1, "name": "OUT", "kind": "I64", "shape": [1], "off": 8, "bytes": 8},
+            ],
+            "frame_ms": [1, 2],
+            "run_ms": 3,
+            "compile_ms": 4,
+            "build_ms": 5,
+            "warm": true,
+            "cache_hit": true,
+        });
+        let mut h = serde_json::to_vec(&reply).unwrap();
+        h.push(b'\n');
+        h.extend_from_slice(&out);
+        stream.write_all(&(h.len() as u32).to_be_bytes()).unwrap();
+        stream.write_all(&h).unwrap();
+    });
+
+    let cfg = Config {
+        runners: vec![Runner {
+            target: "cuda".to_string(),
+            addr: addr.to_string(),
+            token: None,
+        }],
+        atol: 1e-4,
+        rtol: 1e-4,
+    };
+    let jobs = run_batch_chunk(
+        &[0, 1],
+        0,
+        &[vec![0]],
+        &cfg,
+        "listing",
+        &json!({"streams": {}}),
+        &HashMap::new(),
+        &["OUT".to_string()],
+        1,
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(jobs.len(), 2);
+    for (i, job) in jobs.iter().enumerate() {
+        assert_eq!(job.index, i);
+        assert_eq!(job.state, "done");
+        assert_eq!(job.retries, 0);
+        assert_eq!(job.runs.len(), 1);
+        assert_eq!(job.runs[0].run_ms, i as u64 + 1);
+        assert_eq!(job.runs[0].compile_ms, if i == 0 { 4 } else { 0 });
+        assert_eq!(job.runs[0].build_ms, if i == 0 { 5 } else { 0 });
+    }
+}
+
+#[test]
+fn batch_chunk_falls_back_when_no_runner_answers() {
+    let cfg = Config {
+        runners: vec![Runner {
+            target: "cuda".to_string(),
+            addr: "127.0.0.1:9".to_string(),
+            token: None,
+        }],
+        atol: 1e-4,
+        rtol: 1e-4,
+    };
+    assert!(run_batch_chunk(
+        &[0],
+        0,
+        &[vec![0]],
+        &cfg,
+        "listing",
+        &json!({"streams": {}}),
+        &HashMap::new(),
+        &["OUT".to_string()],
+        1,
+    )
+    .is_none());
 }
 
 #[test]

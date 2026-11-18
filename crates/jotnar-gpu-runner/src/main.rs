@@ -39,6 +39,7 @@ mod warm;
 
 const DEFAULT_BIND: &str = "127.0.0.1:9997";
 const DEFAULT_MAX_FRAME: usize = 64 * 1024 * 1024;
+const MAX_BATCH_FRAMES: usize = 64;
 
 #[derive(Clone)]
 struct Config {
@@ -414,6 +415,12 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             }
             Ok(())
         }
+        "run-batch" => {
+            if let Err(e) = run_batch(&mut stream, cfg, &id, &header, payload) {
+                send_error(&mut stream, &id, "run-batch-failed", &e)?;
+            }
+            Ok(())
+        }
         other => send_error(
             &mut stream,
             &id,
@@ -429,6 +436,40 @@ fn run(
     id: &Json,
     header: &Json,
     payload: &[u8],
+) -> Result<(), String> {
+    run_impl(stream, cfg, id, header, payload, 1, false)
+}
+
+fn run_batch(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+    payload: &[u8],
+) -> Result<(), String> {
+    let frames = header
+        .get("frames")
+        .and_then(|x| x.as_u64())
+        .ok_or("run-batch needs frames")? as usize;
+    if frames == 0 || frames > MAX_BATCH_FRAMES {
+        return send_error(
+            stream,
+            id,
+            "bad-request",
+            &format!("run-batch frames must be 1..={MAX_BATCH_FRAMES}"),
+        );
+    }
+    run_impl(stream, cfg, id, header, payload, frames, true)
+}
+
+fn run_impl(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+    payload: &[u8],
+    frames: usize,
+    batch: bool,
 ) -> Result<(), String> {
     let requested_target = header
         .get("target")
@@ -537,33 +578,53 @@ fn run(
             let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.get_or_create(&spec)?
         };
-        let run = {
+        let mut outputs = Vec::with_capacity(frames);
+        let mut frame_ms = Vec::with_capacity(frames);
+        let mut worker_start_ms = 0;
+        {
             let mut worker = worker.lock().unwrap_or_else(|e| e.into_inner());
-            worker.run_frame(&feeds)
-        };
-        let run = match run {
-            Ok(run) => run,
-            Err(e) => {
-                let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
-                cache.remove(&cache_key);
-                return Err(e);
+            for _ in 0..frames {
+                let run = match worker.run_frame(&feeds) {
+                    Ok(run) => run,
+                    Err(e) => {
+                        drop(worker);
+                        let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
+                        cache.remove(&cache_key);
+                        return Err(e);
+                    }
+                };
+                worker_start_ms = run.worker_start_ms;
+                frame_ms.push(run.frame_ms);
+                outputs.push(run.outputs);
             }
-        };
+        }
+        let run_ms: u128 = frame_ms.iter().sum();
         let timing = json!({
             "compile_ms": compile_ms,
             "build_ms": build_ms,
-            "worker_start_ms": run.worker_start_ms,
-            "frame_ms": run.frame_ms,
-            "run_ms": run.frame_ms,
+            "worker_start_ms": worker_start_ms,
+            "frame_ms": if batch { json!(frame_ms) } else { json!(frame_ms[0]) },
+            "run_ms": run_ms,
             "warm": true,
             "cache_hit": cache_hit,
         });
+        if batch {
+            return send_run_batch_outputs(
+                stream,
+                id,
+                cfg,
+                &artifact,
+                outputs,
+                timing,
+                binary_output,
+            );
+        }
         return send_run_outputs(
             stream,
             id,
             cfg,
             &artifact,
-            run.outputs,
+            outputs.pop().unwrap(),
             timing,
             binary_output,
         );
@@ -588,39 +649,59 @@ fn run(
         output_paths.push((name.clone(), path.clone()));
         argv.push(path);
     }
-    let t1 = Instant::now();
-    let mut cmd = Command::new(&exe);
-    cmd.args(&argv);
-    let run = cmd.output().map_err(|e| format!("run: {e}"))?;
-    let run_ms = t1.elapsed().as_millis();
-    if !run.status.success() {
-        return send_error(
-            stream,
-            id,
-            "run-failed",
-            &format!(
-                "exit {:?}: {}",
-                run.status.code(),
-                String::from_utf8_lossy(&run.stderr)
-            ),
-        );
+    let mut outputs = Vec::with_capacity(frames);
+    let mut frame_ms = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        let t1 = Instant::now();
+        let run = Command::new(&exe)
+            .args(&argv)
+            .output()
+            .map_err(|e| format!("run: {e}"))?;
+        let run_ms = t1.elapsed().as_millis();
+        if !run.status.success() {
+            return send_error(
+                stream,
+                id,
+                "run-failed",
+                &format!(
+                    "exit {:?}: {}",
+                    run.status.code(),
+                    String::from_utf8_lossy(&run.stderr)
+                ),
+            );
+        }
+        let mut values = HashMap::new();
+        for (name, path) in &output_paths {
+            let info = artifact
+                .streams
+                .get(name)
+                .ok_or_else(|| format!("no stream info for output {name:?}"))?;
+            let value = read_value(path, info.kind, cfg.target, &info.shape)?;
+            values.insert(name.clone(), value);
+        }
+        frame_ms.push(run_ms);
+        outputs.push(values);
     }
-    let mut values = HashMap::new();
-    for (name, path) in output_paths {
-        let info = artifact
-            .streams
-            .get(&name)
-            .ok_or_else(|| format!("no stream info for output {name:?}"))?;
-        let value = read_value(&path, info.kind, cfg.target, &info.shape)?;
-        values.insert(name, value);
-    }
+    let run_ms: u128 = frame_ms.iter().sum();
     let timing = json!({
         "compile_ms": compile_ms,
         "build_ms": build_ms,
+        "frame_ms": if batch { json!(frame_ms) } else { json!(frame_ms[0]) },
         "run_ms": run_ms,
         "cache_hit": cache_hit,
     });
-    send_run_outputs(stream, id, cfg, &artifact, values, timing, binary_output)
+    if batch {
+        return send_run_batch_outputs(stream, id, cfg, &artifact, outputs, timing, binary_output);
+    }
+    send_run_outputs(
+        stream,
+        id,
+        cfg,
+        &artifact,
+        outputs.pop().unwrap(),
+        timing,
+        binary_output,
+    )
 }
 
 fn artifact_key(
@@ -659,6 +740,110 @@ fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
         arch,
         if use_fp16 { 1 } else { 0 }
     )
+}
+
+fn send_run_batch_outputs(
+    stream: &mut TcpStream,
+    id: &Json,
+    cfg: &Config,
+    artifact: &Artifact,
+    frames: Vec<HashMap<String, Value>>,
+    timing: Json,
+    binary: bool,
+) -> Result<(), String> {
+    let field = |k: &str| timing.get(k).cloned().unwrap_or(Json::Null);
+    let static_shapes = artifact.outputs.iter().all(|n| {
+        artifact
+            .streams
+            .get(n)
+            .map(|s| s.shape.iter().all(|d| d.is_some()))
+            .unwrap_or(false)
+    });
+    if binary && static_shapes {
+        let mut descriptors = Vec::new();
+        let mut body = Vec::new();
+        for (frame, values) in frames.iter().enumerate() {
+            for name in &artifact.outputs {
+                let value = values
+                    .get(name)
+                    .ok_or_else(|| format!("missing output {name:?} in frame {frame}"))?;
+                let info = artifact
+                    .streams
+                    .get(name)
+                    .ok_or_else(|| format!("no stream info for output {name:?}"))?;
+                let bytes = encode_value(value, info.kind, cfg.target)?;
+                let off = body.len();
+                body.extend_from_slice(&bytes);
+                let kind = match info.kind {
+                    CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
+                    CKind::F => "F64",
+                    CKind::I => "I64",
+                    CKind::T => "T",
+                };
+                let shape: Vec<usize> = info.shape.iter().map(|d| d.unwrap()).collect();
+                descriptors.push(json!({
+                    "frame": frame,
+                    "name": name,
+                    "kind": kind,
+                    "shape": shape,
+                    "off": off,
+                    "bytes": bytes.len(),
+                }));
+            }
+        }
+        let header = json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "run-batch-ok",
+            "ok": true,
+            "target": cfg.target.as_str(),
+            "runtime_version": RUNTIME_VERSION,
+            "output_format": "binary",
+            "frames": frames.len(),
+            "outputs": descriptors,
+            "compile_ms": field("compile_ms"),
+            "build_ms": field("build_ms"),
+            "worker_start_ms": field("worker_start_ms"),
+            "frame_ms": field("frame_ms"),
+            "run_ms": field("run_ms"),
+            "warm": field("warm"),
+            "cache_hit": field("cache_hit"),
+        });
+        return send(stream, &header, &body);
+    }
+
+    let mut out = Vec::with_capacity(frames.len());
+    for values in &frames {
+        let mut frame = serde_json::Map::new();
+        for name in &artifact.outputs {
+            let value = values
+                .get(name)
+                .ok_or_else(|| format!("missing output {name:?}"))?;
+            frame.insert(
+                name.clone(),
+                value_to_json(value).map_err(|e| e.to_string())?,
+            );
+        }
+        out.push(json!({"outputs": frame}));
+    }
+    let body = json!({"frames": out, "timing": timing});
+    let header = json!({
+        "v": PROTO_V,
+        "id": id,
+        "type": "run-batch-ok",
+        "ok": true,
+        "target": cfg.target.as_str(),
+        "runtime_version": RUNTIME_VERSION,
+        "frames": frames.len(),
+        "compile_ms": field("compile_ms"),
+        "build_ms": field("build_ms"),
+        "worker_start_ms": field("worker_start_ms"),
+        "frame_ms": field("frame_ms"),
+        "run_ms": field("run_ms"),
+        "warm": field("warm"),
+        "cache_hit": field("cache_hit"),
+    });
+    send(stream, &header, body.to_string().as_bytes())
 }
 
 fn send_run_outputs(
