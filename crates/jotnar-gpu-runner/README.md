@@ -186,6 +186,7 @@ outputs, and reports medians and p95:
   --repeats 5 --parallel 4
 ```
 
-Batch mode auto-sizes frames to `ceil(count / parallel)`. Use batch frames for
-small jobs where connection overhead dominates; large outputs remain
-bandwidth-bound and usually favor the per-job path.
+Batch mode auto-sizes frames to `ceil(count / parallel)`. The gate fails unless
+every expected run used a warm worker; pass `--allow-cold` for a process-per-job
+pool. Use batch frames for small jobs where connection overhead dominates;
+large outputs remain bandwidth-bound and usually favor the per-job path.

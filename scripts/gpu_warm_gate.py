@@ -94,6 +94,12 @@ def run_gate(args, size, mode, count, batch_id, batch_frames):
         raise RuntimeError(f"{size}/{mode}: {summary}")
     if summary.get("identical_outputs") is not True:
         raise RuntimeError(f"{size}/{mode}: outputs differ: {summary}")
+    expected_warm = count * (2 if args.target == "both" else 1)
+    if not args.allow_cold and summary.get("warm_runs", 0) < expected_warm:
+        raise RuntimeError(
+            f"{size}/{mode}: expected {expected_warm} warm runs, "
+            f"got {summary.get('warm_runs', 0)}"
+        )
     return {
         "size": size,
         "mode": mode,
@@ -151,6 +157,11 @@ def main():
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--max-attempts", type=int, default=3)
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument(
+        "--allow-cold",
+        action="store_true",
+        help="allow a runner pool that does not use warm workers",
+    )
     ap.add_argument("--ledger", default=tempfile.mkdtemp(prefix="jotnar-gpu-gate-"))
     ap.add_argument("--json-out", help="write the full evidence JSON here")
     args = ap.parse_args()
@@ -178,6 +189,7 @@ def main():
         "parallel": args.parallel,
         "batch_frames": args.batch_frames if args.batch_frames else "auto",
         "repeats": args.repeats,
+        "require_warm": not args.allow_cold,
         "listing_sha256": sha256(probe / "matmul-warm.asm"),
         "payload_sha256": {s: sha256(probe / f"{s}.json") for s in sizes},
         "results": [],
@@ -191,6 +203,9 @@ def main():
         if batch_frames == 0:
             batch_frames = max(1, min(64, (count + args.parallel - 1) // args.parallel))
         for mode in modes:
+            if mode == "batch" and batch_frames <= 1:
+                # Auto-sizing collapsed the batch to the per-job path.
+                continue
             # One untimed warmup with the same shape as the measured runs.
             run_gate(
                 args,
