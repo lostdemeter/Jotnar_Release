@@ -856,15 +856,70 @@ pub fn discover_gpu(timeout: Duration) -> Result<Vec<Json>, String> {
     Ok(found.into_values().collect())
 }
 
-/// Merge CPU node and GPU runner advertisements into one capability list.
+/// Browse `_jotnar-native._tcp.local.` for the native/process executor lane.
+pub fn discover_native(timeout: Duration) -> Result<Vec<Json>, String> {
+    let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
+    let receiver = daemon
+        .browse("_jotnar-native._tcp.local.")
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    let mut found: BTreeMap<String, Json> = BTreeMap::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let event = match receiver.recv_timeout(remaining) {
+            Ok(event) => event,
+            Err(_) => break,
+        };
+        if let ServiceEvent::ServiceResolved(info) = event {
+            let port = info.get_port();
+            let addrs: Vec<String> = info
+                .get_addresses_v4()
+                .iter()
+                .map(|ip| format!("{ip}:{port}"))
+                .collect();
+            let txt = |key: &str| {
+                info.get_property_val_str(key)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            let entry = json!({
+                "kind": "native",
+                "fullname": info.get_fullname(),
+                "instance": info.get_fullname().split('.').next().unwrap_or(""),
+                "addrs": addrs,
+                "port": port,
+                "target": txt("target"),
+                "programs": txt("programs"),
+                "platform": txt("platform"),
+                "auth": txt("auth"),
+                "runtime_version": txt("runtime_version"),
+                "pid": txt("pid"),
+            });
+            found.insert(info.get_fullname().to_string(), entry);
+        }
+    }
+    let _ = daemon.shutdown();
+    Ok(found.into_values().collect())
+}
+
+/// Merge CPU node, GPU runner, and native runner advertisements into one
+/// capability list.
 ///
-/// This is discovery only; execution remains split between `jotnar-noded` and
-/// the GPU runner. The timeout is split between the two service browsers.
+/// This is discovery only; execution remains split between `jotnar-noded`,
+/// the GPU runner, and the native runner. The timeout is split between the
+/// three service browsers.
 pub fn discover_capabilities(timeout: Duration) -> Result<Vec<Json>, String> {
-    let node_timeout = timeout / 2;
-    let gpu_timeout = timeout.saturating_sub(node_timeout);
+    let node_timeout = timeout / 3;
+    let gpu_timeout = timeout / 3;
+    let native_timeout = timeout
+        .saturating_sub(node_timeout)
+        .saturating_sub(gpu_timeout);
     let mut out = discover(node_timeout)?;
     out.extend(discover_gpu(gpu_timeout)?);
+    out.extend(discover_native(native_timeout)?);
     out.sort_by(|a, b| {
         let kind_a = a.get("kind").and_then(|x| x.as_str()).unwrap_or("");
         let kind_b = b.get("kind").and_then(|x| x.as_str()).unwrap_or("");

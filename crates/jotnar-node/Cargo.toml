@@ -26,6 +26,14 @@ name = "jotnar-net"
 path = "src/bin/jotnar-net.rs"
 
 [[bin]]
+name = "jotnar-native-runner"
+path = "src/bin/jotnar-native-runner.rs"
+
+[[bin]]
+name = "jotnar-workload"
+path = "src/bin/jotnar-workload.rs"
+
+[[bin]]
 name = "jotnar-supervisord"
 path = "src/bin/jotnar-supervisord.rs"
 

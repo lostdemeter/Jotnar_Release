@@ -43,8 +43,8 @@ impl JobClient {
             )
         })?;
         let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
         let mut fields = fields;
         if let Some(token) = &self.token {
             if let Some(o) = fields.as_object_mut() {
@@ -61,7 +61,7 @@ impl JobClient {
             .read_exact(&mut hdr)
             .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
         let n = u32::from_be_bytes(hdr) as usize;
-        if n > 64 * 1024 * 1024 {
+        if n > 1024 * 1024 * 1024 {
             return Err(("job-invalid".to_string(), "response too large".to_string()));
         }
         let mut body = vec![0u8; n];

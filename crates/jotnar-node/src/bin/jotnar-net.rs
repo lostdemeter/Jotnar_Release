@@ -47,8 +47,9 @@ fn usage() -> &'static str {
      --node may be repeated; --nodes reads one 'addr [token]' per line.\n\
      --ledger defaults to artifacts/batches. --discover browses\n\
      _jotnar-node._tcp and adds discovered ads; tokens are trusted-LAN secrets.\n\
-     capabilities merges _jotnar-node and _jotnar-gpu ads into one capability\n\
-     list; it is discovery only and never bypasses a node token check.\n\
+     capabilities merges _jotnar-node, _jotnar-gpu, and _jotnar-native ads into\n\
+     one capability list; it is discovery only and never bypasses a node token\n\
+     check.\n\
      gpu routes one stage to a GPU runner through the common executor\n\
      contract (submit/job-status/job-result).\n"
 }

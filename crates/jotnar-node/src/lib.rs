@@ -3,6 +3,8 @@
 pub mod capability;
 pub mod executor;
 pub mod job;
+/// Controller-side bundle/stage/ledger logic. `jotnar-noded` does not call it.
+pub mod workload;
 
 use std::collections::VecDeque;
 use std::io::Write;

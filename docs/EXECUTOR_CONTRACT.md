@@ -1,6 +1,7 @@
 # Executor contract
 
-**Status:** GPU runner implements the async job contract; CPU node already did
+**Status:** GPU and native runners implement the async job contract; CPU node
+already did
 **Scope:** controller-to-executor boundary
 
 ## Contract
@@ -58,6 +59,26 @@ batch frames; the controller does not compile or run listings.
 driver. The async endpoint is the stable executor face for `jotnar-net` and the
 future workload controller.
 
+## Native/process runner
+
+`jotnar-native-runner` is the third executor. It is model-blind and generic:
+
+- `submit` takes `command[]`, `inputs[]`, `outputs[]`, and an optional
+  `timeout_ms`;
+- the body is the concatenated input files named by the descriptors;
+- the runner writes inputs into a private work directory, runs an
+  allow-listed program with a relative argv, then stores the requested output
+  files;
+- `job-result` uses `output_format: "files"`, one `U8` descriptor per output
+  with an offset, byte count, and SHA-256, plus the concatenated body;
+- `job-status` and `job-cancel` match the other executors; a running process is
+  killed on cancel.
+
+The runner refuses programs that were not passed with `--allow`, and it
+refuses absolute paths or `..` in input/output names. It advertises
+`_jotnar-native._tcp.local.` when `--mdns` is enabled. It contains no DOOM,
+model, or stage-graph logic.
+
 ## Controller route
 
 `jotnar-net` can route one GPU stage through the contract:
@@ -88,10 +109,13 @@ compile, schedule batches, or interpret the model.
 - GPU async results are inline; there is no chunked result store yet.
 - GPU cancellation is best-effort for running jobs.
 - The GPU executor supports one frame or a run-batch frame count per job.
+- The native executor stages whole files in memory; the 64 MB RV32IM
+  checkpoint fits, but there is no range-fetch or streaming transport yet.
 - CPU stored-result chunk fetching remains in the CPU scheduler path.
 
 ## Next
 
-A workload controller can use the capability list and the `Executor` trait to
-place stages, then fetch results through the same envelope. DOOM across two
-nodes is the first planned acceptance test.
+The workload controller uses the capability list and the `Executor` trait to
+place stages, move checkpoints, and write a ledger/receipt. See
+[`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md). DOOM across two
+nodes is the first acceptance test.

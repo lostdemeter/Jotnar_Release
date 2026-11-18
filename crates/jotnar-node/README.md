@@ -13,6 +13,8 @@ jotnar-supervisord   long-lived payload supervisor (root-only Unix socket)
 jotnar-payload       controller CLI for payload/event/module commands
 jotnar-osd           emitted control-plane daemon and step harness
 jotnar-net           multi-node scheduler / discovery client
+jotnar-native-runner model-blind native/process executor
+jotnar-workload      model-aware bundle/stage/checkpoint controller
 ```
 
 In the image, `jotnar-noded` is installed as `/usr/local/bin/jotnar-node` so
@@ -149,14 +151,39 @@ jotnar-osd --events 10,11,12          # stateful sequence
 - durable per-batch ledger, cached summaries, resume, and retries;
 - stable node IDs and mDNS advertisement/discovery (`_jotnar-node._tcp.local.`);
 - `run` for distributed batches and `discover` / `--discover` for registration;
-- `capabilities` merges `_jotnar-node` and `_jotnar-gpu` advertisements into one
-  CPU/GPU inventory without moving GPU execution into the node. See
+- `capabilities` merges `_jotnar-node`, `_jotnar-gpu`, and
+  `_jotnar-native` advertisements into one CPU/GPU/native inventory without
+  moving execution into the node. See
   [`docs/CAPABILITY_EXCHANGE.md`](../../docs/CAPABILITY_EXCHANGE.md).
 - `gpu` routes one stage to a GPU runner through the common executor contract
   (`submit`/`job-status`/`job-result`/`job-cancel`), selecting a runner from
   discovery unless `--addr` is given. Binary result descriptors are validated
   before reporting. See
   [`docs/EXECUTOR_CONTRACT.md`](../../docs/EXECUTOR_CONTRACT.md).
+
+## Native runner and workload controller
+
+`jotnar-native-runner` runs one allow-listed local process per job. It stages
+named input files into a private work directory, runs a relative argv, and
+returns named output files with SHA-256 descriptors through the same job
+contract. It is model-blind: DOOM, model bundles, and stage graphs are not in
+this binary.
+
+`jotnar-workload` is the model-aware layer. It validates a content-addressed
+bundle manifest, orders a stage graph, places stages on executors, moves
+checkpoint files between stages, and records a ledger and receipt. The first
+bundle is DOOM on the RV32IM core:
+
+```sh
+cargo build --release --bin jotnar-demo-doom
+cargo build --release -p jotnar-node-tools --bin jotnar-native-runner --bin jotnar-workload
+python3 scripts/doom_two_node_gate.py
+```
+
+The gate runs frame 1 on one native executor, transfers the checkpoint to a
+second executor, resumes for frame 2, and compares the full RV32IM state with
+a single-node reference. See
+[`docs/WORKLOAD_CONTROLLER.md`](../../docs/WORKLOAD_CONTROLLER.md).
 
 `crates/jotnar-node/test/sched_two_nodes.sh` is the host gate.
 `crates/jotnar-node/test/qemu_two_nodes.sh` boots two disposable QEMU nodes.

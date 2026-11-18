@@ -191,6 +191,20 @@ Warm-frame workers are opt-in with `CONFIG warm_frame 1`; the reproducible
 gate is [`scripts/gpu_warm_gate.py`](../scripts/gpu_warm_gate.py). See
 [`crates/jotnar-gpu-runner/README.md`](../crates/jotnar-gpu-runner/README.md).
 
+The native/process lane and workload controller live in `crates/jotnar-node`:
+`jotnar-native-runner` executes one allow-listed command per job, and
+`jotnar-workload` validates a content-addressed bundle, orders a stage graph,
+places stages, moves checkpoint files, and writes a ledger/receipt. The first
+acceptance test runs DOOM frame 1 on one native executor, transfers the RV32IM
+checkpoint to a second executor, resumes frame 2, and compares the full state
+with a single-node reference:
+
+```sh
+python3 scripts/doom_two_node_gate.py
+```
+
+See [`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md).
+
 The Rust SDL player has intermittent frame-time spikes not seen in the
 original Python/C player. This is recorded as future work; add a frame-time
 trace and p99/max gate before calling the frontend finished.
@@ -234,6 +248,9 @@ jotnar-det  <file.asm> <payload.ndjson> [--outputs a,b]
 jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]
 jotnar-net  [--discover-timeout-ms N] capabilities
 jotnar-net  [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] --payload FILE --outputs a,b
+jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token T] [--mdns]
+jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]
+jotnar-workload run --bundle PATH --ledger DIR --program FILE [--executor ADDR]... [--place STAGE=ADDR]...
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
 jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
 jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>
