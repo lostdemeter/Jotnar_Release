@@ -231,6 +231,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jotnar-gpu-runner"
+version = "0.1.0"
+dependencies = [
+ "jotnar",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "jotnar-lab"
 version = "0.1.0"
 dependencies = [
