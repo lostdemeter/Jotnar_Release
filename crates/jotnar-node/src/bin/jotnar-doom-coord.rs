@@ -17,6 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -57,6 +58,7 @@ fn usage() -> &'static str {
      RGB frames plus metadata; scripts/doom_two_gpu_gate.py assembles the GIF."
 }
 
+#[derive(Clone)]
 struct Config {
     image: PathBuf,
     wad: PathBuf,
@@ -415,6 +417,68 @@ fn ping_node(cfg: &Config, node: Node) -> Result<(), String> {
         .ping()
         .map(|_| ())
         .map_err(|(code, msg)| format!("{code}: {msg}"))
+}
+
+struct RecoveryResult {
+    cuda_ok: bool,
+    hip_ok: bool,
+    warmed: bool,
+    recovered: Vec<String>,
+    error: Option<String>,
+}
+
+/// Probe and re-warm failed nodes off the frame loop. The main thread never
+/// blocks on a dead network path.
+fn spawn_recovery(
+    cfg: Config,
+    listing: String,
+    split: Split,
+    cuda_ok: bool,
+    hip_ok: bool,
+    timeout: Duration,
+) -> Receiver<RecoveryResult> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut res = RecoveryResult {
+            cuda_ok,
+            hip_ok,
+            warmed: false,
+            recovered: Vec::new(),
+            error: None,
+        };
+        if !res.cuda_ok && ping_node(&cfg, Node::Cuda).is_ok() {
+            res.cuda_ok = true;
+            res.recovered.push("cuda".to_string());
+        }
+        if !res.hip_ok && ping_node(&cfg, Node::Hip).is_ok() {
+            res.hip_ok = true;
+            res.recovered.push("hip".to_string());
+        }
+        if res.cuda_ok && res.hip_ok {
+            match black_bodies(&listing, split) {
+                Ok((cb, hb)) => {
+                    let pair = run_bodies(&cfg, &cb, &hb, timeout);
+                    let mut errors = Vec::new();
+                    if let Err(e) = pair.cuda {
+                        res.cuda_ok = false;
+                        errors.push(e);
+                    }
+                    if let Err(e) = pair.hip {
+                        res.hip_ok = false;
+                        errors.push(e);
+                    }
+                    if res.cuda_ok && res.hip_ok {
+                        res.warmed = true;
+                    } else {
+                        res.error = Some(errors.join("; "));
+                    }
+                }
+                Err(e) => res.error = Some(e),
+            }
+        }
+        let _ = tx.send(res);
+    });
+    rx
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -959,59 +1023,59 @@ fn run() -> Result<(), String> {
     eprintln!("placement mode: {}", mode.name());
     let mut recorded = 0u32;
     let mut recent_totals: Vec<u64> = Vec::new();
+    let mut recovery_rx: Option<Receiver<RecoveryResult>> = None;
 
     for n in 0..cfg.frames {
         let frame = cfg.start_frame + n + 1;
-        if mode != Mode::Split && cfg.recover_every > 0 && n > 0 && n % cfg.recover_every == 0 {
-            let mut recovered = Vec::new();
-            if !cuda_ok && ping_node(&cfg, Node::Cuda).is_ok() {
-                cuda_ok = true;
-                recovered.push("cuda");
-            }
-            if !hip_ok && ping_node(&cfg, Node::Hip).is_ok() {
-                hip_ok = true;
-                recovered.push("hip");
-            }
-            if cuda_ok && hip_ok {
-                // Warm both split shapes before switching back; the healthy
-                // node may have evicted its split worker while running full
-                // frames.
-                let (cb, hb) = black_bodies(&listing, split)?;
-                let pair = run_bodies(&cfg, &cb, &hb, startup_timeout);
-                let mut warmed = true;
-                if let Err(e) = pair.cuda {
-                    cuda_ok = false;
-                    warmed = false;
-                    eprintln!("recovery: cuda warm failed: {e}");
+        if let Some(rx) = recovery_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(res) => {
+                    recovery_rx = None;
+                    cuda_ok = res.cuda_ok;
+                    hip_ok = res.hip_ok;
+                    if res.warmed && cuda_ok && hip_ok {
+                        mode = Mode::Split;
+                        recovery_events.push(json!({
+                            "frame": frame,
+                            "nodes": res.recovered,
+                            "action": "rejoin-split",
+                        }));
+                        eprintln!("recovery at frame {frame}: split resumed");
+                    } else if !res.recovered.is_empty() {
+                        recovery_events.push(json!({
+                            "frame": frame,
+                            "nodes": res.recovered,
+                            "action": if res.error.is_some() { "warm-failed" } else { "ping-only" },
+                        }));
+                        if let Some(e) = res.error {
+                            eprintln!("recovery at frame {frame}: {e}");
+                        } else {
+                            eprintln!(
+                                "recovery at frame {frame}: {:?} reachable, waiting",
+                                res.recovered
+                            );
+                        }
+                    }
                 }
-                if let Err(e) = pair.hip {
-                    hip_ok = false;
-                    warmed = false;
-                    eprintln!("recovery: hip warm failed: {e}");
-                }
-                if warmed {
-                    mode = Mode::Split;
-                    recovery_events.push(json!({
-                        "frame": frame,
-                        "nodes": recovered,
-                        "action": "rejoin-split",
-                    }));
-                    eprintln!("recovery at frame {frame}: split resumed");
-                } else {
-                    recovery_events.push(json!({
-                        "frame": frame,
-                        "nodes": recovered,
-                        "action": "warm-failed",
-                    }));
-                }
-            } else if !recovered.is_empty() {
-                recovery_events.push(json!({
-                    "frame": frame,
-                    "nodes": recovered,
-                    "action": "ping-only",
-                }));
-                eprintln!("recovery at frame {frame}: {recovered:?} reachable, waiting");
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => recovery_rx = None,
             }
+        }
+        if mode != Mode::Split
+            && recovery_rx.is_none()
+            && cfg.recover_every > 0
+            && n > 0
+            && n % cfg.recover_every == 0
+        {
+            recovery_rx = Some(spawn_recovery(
+                cfg.clone(),
+                listing.clone(),
+                split,
+                cuda_ok,
+                hip_ok,
+                startup_timeout,
+            ));
+            eprintln!("recovery: probing failed node in background");
         }
         let actions: Vec<Json> = if cfg.viewer.is_some() {
             drain_viewer_keys(&viewer_hub, &mut cpu)

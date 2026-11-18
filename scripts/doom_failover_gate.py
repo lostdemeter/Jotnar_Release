@@ -236,6 +236,10 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         raise RuntimeError(f"{name}: mode {run.get('mode')} != {expected_mode}")
     if len(meta) != frames:
         raise RuntimeError(f"{name}: {len(meta)} frames, expected {frames}")
+    if run["latency_ms"]["total_max"] > 1500:
+        raise RuntimeError(
+            f"{name}: frame loop stalled for {run['latency_ms']['total_max']} ms"
+        )
     last = out / meta[-1]["file"]
     if last.stat().st_size != 640 * 400 * 3:
         raise RuntimeError(f"{name}: bad frame size {last.stat().st_size}")

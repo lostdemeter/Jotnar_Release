@@ -107,6 +107,9 @@ fill the disk.
 - `missing assets/...` — put `doom.bin`/`doom1.wad` in `assets/` or set
   `DOOM_IMAGE`/`DOOM_WAD`.
 - Blank window for a few seconds — warm-worker startup on the first run.
+- One node loses its network — the survivor takes the full frame and the HUD
+  changes to `cuda-full`/`hip-full`. Recovery probes run in the background, so
+  the game loop does not stall every time the dead node is checked.
 
 The full design and measured results are in the source repository under
 `docs/DOOM_TWO_NODE.md` and `docs/WORKLOAD_COORDINATION.md`.

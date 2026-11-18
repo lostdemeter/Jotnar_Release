@@ -153,10 +153,10 @@ python3 scripts/doom_failover_gate.py
 Checked results:
 
 ```text
-CUDA outage  -> hip-full   p50 47 ms / p95 59 ms, 45/45 frames
-HIP outage   -> cuda-full  p50 119 ms / p95 126 ms, 45/45 frames
-CUDA recover -> split      p50 43 ms / p95 54 ms, 1 recovery
-HIP recover  -> split      p50 49 ms / p95 120 ms, 1 recovery
+CUDA outage  -> hip-full   p50 46 ms / p95 50 ms, 45/45 frames
+HIP outage   -> cuda-full  p50 114 ms / p95 135 ms, 45/45 frames
+CUDA recover -> split      p50 42 ms / p95 47 ms, 1 recovery
+HIP recover  -> split      p50 53 ms / p95 127 ms, 1 recovery
 ```
 
 ![two-node viewer recovered](doom_two_nodes_recovered.png)

@@ -138,9 +138,11 @@ the coordinator marks it down, records the error, and retries that frame on
 the surviving node with the full 320-column input. Later frames stay in
 single-node mode.
 
-Every `--recover-every` frames (default 20), the coordinator pings a failed
-node. If it answers, the coordinator warms the split shapes again and returns
-to split mode. The recovery is recorded separately from the failure.
+Every `--recover-every` frames (default 20), the coordinator probes a failed
+node in a background thread. If it answers, the coordinator warms the split
+shapes and returns to split mode. The frame loop never blocks on a dead network
+path; the first failover detection is still bounded by the executor connect
+timeout. The recovery is recorded separately from the failure.
 
 The reproducible outage gate uses local TCP proxies in front of the real GPU
 runners, closes one proxy mid-run, and optionally restarts it:
@@ -152,15 +154,17 @@ python3 scripts/doom_failover_gate.py
 Checked results:
 
 ```text
-CUDA outage  -> hip-full   p50 47 ms, p95 59 ms, 45/45 frames, exit 0
-HIP outage   -> cuda-full  p50 119 ms, p95 126 ms, 45/45 frames, exit 0
-CUDA recover -> split      p50 43 ms, p95 54 ms, 45/45 frames, 1 recovery
-HIP recover  -> split      p50 49 ms, p95 120 ms, 45/45 frames, 1 recovery
+CUDA outage  -> hip-full   p50 46 ms, p95 50 ms, 45/45 frames, exit 0
+HIP outage   -> cuda-full  p50 114 ms, p95 135 ms, 45/45 frames, exit 0
+CUDA recover -> split      p50 42 ms, p95 47 ms, 45/45 frames, 1 recovery
+HIP recover  -> split      p50 53 ms, p95 127 ms, 45/45 frames, 1 recovery
 ```
 
 The HIP outage is slower because CUDA takes the full frame, but it still
 completes. Recovery returns to the measured split without restarting the
-RV32IM core.
+RV32IM core. Recovery probes run in a background thread, so the frame loop
+does not stall every time a dead node is checked; the outage gate also fails
+if any frame takes longer than 1.5 s.
 
 ## Receipt
 
