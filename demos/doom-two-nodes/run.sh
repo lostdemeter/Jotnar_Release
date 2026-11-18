@@ -22,6 +22,7 @@ FPS="${DOOM_FPS}"
 START_FRAME="${DOOM_START_FRAME}"
 FRAMES=1000000
 VIEWER_ADDR="${DOOM_VIEWER_ADDR}"
+FAILOVER_TIMEOUT_MS="${DOOM_FAILOVER_TIMEOUT_MS}"
 OUT="${DOOM_DEMO_OUT:-$DEMO_DIR/out}"
 BUILD=auto
 VIEWER=1
@@ -40,6 +41,7 @@ Jotnar DOOM — play over two GPU nodes
   --start-frame N    frame to start the game at
   --frames N         coordinator frame budget
   --viewer-addr A    local viewer listener
+  --failover-timeout-ms N  fail over when a split job exceeds this deadline
   --out DIR          logs, receipt, and optional frames
   --build            force a rebuild into bin/
   --no-build         never build; require bin/ binaries
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --start-frame) START_FRAME="${1:-}"; shift ;;
     --frames) FRAMES="${1:-}"; shift ;;
     --viewer-addr) VIEWER_ADDR="${1:-}"; shift ;;
+    --failover-timeout-ms) FAILOVER_TIMEOUT_MS="${1:-}"; shift ;;
     --out) OUT="${1:-}"; shift ;;
     --build) BUILD=1 ;;
     --no-build) BUILD=0 ;;
@@ -197,6 +200,7 @@ COORD_ARGS=(
   --fps "$FPS"
   --viewer-listen "$VIEWER_ADDR"
   --recover-every 20
+  --failover-timeout-ms "$FAILOVER_TIMEOUT_MS"
   --out "$OUT"
 )
 if [[ "$RECORD" == 0 ]]; then

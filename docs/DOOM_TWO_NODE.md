@@ -154,17 +154,21 @@ python3 scripts/doom_failover_gate.py
 Checked results:
 
 ```text
-CUDA outage  -> hip-full   p50 46 ms, p95 50 ms, 45/45 frames, exit 0
-HIP outage   -> cuda-full  p50 114 ms, p95 135 ms, 45/45 frames, exit 0
-CUDA recover -> split      p50 42 ms, p95 47 ms, 45/45 frames, 1 recovery
-HIP recover  -> split      p50 53 ms, p95 127 ms, 45/45 frames, 1 recovery
+CUDA outage    -> hip-full   p50 51 ms, p95 68 ms, max 102 ms, 45/45 frames
+HIP outage     -> cuda-full  p50 116 ms, p95 136 ms, max 156 ms, 45/45 frames
+CUDA blackhole -> hip-full   p50 49 ms, p95 70 ms, max 557 ms, 45/45 frames
+HIP blackhole  -> cuda-full  p50 112 ms, p95 133 ms, max 603 ms, 45/45 frames
+CUDA recover   -> split      p50 50 ms, p95 61 ms, max 80 ms, 1 recovery
+HIP recover    -> split      p50 53 ms, p95 126 ms, max 165 ms, 1 recovery
 ```
 
 The HIP outage is slower because CUDA takes the full frame, but it still
 completes. Recovery returns to the measured split without restarting the
 RV32IM core. Recovery probes run in a background thread, so the frame loop
-does not stall every time a dead node is checked; the outage gate also fails
-if any frame takes longer than 1.5 s.
+does not stall every time a dead node is checked. Split jobs also have a
+`--failover-timeout-ms` deadline (default 500 ms), so a blackholed node causes
+one bounded failover pause instead of a long hang. The outage gate rejects any
+frame over 1.5 s.
 
 ## Receipt
 

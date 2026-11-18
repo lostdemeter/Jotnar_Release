@@ -49,11 +49,14 @@ def free_port() -> int:
 
 
 class Proxy:
-    """One TCP proxy. stop() closes the listener and every live connection."""
+    """One TCP proxy. stop() closes connections; blackhole() keeps them open
+    but stops forwarding, simulating a network path that accepts packets and
+    then goes dark."""
 
     def __init__(self, listen_port: int, target: tuple[str, int]):
         self.target = target
         self.stop_event = threading.Event()
+        self.blackhole_event = threading.Event()
         self.lock = threading.Lock()
         self.pairs: list[tuple[socket.socket, socket.socket]] = []
         self.listener = socket.socket()
@@ -101,6 +104,8 @@ class Proxy:
                 if not data:
                     self._close_pair(client, remote)
                     continue
+                if self.blackhole_event.is_set():
+                    continue
                 try:
                     peer.sendall(data)
                 except OSError:
@@ -137,6 +142,9 @@ class Proxy:
         self._close_all()
         self.thread.join(timeout=2)
 
+    def blackhole(self) -> None:
+        self.blackhole_event.set()
+
 
 def parse_addr(addr: str) -> tuple[str, int]:
     host, _, port = addr.partition(":")
@@ -156,7 +164,8 @@ def build() -> None:
 
 
 def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
-                 token: str, frames: int, fps: int, restart: bool = False) -> dict:
+                 token: str, frames: int, fps: int, restart: bool = False,
+                 action: str = "stop") -> dict:
     out = WORK / name
     if out.exists():
         shutil.rmtree(out)
@@ -177,6 +186,7 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         "--frames", str(frames),
         "--fps", str(fps),
         "--job-timeout-ms", "3000",
+        "--failover-timeout-ms", "500",
         "--recover-every", "10",
         "--out", str(out),
     ]
@@ -200,8 +210,11 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
                                + log_path.read_text())
         time.sleep(0.5)
         target = 0 if fail_node == "cuda" else 1
-        print(f"{name}: closing {fail_node} proxy at frame ~{frames // 4}")
-        proxies[target].stop()
+        print(f"{name}: {action} {fail_node} proxy at frame ~{frames // 4}")
+        if action == "blackhole":
+            proxies[target].blackhole()
+        else:
+            proxies[target].stop()
         if restart:
             time.sleep(0.8)
             target_addr = parse_addr(cuda if fail_node == "cuda" else hip)
@@ -236,7 +249,7 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         raise RuntimeError(f"{name}: mode {run.get('mode')} != {expected_mode}")
     if len(meta) != frames:
         raise RuntimeError(f"{name}: {len(meta)} frames, expected {frames}")
-    if run["latency_ms"]["total_max"] > 1500:
+    if run["latency_ms"]["total_max"] > 1000:
         raise RuntimeError(
             f"{name}: frame loop stalled for {run['latency_ms']['total_max']} ms"
         )
@@ -286,6 +299,14 @@ def main() -> int:
         results.append(
             run_scenario("hip-outage", "hip", args.cuda, args.hip,
                          args.token, args.frames, args.fps)
+        )
+        results.append(
+            run_scenario("cuda-blackhole", "cuda", args.cuda, args.hip,
+                         args.token, args.frames, args.fps, action="blackhole")
+        )
+        results.append(
+            run_scenario("hip-blackhole", "hip", args.cuda, args.hip,
+                         args.token, args.frames, args.fps, action="blackhole")
         )
         results.append(
             run_scenario("cuda-recover", "cuda", args.cuda, args.hip,

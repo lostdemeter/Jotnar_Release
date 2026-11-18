@@ -50,7 +50,8 @@ fn usage() -> &'static str {
          [--listing FILE] [--start-frame N] [--frames N] [--fps N] \\\n\
          [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
          [--probe-iters N] [--min-cols N] [--max-cols N] [--job-timeout-ms N] \\\n\
-         [--viewer-listen ADDR] [--recover-every N] [--no-record]\n\
+         [--viewer-listen ADDR] [--recover-every N] [--no-record] \\\n\
+         [--failover-timeout-ms N]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
      program on the CUDA and HIP runners. By default the coordinator probes\n\
@@ -80,6 +81,7 @@ struct Config {
     viewer: Option<String>,
     recover_every: u32,
     record: bool,
+    failover_timeout_ms: u64,
 }
 
 fn now_ms() -> u64 {
@@ -110,6 +112,7 @@ fn parse_args() -> Result<Config, String> {
     let mut viewer = None;
     let mut recover_every = 20u32;
     let mut record = true;
+    let mut failover_timeout_ms = 500u64;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -221,6 +224,14 @@ fn parse_args() -> Result<Config, String> {
                     .map_err(|_| "--recover-every must be an integer")?;
             }
             "--no-record" => record = false,
+            "--failover-timeout-ms" => {
+                i += 1;
+                failover_timeout_ms = args
+                    .get(i)
+                    .ok_or("--failover-timeout-ms needs a number")?
+                    .parse()
+                    .map_err(|_| "--failover-timeout-ms must be an integer")?;
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -250,6 +261,7 @@ fn parse_args() -> Result<Config, String> {
         viewer,
         recover_every,
         record,
+        failover_timeout_ms: failover_timeout_ms.max(1),
     })
 }
 
@@ -388,6 +400,80 @@ fn run_bodies(cfg: &Config, cuda_body: &[u8], hip_body: &[u8], timeout: Duration
     }
 }
 
+/// Run both split jobs without letting a blackholed node block the frame
+/// loop. Each job runs in its own thread; the caller waits only until
+/// `deadline`. A timed-out side is reported as an error and the caller can
+/// fail over to the survivor.
+fn run_bodies_deadline(
+    cfg: &Config,
+    cuda_body: &[u8],
+    hip_body: &[u8],
+    job_timeout: Duration,
+    deadline: Duration,
+) -> PairRun {
+    let (ctx, crx) = mpsc::channel();
+    let (htx, hrx) = mpsc::channel();
+    let ccfg = cfg.clone();
+    let cbody = cuda_body.to_vec();
+    let hcfg = cfg.clone();
+    let hbody = hip_body.to_vec();
+    thread::spawn(move || {
+        let r = run_job(&ccfg.cuda, "cuda", ccfg.token.clone(), &cbody, job_timeout);
+        let _ = ctx.send(r);
+    });
+    thread::spawn(move || {
+        let r = run_job(&hcfg.hip, "hip", hcfg.token.clone(), &hbody, job_timeout);
+        let _ = htx.send(r);
+    });
+    let started = Instant::now();
+    let mut cuda = None;
+    let mut hip = None;
+    loop {
+        if cuda.is_none() {
+            match crx.try_recv() {
+                Ok(r) => cuda = Some(r),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    cuda = Some(Err("cuda worker disconnected".to_string()))
+                }
+            }
+        }
+        if hip.is_none() {
+            match hrx.try_recv() {
+                Ok(r) => hip = Some(r),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    hip = Some(Err("hip worker disconnected".to_string()))
+                }
+            }
+        }
+        if cuda.is_some() && hip.is_some() {
+            break;
+        }
+        if started.elapsed() >= deadline {
+            if cuda.is_none() {
+                cuda = Some(Err(format!(
+                    "cuda timed out after {} ms",
+                    deadline.as_millis()
+                )));
+            }
+            if hip.is_none() {
+                hip = Some(Err(format!(
+                    "hip timed out after {} ms",
+                    deadline.as_millis()
+                )));
+            }
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    PairRun {
+        cuda: cuda.unwrap_or_else(|| Err("cuda missing".to_string())),
+        hip: hip.unwrap_or_else(|| Err("hip missing".to_string())),
+        total_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
 fn full_body(listing: &str, fb: &[u8]) -> Result<Vec<u8>, String> {
     let data = rgb_window(fb, 0, FB_W)?;
     let payload = half_payload(data, FB_W)?;
@@ -404,6 +490,40 @@ fn run_one(cfg: &Config, node: Node, body: &[u8], timeout: Duration) -> Result<H
     match node {
         Node::Cuda => run_job(&cfg.cuda, "cuda", cfg.token.clone(), body, timeout),
         Node::Hip => run_job(&cfg.hip, "hip", cfg.token.clone(), body, timeout),
+    }
+}
+
+fn run_one_deadline(
+    cfg: &Config,
+    node: Node,
+    body: &[u8],
+    job_timeout: Duration,
+    deadline: Duration,
+) -> Result<HalfRun, String> {
+    let (tx, rx) = mpsc::channel();
+    let cfg = cfg.clone();
+    let body = body.to_vec();
+    thread::spawn(move || {
+        let r = run_one(&cfg, node, &body, job_timeout);
+        let _ = tx.send(r);
+    });
+    let started = Instant::now();
+    loop {
+        match rx.try_recv() {
+            Ok(r) => return r,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Err(format!("{} worker disconnected", node.name()))
+            }
+        }
+        if started.elapsed() >= deadline {
+            return Err(format!(
+                "{} timed out after {} ms",
+                node.name(),
+                deadline.as_millis()
+            ));
+        }
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -781,6 +901,7 @@ fn run() -> Result<(), String> {
 
     let timeout = Duration::from_millis(cfg.job_timeout_ms);
     let startup_timeout = Duration::from_secs(60);
+    let failover_timeout = Duration::from_millis(cfg.failover_timeout_ms);
     let mut cuda_ok = true;
     let mut hip_ok = true;
     let mut failover_events: Vec<Json> = Vec::new();
@@ -1106,7 +1227,8 @@ fn run() -> Result<(), String> {
         let frame_rgb = match mode {
             Mode::Split => {
                 let (cuda_body, hip_body) = bodies_for_frame(&listing, split, fb)?;
-                let pair = run_bodies(&cfg, &cuda_body, &hip_body, timeout);
+                let pair =
+                    run_bodies_deadline(&cfg, &cuda_body, &hip_body, timeout, failover_timeout);
                 match (pair.cuda, pair.hip) {
                     (Ok(cuda), Ok(hip)) => {
                         cuda_ms = cuda.elapsed_ms;
@@ -1132,8 +1254,9 @@ fn run() -> Result<(), String> {
                             "failover at frame {frame}: hip lost ({e}); CUDA takes the full frame"
                         );
                         let full = full_body(&listing, fb)?;
-                        let r = run_one(&cfg, Node::Cuda, &full, timeout)
-                            .map_err(|e| format!("frame {frame} cuda fallback: {e}"))?;
+                        let r =
+                            run_one_deadline(&cfg, Node::Cuda, &full, timeout, failover_timeout)
+                                .map_err(|e| format!("frame {frame} cuda fallback: {e}"))?;
                         cuda_ms = r.elapsed_ms;
                         cuda_job = r.job_id.clone();
                         cuda_sha = sha256_hex(&r.bytes);
@@ -1154,7 +1277,7 @@ fn run() -> Result<(), String> {
                             "failover at frame {frame}: cuda lost ({e}); HIP takes the full frame"
                         );
                         let full = full_body(&listing, fb)?;
-                        let r = run_one(&cfg, Node::Hip, &full, timeout)
+                        let r = run_one_deadline(&cfg, Node::Hip, &full, timeout, failover_timeout)
                             .map_err(|e| format!("frame {frame} hip fallback: {e}"))?;
                         hip_ms = r.elapsed_ms;
                         hip_job = r.job_id.clone();
@@ -1169,7 +1292,7 @@ fn run() -> Result<(), String> {
             }
             Mode::CudaFull => {
                 let full = full_body(&listing, fb)?;
-                let r = run_one(&cfg, Node::Cuda, &full, timeout)
+                let r = run_one_deadline(&cfg, Node::Cuda, &full, timeout, failover_timeout)
                     .map_err(|e| format!("frame {frame} cuda full: {e}"))?;
                 cuda_ms = r.elapsed_ms;
                 cuda_job = r.job_id.clone();
@@ -1178,7 +1301,7 @@ fn run() -> Result<(), String> {
             }
             Mode::HipFull => {
                 let full = full_body(&listing, fb)?;
-                let r = run_one(&cfg, Node::Hip, &full, timeout)
+                let r = run_one_deadline(&cfg, Node::Hip, &full, timeout, failover_timeout)
                     .map_err(|e| format!("frame {frame} hip full: {e}"))?;
                 hip_ms = r.elapsed_ms;
                 hip_job = r.job_id.clone();

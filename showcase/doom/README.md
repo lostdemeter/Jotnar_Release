@@ -153,11 +153,17 @@ python3 scripts/doom_failover_gate.py
 Checked results:
 
 ```text
-CUDA outage  -> hip-full   p50 46 ms / p95 50 ms, 45/45 frames
-HIP outage   -> cuda-full  p50 114 ms / p95 135 ms, 45/45 frames
-CUDA recover -> split      p50 42 ms / p95 47 ms, 1 recovery
-HIP recover  -> split      p50 53 ms / p95 127 ms, 1 recovery
+CUDA outage    -> hip-full   p50 51 ms / p95 68 ms, max 102 ms
+HIP outage     -> cuda-full  p50 116 ms / p95 136 ms, max 156 ms
+CUDA blackhole -> hip-full   p50 49 ms / p95 70 ms, max 557 ms
+HIP blackhole  -> cuda-full  p50 112 ms / p95 133 ms, max 603 ms
+CUDA recover   -> split      p50 50 ms / p95 61 ms, 1 recovery
+HIP recover    -> split      p50 53 ms / p95 126 ms, 1 recovery
 ```
+
+Split jobs have a 500 ms `--failover-timeout-ms` deadline, so a blackholed
+node causes one bounded pause and then the survivor keeps running. Recovery
+probes are backgrounded; the frame loop does not stall periodically.
 
 ![two-node viewer recovered](doom_two_nodes_recovered.png)
 

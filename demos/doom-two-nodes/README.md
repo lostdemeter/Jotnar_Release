@@ -76,6 +76,7 @@ q quits
 --start-frame N    frame to start the game at
 --frames N         coordinator frame budget
 --viewer-addr A    local viewer listener
+--failover-timeout-ms N  fail over when a split job exceeds this deadline
 --out DIR          logs, receipt, optional frames
 --build            force a rebuild into bin/
 --no-build         require existing bin/ binaries
@@ -108,8 +109,9 @@ fill the disk.
   `DOOM_IMAGE`/`DOOM_WAD`.
 - Blank window for a few seconds — warm-worker startup on the first run.
 - One node loses its network — the survivor takes the full frame and the HUD
-  changes to `cuda-full`/`hip-full`. Recovery probes run in the background, so
-  the game loop does not stall every time the dead node is checked.
+  changes to `cuda-full`/`hip-full`. Split jobs hit the failover deadline
+  (default 500 ms) once, then the game keeps running; recovery probes happen in
+  the background.
 
 The full design and measured results are in the source repository under
 `docs/DOOM_TWO_NODE.md` and `docs/WORKLOAD_COORDINATION.md`.

@@ -210,13 +210,15 @@ The same run now has three operational checks:
   the coordinator marks it down, records the failure, and finishes the frame
   on the survivor. The checked outage gate completes 45/45 frames in both
   directions with exit 0. CUDA outage falls back to HIP at
-  `p50 46 ms / p95 50 ms`; HIP outage falls back to CUDA at
-  `p50 114 ms / p95 135 ms`.
+  `p50 51 ms / p95 68 ms`; HIP outage falls back to CUDA at
+  `p50 116 ms / p95 136 ms`. Blackholed paths hit the 500 ms
+  `--failover-timeout-ms` deadline and fail over once, with max frames of
+  `557 ms` and `603 ms` rather than a long hang.
 - **recovery path**: every `--recover-every` frames the coordinator probes a
   failed node in a background thread; if it answers, it warms the split shapes
   and returns to split mode. The frame loop does not block on a dead network
-  path. The checked recovery scenarios return to `split` at frame 221 with one
-  recovery event each.
+  path. The checked recovery scenarios return to `split` with one recovery
+  event each.
 
 This is the first measured role-filling loop: calibration decides the split,
 runtime failure decides the fallback role, and recovery restores the split
