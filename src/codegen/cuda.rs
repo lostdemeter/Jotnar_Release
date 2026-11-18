@@ -2295,6 +2295,11 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         }
     }
     let serve = serve_in.is_some();
+    let profile = bound
+        .config
+        .get("profile")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let warm_frame = bound
         .config
         .get("warm_frame")
@@ -2311,6 +2316,11 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
                 "CUDA warm_frame does not support --fp16 yet",
             ));
         }
+        if profile {
+            return Err(Error::unimplemented(
+                "CUDA warm_frame does not support CONFIG profile yet",
+            ));
+        }
         for (name, s) in &streams {
             if s.kind == CKind::T {
                 return Err(Error::unimplemented(format!(
@@ -2324,11 +2334,6 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
             }
         }
     }
-    let profile = bound
-        .config
-        .get("profile")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     let nosync = bound
         .config
         .get("nosync")

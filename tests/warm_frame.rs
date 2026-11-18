@@ -46,3 +46,14 @@ fn warm_frame_is_off_by_default() {
     assert!(!art.warm_frame);
     assert!(!art.source.contains("warm_main"));
 }
+
+#[test]
+fn warm_frame_rejects_cuda_profile() {
+    let listing = "CONFIG warm_frame 1\nCONFIG profile 1\nIN a\nIN b\nOUT = ADD(a, b)\n";
+    let err = compile_program(listing, &opts(Target::Cuda), feeds()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("warm_frame does not support CONFIG profile"),
+        "{err}"
+    );
+}
