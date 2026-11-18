@@ -4,6 +4,7 @@ pub mod capability;
 pub mod doom_pipeline;
 pub mod executor;
 pub mod hardware;
+pub mod hud;
 pub mod job;
 /// Controller-side bundle/stage/ledger logic. `jotnar-noded` does not call it.
 pub mod workload;

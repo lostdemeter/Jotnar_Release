@@ -31,6 +31,8 @@ use jotnar_node_tools::doom_pipeline::{
     OUT_W,
 };
 use jotnar_node_tools::executor::{validate_binary_result, Executor, RemoteExecutor};
+use jotnar_node_tools::hud::{render as render_hud, HudInfo, HUD_BOTTOM, HUD_TOP};
+use jotnar_node_tools::job::JobClient;
 
 const KEY_ENTER: u8 = 13;
 const KEY_UP: u8 = 0xAD;
@@ -47,7 +49,7 @@ fn usage() -> &'static str {
          [--listing FILE] [--start-frame N] [--frames N] [--fps N] \\\n\
          [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
          [--probe-iters N] [--min-cols N] [--max-cols N] [--job-timeout-ms N] \\\n\
-         [--viewer-listen ADDR]\n\
+         [--viewer-listen ADDR] [--recover-every N]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
      program on the CUDA and HIP runners. By default the coordinator probes\n\
@@ -74,6 +76,7 @@ struct Config {
     max_cols: usize,
     job_timeout_ms: u64,
     viewer: Option<String>,
+    recover_every: u32,
 }
 
 fn now_ms() -> u64 {
@@ -102,6 +105,7 @@ fn parse_args() -> Result<Config, String> {
     let mut max_cols = 288usize;
     let mut job_timeout_ms = 5000u64;
     let mut viewer = None;
+    let mut recover_every = 20u32;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -204,6 +208,14 @@ fn parse_args() -> Result<Config, String> {
                 i += 1;
                 viewer = Some(args.get(i).ok_or("--viewer-listen needs an addr")?.clone());
             }
+            "--recover-every" => {
+                i += 1;
+                recover_every = args
+                    .get(i)
+                    .ok_or("--recover-every needs a number")?
+                    .parse()
+                    .map_err(|_| "--recover-every must be an integer")?;
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -231,6 +243,7 @@ fn parse_args() -> Result<Config, String> {
         max_cols: max_cols.max(1),
         job_timeout_ms: job_timeout_ms.max(1),
         viewer,
+        recover_every,
     })
 }
 
@@ -388,6 +401,18 @@ fn run_one(cfg: &Config, node: Node, body: &[u8], timeout: Duration) -> Result<H
     }
 }
 
+fn ping_node(cfg: &Config, node: Node) -> Result<(), String> {
+    let addr = match node {
+        Node::Cuda => &cfg.cuda,
+        Node::Hip => &cfg.hip,
+    };
+    let client = JobClient::new(addr, cfg.token.clone());
+    client
+        .ping()
+        .map(|_| ())
+        .map_err(|(code, msg)| format!("{code}: {msg}"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Node {
     Cuda,
@@ -432,6 +457,42 @@ fn decode_split(split: Split, cuda: &HalfRun, hip: &HalfRun) -> Result<Vec<u8>, 
 
 fn decode_full(run: &HalfRun) -> Result<Vec<u8>, String> {
     f32_rgb_to_u8(&run.bytes, OUT_W, OUT_H).map_err(|e| format!("full output: {e}"))
+}
+
+/// If the calibrated split is predicted to miss the frame budget, choose a
+/// single-node full frame only when it is predicted to be faster.
+fn deadline_choice(probe: &Json, split: Split, budget_ms: u64) -> Option<(Mode, Json)> {
+    let p50 = |key: &str| -> Option<u64> {
+        probe
+            .get("rebalance")
+            .and_then(|r| r.get(key))
+            .or_else(|| probe.get(key))
+            .and_then(|x| x.as_u64())
+    };
+    let cuda = p50("cuda_p50")?;
+    let hip = p50("hip_p50")?;
+    let split_est = cuda.max(hip);
+    let cuda_full = cuda.saturating_mul(FB_W as u64) / split.left_cols.max(1) as u64;
+    let hip_full = hip.saturating_mul(FB_W as u64) / split.right_cols.max(1) as u64;
+    let best_full = cuda_full.min(hip_full);
+    if split_est <= budget_ms || best_full >= split_est {
+        return None;
+    }
+    let mode = if cuda_full <= hip_full {
+        Mode::CudaFull
+    } else {
+        Mode::HipFull
+    };
+    Some((
+        mode,
+        json!({
+            "split_est_ms": split_est,
+            "cuda_full_est_ms": cuda_full,
+            "hip_full_est_ms": hip_full,
+            "budget_ms": budget_ms,
+            "choice": mode.name(),
+        }),
+    ))
 }
 
 #[derive(Clone, Default)]
@@ -652,6 +713,7 @@ fn run() -> Result<(), String> {
     let mut cuda_ok = true;
     let mut hip_ok = true;
     let mut failover_events: Vec<Json> = Vec::new();
+    let mut recovery_events: Vec<Json> = Vec::new();
     let mut calibration = json!({});
     let mut split = Split::EVEN;
 
@@ -748,6 +810,89 @@ fn run() -> Result<(), String> {
                     hip_ok = false;
                     split_warm["hip_error"] = json!(e);
                 }
+
+                // Iterative rebalance: measure at the chosen split and adjust
+                // once if the per-column balance is materially different.
+                let mut rebalance = json!({});
+                if cuda_ok && hip_ok {
+                    let (cb, hb) = bodies_for_frame(&listing, split, fb)?;
+                    let mut rc = Vec::new();
+                    let mut rh = Vec::new();
+                    let mut rb_ok = true;
+                    for _ in 0..cfg.probe_iters {
+                        let pair = run_bodies(&cfg, &cb, &hb, startup_timeout);
+                        match (pair.cuda, pair.hip) {
+                            (Ok(a), Ok(b)) => {
+                                rc.push(a.elapsed_ms);
+                                rh.push(b.elapsed_ms);
+                            }
+                            (Err(e), _) => {
+                                cuda_ok = false;
+                                rb_ok = false;
+                                eprintln!("rebalance: cuda failed: {e}");
+                                break;
+                            }
+                            (_, Err(e)) => {
+                                hip_ok = false;
+                                rb_ok = false;
+                                eprintln!("rebalance: hip failed: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    if rb_ok {
+                        let (rcp, _, _) = latency_summary(&rc);
+                        let (rhp, _, _) = latency_summary(&rh);
+                        let c_norm = rcp * 160 / split.left_cols.max(1) as u64;
+                        let h_norm = rhp * 160 / split.right_cols.max(1) as u64;
+                        let next = choose_split(c_norm, h_norm, cfg.min_cols, cfg.max_cols);
+                        let before = (split.left_cols, split.right_cols);
+                        let mut changed = next.left_cols.abs_diff(split.left_cols) >= 4;
+                        if changed {
+                            let (cb, hb) = black_bodies(&listing, next)?;
+                            let pair = run_bodies(&cfg, &cb, &hb, startup_timeout);
+                            let mut warm = json!({});
+                            if let Ok(r) = pair.cuda {
+                                warm["cuda_ms"] = json!(r.elapsed_ms);
+                            } else if let Err(e) = pair.cuda {
+                                cuda_ok = false;
+                                warm["cuda_error"] = json!(e);
+                            }
+                            if let Ok(r) = pair.hip {
+                                warm["hip_ms"] = json!(r.elapsed_ms);
+                            } else if let Err(e) = pair.hip {
+                                hip_ok = false;
+                                warm["hip_error"] = json!(e);
+                            }
+                            if cuda_ok && hip_ok {
+                                split = next;
+                            } else {
+                                changed = false;
+                            }
+                            rebalance = json!({
+                                "before": {
+                                    "left_cols": before.0,
+                                    "right_cols": before.1,
+                                },
+                                "warmup": warm,
+                            });
+                        }
+                        rebalance["cuda_ms"] = json!(rc);
+                        rebalance["hip_ms"] = json!(rh);
+                        rebalance["cuda_p50"] = json!(rcp);
+                        rebalance["hip_p50"] = json!(rhp);
+                        rebalance["changed"] = json!(changed);
+                        rebalance["after"] = json!({
+                            "left_cols": split.left_cols,
+                            "right_cols": split.right_cols,
+                        });
+                        eprintln!(
+                            "rebalance: cuda {} ms, hip {} ms -> split {}/{} (changed {changed})",
+                            rcp, rhp, split.left_cols, split.right_cols
+                        );
+                    }
+                }
+
                 probe = json!({
                     "cuda_ms": c,
                     "hip_ms": h,
@@ -759,6 +904,7 @@ fn run() -> Result<(), String> {
                         "left_share": split.left_share(),
                     },
                     "split_warmup": split_warm,
+                    "rebalance": rebalance,
                 });
                 eprintln!(
                     "calibration: cuda p50 {cp} ms, hip p50 {hp} ms -> split {}/{}",
@@ -789,11 +935,73 @@ fn run() -> Result<(), String> {
     } else {
         Mode::CudaFull
     };
+    if mode == Mode::Split {
+        if let Some((choice, info)) = deadline_choice(&probe, split, budget) {
+            mode = choice;
+            calibration["deadline"] = info;
+            eprintln!(
+                "deadline: split predicted over budget; choosing {}",
+                mode.name()
+            );
+        }
+    }
     eprintln!("placement mode: {}", mode.name());
     let mut recorded = 0u32;
+    let mut recent_totals: Vec<u64> = Vec::new();
 
     for n in 0..cfg.frames {
         let frame = cfg.start_frame + n + 1;
+        if mode != Mode::Split && cfg.recover_every > 0 && n > 0 && n % cfg.recover_every == 0 {
+            let mut recovered = Vec::new();
+            if !cuda_ok && ping_node(&cfg, Node::Cuda).is_ok() {
+                cuda_ok = true;
+                recovered.push("cuda");
+            }
+            if !hip_ok && ping_node(&cfg, Node::Hip).is_ok() {
+                hip_ok = true;
+                recovered.push("hip");
+            }
+            if cuda_ok && hip_ok {
+                // Warm both split shapes before switching back; the healthy
+                // node may have evicted its split worker while running full
+                // frames.
+                let (cb, hb) = black_bodies(&listing, split)?;
+                let pair = run_bodies(&cfg, &cb, &hb, startup_timeout);
+                let mut warmed = true;
+                if let Err(e) = pair.cuda {
+                    cuda_ok = false;
+                    warmed = false;
+                    eprintln!("recovery: cuda warm failed: {e}");
+                }
+                if let Err(e) = pair.hip {
+                    hip_ok = false;
+                    warmed = false;
+                    eprintln!("recovery: hip warm failed: {e}");
+                }
+                if warmed {
+                    mode = Mode::Split;
+                    recovery_events.push(json!({
+                        "frame": frame,
+                        "nodes": recovered,
+                        "action": "rejoin-split",
+                    }));
+                    eprintln!("recovery at frame {frame}: split resumed");
+                } else {
+                    recovery_events.push(json!({
+                        "frame": frame,
+                        "nodes": recovered,
+                        "action": "warm-failed",
+                    }));
+                }
+            } else if !recovered.is_empty() {
+                recovery_events.push(json!({
+                    "frame": frame,
+                    "nodes": recovered,
+                    "action": "ping-only",
+                }));
+                eprintln!("recovery at frame {frame}: {recovered:?} reachable, waiting");
+            }
+        }
         let actions: Vec<Json> = if cfg.viewer.is_some() {
             drain_viewer_keys(&viewer_hub, &mut cpu)
         } else {
@@ -933,6 +1141,11 @@ fn run() -> Result<(), String> {
         writeln!(meta, "{}", serde_json::to_string(&record).unwrap())
             .map_err(|e| format!("write metadata: {e}"))?;
         totals.push(total_ms);
+        recent_totals.push(total_ms);
+        if recent_totals.len() > 30 {
+            recent_totals.remove(0);
+        }
+        let (rp50, rp95, _) = latency_summary(&recent_totals);
         if cuda_ms > 0 {
             cuda_samples.push(cuda_ms);
         }
@@ -942,12 +1155,65 @@ fn run() -> Result<(), String> {
         core_samples.push(core_ms);
         recorded += 1;
         if cfg.viewer.is_some() {
+            let note = if let Some(last) = recovery_events.last() {
+                format!(
+                    "recovered {} -> split",
+                    last.get("nodes")
+                        .and_then(|x| x.as_array())
+                        .map(|a| a
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("+"))
+                        .unwrap_or_else(|| "node".to_string())
+                )
+            } else if let Some(last) = failover_events.last() {
+                format!(
+                    "failover {} -> {}",
+                    last.get("node").and_then(|x| x.as_str()).unwrap_or("?"),
+                    last.get("action").and_then(|x| x.as_str()).unwrap_or("?")
+                )
+            } else if cuda_ok && hip_ok {
+                "all nodes healthy".to_string()
+            } else {
+                "degraded".to_string()
+            };
+            let info = HudInfo {
+                frame,
+                mode: used.name().to_string(),
+                cuda_addr: cfg.cuda.clone(),
+                hip_addr: cfg.hip.clone(),
+                cuda_cols: if used == Mode::Split {
+                    split.left_cols
+                } else {
+                    0
+                },
+                hip_cols: if used == Mode::Split {
+                    split.right_cols
+                } else {
+                    0
+                },
+                cuda_ms,
+                hip_ms,
+                total_ms,
+                budget_ms: budget,
+                p50: rp50,
+                p95: rp95,
+                cuda_ok,
+                hip_ok,
+                note,
+            };
+            let hud = render_hud(&frame_rgb, OUT_W, OUT_H, &info);
+            let (width, height, body) = match hud {
+                Ok(hud) => (OUT_W, OUT_H + HUD_TOP + HUD_BOTTOM, hud),
+                Err(_) => (OUT_W, OUT_H, frame_rgb.clone()),
+            };
             let header = json!({
                 "type": "frame",
                 "frame": frame,
-                "width": OUT_W,
-                "height": OUT_H,
-                "bytes": frame_rgb.len(),
+                "width": width,
+                "height": height,
+                "bytes": body.len(),
                 "mode": used.name(),
                 "split": {
                     "left_cols": split.left_cols,
@@ -959,7 +1225,7 @@ fn run() -> Result<(), String> {
                 "total_ms": total_ms,
                 "failover": failover_events.last().cloned(),
             });
-            send_viewer_frame(&viewer_hub, &header, &frame_rgb);
+            send_viewer_frame(&viewer_hub, &header, &body);
         }
         if viewer_hub.quit.load(Ordering::SeqCst) {
             eprintln!("viewer quit at frame {frame}");
@@ -1014,6 +1280,7 @@ fn run() -> Result<(), String> {
         "mode": mode.name(),
         "failover": {
             "events": failover_events,
+            "recoveries": recovery_events,
             "final_mode": mode.name(),
             "cuda_ok": cuda_ok,
             "hip_ok": hip_ok,
@@ -1050,5 +1317,21 @@ mod tests {
     fn frame_budget_is_positive() {
         assert_eq!(frame_budget_ms(12), 83);
         assert_eq!(frame_budget_ms(0), 1000);
+    }
+
+    #[test]
+    fn deadline_choice_keeps_split_when_inside_budget() {
+        let probe = json!({"cuda_p50": 40, "hip_p50": 20});
+        assert!(deadline_choice(&probe, Split::new(80, 240).unwrap(), 66).is_none());
+    }
+
+    #[test]
+    fn deadline_choice_prefers_a_faster_full_frame() {
+        let probe = json!({
+            "rebalance": {"cuda_p50": 40, "hip_p50": 20}
+        });
+        let (mode, info) = deadline_choice(&probe, Split::new(40, 280).unwrap(), 30).unwrap();
+        assert_eq!(mode, Mode::HipFull);
+        assert_eq!(info["choice"], "hip-full");
     }
 }

@@ -173,6 +173,17 @@ fn read_frame(stream: &mut TcpStream) -> Result<(Json, Vec<u8>), String> {
     Ok((header, body))
 }
 
+unsafe fn present(sdl: &Sdl, tex: *mut c_void, ren: *mut c_void, body: &[u8], width: usize) {
+    (sdl.update_texture)(
+        tex,
+        std::ptr::null(),
+        body.as_ptr() as *const c_void,
+        (width * 3) as c_int,
+    );
+    (sdl.render_copy)(ren, tex, std::ptr::null(), std::ptr::null());
+    (sdl.render_present)(ren);
+}
+
 fn run() -> Result<(), String> {
     let mut addr = "127.0.0.1:10000".to_string();
     let mut title = "Jotnar DOOM - two nodes".to_string();
@@ -189,13 +200,25 @@ fn run() -> Result<(), String> {
         }
     }
     let mut stream = connect(&addr)?;
+    let (mut header, mut body) = read_frame(&mut stream)?;
+    let width = header.get("width").and_then(|x| x.as_u64()).unwrap_or(640) as usize;
+    let height = header.get("height").and_then(|x| x.as_u64()).unwrap_or(400) as usize;
+    let win_w = 960usize;
+    let win_h = (win_w * height / width.max(1)).max(1);
     let sdl = unsafe { Sdl::load()? };
     unsafe {
         if (sdl.init)(SDL_INIT_VIDEO) != 0 {
             return Err("SDL_Init failed (is DISPLAY set?)".into());
         }
         let ctitle = CString::new(title.clone()).unwrap();
-        let win = (sdl.create_window)(ctitle.as_ptr(), 80, 80, 960, 600, WINDOW_SHOWN);
+        let win = (sdl.create_window)(
+            ctitle.as_ptr(),
+            80,
+            80,
+            win_w as c_int,
+            win_h as c_int,
+            WINDOW_SHOWN,
+        );
         if win.is_null() {
             return Err("could not create SDL window".into());
         }
@@ -206,34 +229,21 @@ fn run() -> Result<(), String> {
         if ren.is_null() {
             return Err("could not create SDL renderer".into());
         }
-        let tex = (sdl.create_texture)(ren, PIXFMT_RGB24, TEXTURE_STREAMING, 640, 400);
+        let tex = (sdl.create_texture)(
+            ren,
+            PIXFMT_RGB24,
+            TEXTURE_STREAMING,
+            width as c_int,
+            height as c_int,
+        );
         if tex.is_null() {
             return Err("could not create SDL texture".into());
         }
         (sdl.raise_window)(win);
+        present(&sdl, tex, ren, &body, width);
         let mut ev = [0u8; 56];
         let mut running = true;
-        let mut first = true;
         while running {
-            let (header, body) = match read_frame(&mut stream) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("viewer: {e}");
-                    break;
-                }
-            };
-            (sdl.update_texture)(
-                tex,
-                std::ptr::null(),
-                body.as_ptr() as *const c_void,
-                640 * 3,
-            );
-            (sdl.render_copy)(ren, tex, std::ptr::null(), std::ptr::null());
-            (sdl.render_present)(ren);
-            if first {
-                (sdl.raise_window)(win);
-                first = false;
-            }
             if let Some(mode) = header.get("mode").and_then(|x| x.as_str()) {
                 let frame = header.get("frame").and_then(|x| x.as_u64()).unwrap_or(0);
                 let ms = header.get("total_ms").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -261,6 +271,20 @@ fn run() -> Result<(), String> {
                     }
                 }
             }
+            if !running {
+                break;
+            }
+            match read_frame(&mut stream) {
+                Ok((h, b)) => {
+                    header = h;
+                    body = b;
+                }
+                Err(e) => {
+                    eprintln!("viewer: {e}");
+                    break;
+                }
+            }
+            present(&sdl, tex, ren, &body, width);
         }
         (sdl.destroy_texture)(tex);
         (sdl.destroy_renderer)(ren);

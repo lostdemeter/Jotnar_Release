@@ -156,7 +156,7 @@ def build() -> None:
 
 
 def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
-                 token: str, frames: int, fps: int) -> dict:
+                 token: str, frames: int, fps: int, restart: bool = False) -> dict:
     out = WORK / name
     if out.exists():
         shutil.rmtree(out)
@@ -177,6 +177,7 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         "--frames", str(frames),
         "--fps", str(fps),
         "--job-timeout-ms", "3000",
+        "--recover-every", "10",
         "--out", str(out),
     ]
     log_path = out / "coordinator.log"
@@ -201,6 +202,11 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         target = 0 if fail_node == "cuda" else 1
         print(f"{name}: closing {fail_node} proxy at frame ~{frames // 4}")
         proxies[target].stop()
+        if restart:
+            time.sleep(0.8)
+            target_addr = parse_addr(cuda if fail_node == "cuda" else hip)
+            proxies[target] = Proxy(ports[target], target_addr)
+            print(f"{name}: restarted {fail_node} proxy")
         stdout, _ = proc.communicate(timeout=120)
         rc = proc.returncode
     finally:
@@ -219,10 +225,13 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         for line in (out / "frames.jsonl").read_text().splitlines()
         if line.strip()
     ]
-    expected_mode = "hip-full" if fail_node == "cuda" else "cuda-full"
+    expected_mode = "split" if restart else ("hip-full" if fail_node == "cuda" else "cuda-full")
     events = run.get("failover", {}).get("events", [])
+    recoveries = run.get("failover", {}).get("recoveries", [])
     if not events:
         raise RuntimeError(f"{name}: no failover event\n{log_text}")
+    if restart and not recoveries:
+        raise RuntimeError(f"{name}: no recovery event\n{log_text}")
     if run.get("mode") != expected_mode:
         raise RuntimeError(f"{name}: mode {run.get('mode')} != {expected_mode}")
     if len(meta) != frames:
@@ -231,7 +240,7 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
     if last.stat().st_size != 640 * 400 * 3:
         raise RuntimeError(f"{name}: bad frame size {last.stat().st_size}")
     print(
-        f"{name}: OK mode={run['mode']} events={len(events)} "
+        f"{name}: OK mode={run['mode']} events={len(events)} recoveries={len(recoveries)} "
         f"p50={run['latency_ms']['total_p50']}ms p95={run['latency_ms']['total_p95']}ms"
     )
     return {
@@ -239,6 +248,7 @@ def run_scenario(name: str, fail_node: str, cuda: str, hip: str,
         "failed_node": fail_node,
         "mode": run["mode"],
         "events": events,
+        "recoveries": recoveries,
         "frames": len(meta),
         "latency_ms": run["latency_ms"],
         "log": str(log_path),
@@ -272,6 +282,14 @@ def main() -> int:
         results.append(
             run_scenario("hip-outage", "hip", args.cuda, args.hip,
                          args.token, args.frames, args.fps)
+        )
+        results.append(
+            run_scenario("cuda-recover", "cuda", args.cuda, args.hip,
+                         args.token, args.frames, args.fps, restart=True)
+        )
+        results.append(
+            run_scenario("hip-recover", "hip", args.cuda, args.hip,
+                         args.token, args.frames, args.fps, restart=True)
         )
     except Exception as e:
         print(e)

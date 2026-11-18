@@ -84,8 +84,9 @@ one half. The coordinator stitches the halves and records per-frame latency.
 [Two-node cooperative GIF](showcase/doom/doom_two_nodes.gif) ·
 [Two-node details](docs/DOOM_TWO_NODE.md)
 
-The same run can open an SDL window and forward keys to the RV32IM core, or
-close one node's network path and let the survivor take the full frame.
+The same run can open an SDL window with a live node/latency HUD and forward
+keys to the RV32IM core, or close one node's network path and let the survivor
+take the full frame.
 
 ```sh
 ./run_doom_demo.sh                 # playable

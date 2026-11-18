@@ -1,7 +1,7 @@
 # Workload coordination
 
 **Status:** first slice implemented; hardware inventory, adaptive split,
-interactive viewer, and single-node failover
+iterative rebalance, interactive HUD/viewer, failover, and recovery
 **Scope:** model-aware planning above the CPU, GPU, and native executors
 
 ## Position
@@ -167,12 +167,15 @@ architecture names.
 
 The two-node DOOM coordinator now calibrates both cards before recording:
 
-1. warm the even-split workers;
-2. run the same frame on both cards three times;
-3. take the median per-card time;
-4. choose columns proportional to throughput;
-5. warm the chosen shapes;
-6. record frames and receipts.
+1. warm the full-frame fallback on both nodes;
+2. warm the even-split workers;
+3. run the same frame on both cards three times;
+4. take the median per-card time;
+5. choose columns proportional to throughput;
+6. warm the chosen shapes;
+7. measure at the chosen split and adjust once if the per-column balance is
+   materially different;
+8. record frames, calibration, rebalance, and receipts.
 
 `choose_split` is pure and tested. The overlap column is preserved for every
 split, so bilinear upscaling stays continuous at the moving boundary.
@@ -181,33 +184,42 @@ Checked run:
 
 ```text
 CUDA probe p50  41 ms
-HIP  probe p50  19 ms
-chosen split    101 CUDA / 219 HIP columns
-total           p50 40 ms, p95 45 ms
+HIP  probe p50  18 ms
+chosen split    98 CUDA / 222 HIP columns
+rebalance       72 CUDA / 248 HIP columns
+total           p50 42 ms, p95 44 ms
 frame budget    66 ms at 15 fps
 real time       yes
 ```
 
 Before the adaptive split the fixed 50/50 run was `p50 71 ms, p95 77 ms` at
 12 fps. The split is a real placement decision driven by measurement, not a
-constant.
+constant. The rebalance step catches the fact that per-job overhead is not
+perfectly linear in column count.
 
-The coordinator records the calibration, the chosen split, per-frame job ids,
-and per-card latency in `run.json` and `frames.jsonl`.
+The coordinator records the calibration, the chosen split, the rebalance, per
+frame job ids, and per-card latency in `run.json` and `frames.jsonl`.
 
-The same run now has two operational checks:
+The same run now has three operational checks:
 
-- **interactive path**: `jotnar-doom-view` displays the stitched frame in an
-  SDL window and forwards keypresses to the RV32IM core over TCP;
+- **interactive path**: `jotnar-doom-view` displays the stitched frame with a
+  live HUD (nodes, roles, columns, per-node latency, frame budget, rolling
+  p50/p95, failover/recovery state) and forwards keypresses to the RV32IM core
+  over TCP;
 - **outage path**: both nodes pre-warm a full-frame fallback. If a node fails,
   the coordinator marks it down, records the failure, and finishes the frame
   on the survivor. The checked outage gate completes 45/45 frames in both
   directions with exit 0. CUDA outage falls back to HIP at
-  `p50 47 ms / p95 52 ms`; HIP outage falls back to CUDA at
-  `p50 120 ms / p95 137 ms`.
+  `p50 47 ms / p95 59 ms`; HIP outage falls back to CUDA at
+  `p50 119 ms / p95 126 ms`.
+- **recovery path**: every `--recover-every` frames the coordinator pings a
+  failed node; if it answers, it warms the split shapes and returns to split
+  mode. The checked recovery scenarios return to `split` at frame 221 with
+  one recovery event each.
 
 This is the first measured role-filling loop: calibration decides the split,
-and a runtime failure decides the fallback role.
+runtime failure decides the fallback role, and recovery restores the split
+when the node returns.
 
 ## 7. Next slices
 
@@ -216,8 +228,8 @@ and a runtime failure decides the fallback role.
 2. **Stage descriptors**: compiler emits `jotnar.stage/1` requirements and
    legal partitions.
 3. **Leases**: reserve workers/GPU slots/memory/bandwidth; enforce admission.
-4. **Iterative rebalance and recovery**: after the chosen split, measure again
-   and adjust once; then add mid-run recovery when a failed node returns.
+4. **Continuous rebalance**: rebalance while the game is running, not only at
+   startup and one follow-up; use EWMA and hysteresis to avoid shape churn.
 5. **General streaming ABI**: move the DOOM-specific coordinator logic into a
    reusable streaming stage contract.
 6. **Link-aware placement**: use the measured RTT/bandwidth matrix for stage

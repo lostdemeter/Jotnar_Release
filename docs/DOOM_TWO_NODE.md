@@ -1,7 +1,8 @@
 # DOOM across two nodes
 
-**Status:** cooperative per-frame pipeline with measured split, interactive
-viewer, and single-node failover; GIF recorded on the live CUDA + HIP fleet
+**Status:** cooperative per-frame pipeline with measured split, iterative
+rebalance, live HUD viewer, failover, and recovery; GIF recorded on the live
+CUDA + HIP fleet
 **Artifact:** [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif)
 
 ## Shape
@@ -92,9 +93,23 @@ machine:
 ./target/release/jotnar-doom-view --addr 127.0.0.1:10000
 ```
 
-The viewer loads SDL2 through its C ABI. It displays the stitched 640x400
-frame in a 960x600 window, puts the current mode/frame/latency in the title
-bar, and forwards key events to the coordinator over TCP. Arrows move, ctrl
+The viewer loads SDL2 through its C ABI. It displays the stitched frame in a
+960x699 window, with a top status band and a bottom latency band:
+
+```text
+JOTNAR DOOM  MODE SPLIT  FRAME 235  TOTAL 46MS/66MS
+A RV32IM  B CUDA 87C 27MS  C HIP 253C 24MS
+B 192.168.1.116:9997   C 192.168.1.195:9997
+
+P50 45MS  P95 47MS  |  ALL NODES HEALTHY
+```
+
+The HUD is drawn by the coordinator into the viewer frame, so the live display
+shows which node is running which part, the current split, per-node latency,
+the frame budget, rolling p50/p95, and failover/recovery state. The raw frames
+written for the GIF stay clean.
+
+The viewer forwards key events to the coordinator over TCP. Arrows move, ctrl
 fires, space uses, shift runs, esc opens the menu, and q quits.
 
 The coordinator runs the RV32IM core and the GPU pipeline; the viewer only
@@ -103,15 +118,23 @@ the viewer can connect before or during the run.
 
 ![two-node viewer](../showcase/doom/doom_two_nodes_view.png)
 
-## Failover
+After a failure and recovery the bottom band shows the transition:
+
+![two-node viewer recovered](../showcase/doom/doom_two_nodes_recovered.png)
+
+## Failover and recovery
 
 Both nodes pre-warm a full-frame fallback shape at startup. If a node fails,
 the coordinator marks it down, records the error, and retries that frame on
 the surviving node with the full 320-column input. Later frames stay in
-single-node mode. The RV32IM loop and the frame writer keep running.
+single-node mode.
+
+Every `--recover-every` frames (default 20), the coordinator pings a failed
+node. If it answers, the coordinator warms the split shapes again and returns
+to split mode. The recovery is recorded separately from the failure.
 
 The reproducible outage gate uses local TCP proxies in front of the real GPU
-runners, then closes one proxy mid-run:
+runners, closes one proxy mid-run, and optionally restarts it:
 
 ```sh
 python3 scripts/doom_failover_gate.py
@@ -120,26 +143,28 @@ python3 scripts/doom_failover_gate.py
 Checked results:
 
 ```text
-CUDA outage  -> hip-full   p50 47 ms, p95 52 ms, 45/45 frames, exit 0
-HIP outage   -> cuda-full  p50 120 ms, p95 137 ms, 45/45 frames, exit 0
+CUDA outage  -> hip-full   p50 47 ms, p95 59 ms, 45/45 frames, exit 0
+HIP outage   -> cuda-full  p50 119 ms, p95 126 ms, 45/45 frames, exit 0
+CUDA recover -> split      p50 43 ms, p95 54 ms, 45/45 frames, 1 recovery
+HIP recover  -> split      p50 49 ms, p95 120 ms, 45/45 frames, 1 recovery
 ```
 
-The HIP outage is slower because CUDA is slower on this op, but the run still
-completes and the coordinator does not crash. The failover event includes the
-frame, failed node, error, and action.
+The HIP outage is slower because CUDA takes the full frame, but it still
+completes. Recovery returns to the measured split without restarting the
+RV32IM core.
 
 ## Receipt
 
 The checked adaptive run:
 
 ```text
-node A  RV32IM native        core p50 32 ms
-node B  CUDA 192.168.1.116   p50 40 ms
+node A  RV32IM native        core p50 33 ms
+node B  CUDA 192.168.1.116   p50 29 ms
 node C  HIP  192.168.1.195   p50 26 ms
-total                        p50 40 ms, p95 45 ms
+total                        p50 42 ms, p95 44 ms
 frame budget at 15 fps       66 ms
 real time at target          yes
-split                        101 CUDA / 219 HIP columns (32% / 68%)
+split                        72 CUDA / 248 HIP columns (23% / 77%)
 frames                       60
 warmup                       CUDA 6644 ms, HIP 2316 ms (first run)
 ```
@@ -148,8 +173,9 @@ The calibration probes the even split three times and uses the median:
 
 ```text
 CUDA probe p50  41 ms
-HIP  probe p50  19 ms
-chosen split    101 / 219
+HIP  probe p50  18 ms
+chosen split    98 / 222
+rebalance       72 / 248
 ```
 
 The GIF is 640x454 (640x400 frame plus a HUD), 60 frames, 15 fps. The HUD
@@ -180,11 +206,12 @@ failover/summary.json, failover/cuda-outage.log, failover/hip-outage.log
 
 - The GPU op is a 2x bilinear upscale, not a full distributed renderer. The
   RV32IM renderer still runs on node A.
-- The split is chosen at startup from a calibration probe. It does not yet
-  rebalance mid-run or recover a failed node.
-- Failover switches to a single node for the rest of the run. The full-frame
-  fallback is pre-warmed, so the surviving node does not pay artifact build in
-  the failover frame.
+- The split is chosen at startup and rebalanced once from a measured probe. It
+  does not continuously rebalance during play.
+- Recovery probes a failed node every `--recover-every` frames; it does not
+  migrate state between nodes.
+- The full-frame fallback is pre-warmed, so the surviving node does not pay
+  artifact build in the failover frame.
 - The viewer protocol is a simple length-prefixed frame stream and JSON key
   messages; it has no authentication beyond the trusted-LAN assumption.
 - The coordinator is DOOM-specific. A general streaming stage ABI is future

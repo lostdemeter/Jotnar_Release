@@ -85,13 +85,13 @@ The gate writes [`doom_two_nodes.gif`](doom_two_nodes.gif) and records
 per-frame latency. The checked adaptive run:
 
 ```text
-node A  RV32IM native        core p50 32 ms
-node B  CUDA 192.168.1.116   p50 40 ms
+node A  RV32IM native        core p50 33 ms
+node B  CUDA 192.168.1.116   p50 29 ms
 node C  HIP  192.168.1.195   p50 26 ms
-total                        p50 40 ms, p95 45 ms
+total                        p50 42 ms, p95 44 ms
 frame budget at 15 fps       66 ms
 real time at target          yes
-split                        101 CUDA / 219 HIP columns
+split                        72 CUDA / 248 HIP columns
 ```
 
 The warm worker removes process startup from the per-frame path. The first
@@ -124,22 +124,34 @@ Start the coordinator with a viewer listener, then open the SDL viewer:
 ```
 
 The viewer displays the stitched frame and forwards keys to the RV32IM core.
-Arrows move, ctrl fires, space uses, shift runs, esc menu, q quits.
+A live HUD shows the active mode, frame, total/budget latency, the RV32IM node,
+both GPU nodes with columns and per-node latency, rolling p50/p95, and
+failover/recovery state. Arrows move, ctrl fires, space uses, shift runs, esc
+menu, q quits.
 
 ![two-node viewer](doom_two_nodes_view.png)
 
-### Network outage
+### Network outage and recovery
 
 Both nodes pre-warm a full-frame fallback. If one node disappears, the
-coordinator marks it down and finishes the frame on the survivor:
+coordinator marks it down and finishes the frame on the survivor. Every
+`--recover-every` frames it pings the failed node; if it answers, it warms the
+split shapes and returns to split mode.
 
 ```sh
 python3 scripts/doom_failover_gate.py
 ```
 
-Checked results: CUDA outage -> HIP full frame, `p50 47 ms / p95 52 ms`;
-HIP outage -> CUDA full frame, `p50 120 ms / p95 137 ms`. Both runs completed
-45/45 frames and exited 0.
+Checked results:
+
+```text
+CUDA outage  -> hip-full   p50 47 ms / p95 59 ms, 45/45 frames
+HIP outage   -> cuda-full  p50 119 ms / p95 126 ms, 45/45 frames
+CUDA recover -> split      p50 43 ms / p95 54 ms, 1 recovery
+HIP recover  -> split      p50 49 ms / p95 120 ms, 1 recovery
+```
+
+![two-node viewer recovered](doom_two_nodes_recovered.png)
 
 ## Checkpoint / migration gate
 

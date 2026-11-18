@@ -216,15 +216,17 @@ python3 scripts/doom_two_gpu_gate.py
 
 See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md) and
 [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif).
-The same coordinator can open an SDL viewer and forward keys:
+The same coordinator can open an SDL viewer with a live node/latency HUD and
+forward keys:
 
 ```sh
 jotnar-doom-coord ... --viewer-listen 127.0.0.1:10000
 jotnar-doom-view --addr 127.0.0.1:10000
 ```
 
-The network-outage gate closes one local proxy mid-run and checks that the
-surviving node finishes the frames:
+The network-outage gate closes one local proxy mid-run, optionally restarts
+it, and checks that the surviving node finishes the frames and the split
+resumes after recovery:
 
 ```sh
 python3 scripts/doom_failover_gate.py

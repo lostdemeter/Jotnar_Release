@@ -130,4 +130,8 @@ impl JobClient {
     pub fn list(&self) -> Result<Json, (String, String)> {
         self.call("job-list", json!({}), &[])
     }
+
+    pub fn ping(&self) -> Result<Json, (String, String)> {
+        self.call("ping", json!({}), &[])
+    }
 }
