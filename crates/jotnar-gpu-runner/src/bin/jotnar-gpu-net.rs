@@ -598,6 +598,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
                                     &payload_ids,
                                     &run.outputs,
                                     run.max_attempts,
+                                    &failed_runners,
                                 );
                                 LedgerJob {
                                     index: job,
@@ -633,6 +634,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
                     &payload_ids,
                     &run.outputs,
                     run.max_attempts,
+                    &failed_runners,
                 );
                 let mut l = ledger_lock.lock().unwrap_or_else(|e| e.into_inner());
                 l.jobs[job] = LedgerJob {
@@ -753,7 +755,7 @@ fn upload_payloads(cfg: &Config, selected: &[usize], payload: &Json) -> HashMap<
     payload_ids
 }
 
-fn batch_candidates(
+fn healthy_candidates(
     group: &[usize],
     cfg: &Config,
     failed_runners: &Mutex<HashSet<String>>,
@@ -786,7 +788,7 @@ fn run_batch_chunk(
     let frames = chunk.len();
     let mut per_group: Vec<(Runner, usize, Vec<RunReply>)> = Vec::new();
     for group in groups {
-        let candidates = batch_candidates(group, cfg, failed_runners);
+        let candidates = healthy_candidates(group, cfg, failed_runners);
         let mut got: Option<(Runner, usize, BatchReply)> = None;
         for attempt in 1..=max_attempts {
             let ri = candidates[(batch_index + attempt - 1) % candidates.len()];
@@ -899,6 +901,7 @@ fn run_one_job(
     payload_ids: &HashMap<String, String>,
     outputs: &[String],
     max_attempts: usize,
+    failed_runners: &Mutex<HashSet<String>>,
 ) -> (String, Option<String>, usize, Vec<RunRecord>) {
     let mut replies: Vec<RunReply> = Vec::new();
     let mut runs = Vec::new();
@@ -906,10 +909,11 @@ fn run_one_job(
     let mut retries = 0usize;
     let mut all_ok = true;
     for group in groups {
+        let candidates = healthy_candidates(group, cfg, failed_runners);
         let mut got = false;
         let mut last_err = String::new();
         for attempt in 1..=max_attempts {
-            let ri = group[(job + attempt - 1) % group.len()];
+            let ri = candidates[(job + attempt - 1) % candidates.len()];
             let r = &cfg.runners[ri];
             let reply = match payload_ids.get(&r.addr) {
                 Some(pid) => r.run_with_payload_id(listing, pid, outputs),
@@ -937,6 +941,8 @@ fn run_one_job(
                 }
                 Err(e) => {
                     retries += 1;
+                    let mut failed = failed_runners.lock().unwrap_or_else(|e| e.into_inner());
+                    failed.insert(r.addr.clone());
                     last_err = e;
                 }
             }
@@ -1163,6 +1169,7 @@ fn missing_payload_id_falls_back_to_inline() {
         &HashMap::new(),
         &["OUT".to_string()],
         1,
+        &Mutex::new(HashSet::new()),
     );
     rx.recv().unwrap();
     server.join().unwrap();
@@ -1171,7 +1178,7 @@ fn missing_payload_id_falls_back_to_inline() {
 }
 
 #[test]
-fn batch_candidates_skip_failed_runners() {
+fn healthy_candidates_skip_failed_runners() {
     let cfg = Config {
         runners: vec![
             Runner {
@@ -1194,14 +1201,14 @@ fn batch_candidates_skip_failed_runners() {
         rtol: 1e-4,
     };
     let failed = Mutex::new(HashSet::from(["b".to_string()]));
-    assert_eq!(batch_candidates(&[0, 1, 2], &cfg, &failed), vec![0, 2]);
+    assert_eq!(healthy_candidates(&[0, 1, 2], &cfg, &failed), vec![0, 2]);
     let all_failed = Mutex::new(HashSet::from([
         "a".to_string(),
         "b".to_string(),
         "c".to_string(),
     ]));
     assert_eq!(
-        batch_candidates(&[0, 1, 2], &cfg, &all_failed),
+        healthy_candidates(&[0, 1, 2], &cfg, &all_failed),
         vec![0, 1, 2]
     );
 }

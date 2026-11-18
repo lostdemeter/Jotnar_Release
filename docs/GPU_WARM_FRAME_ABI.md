@@ -264,8 +264,9 @@ The runner also accepts `run-batch` for warm workers:
 - the scheduler opt-in is `--batch-frames N` (default 1, maximum 64).
 
 If the batch request fails or the runner does not support it, the scheduler
-falls back to the normal per-job path. Within a batch, chunks skip runners that
-already failed; if all runners for a target have failed, the group is retried.
+falls back to the normal per-job path. Within a batch, later jobs and chunks
+skip runners that already failed; if all runners for a target have failed, the
+group is retried.
 Placement, retry, ledger, and cross-target comparison semantics are unchanged.
 
 ## Scheduler impact
