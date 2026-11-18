@@ -72,6 +72,8 @@ def run_gate(args, size, mode, count, batch_id, batch_frames):
     ]
     if mode == "batch":
         cmd += ["--batch-frames", str(batch_frames)]
+    if args.prewarm:
+        cmd += ["--prewarm"]
 
     started = time.monotonic()
     proc = subprocess.run(cmd, text=True, capture_output=True, timeout=args.timeout)
@@ -112,6 +114,8 @@ def run_gate(args, size, mode, count, batch_id, batch_frames):
         "retries": summary.get("retries", 0),
         "warm_runs": summary.get("warm_runs", 0),
         "chunks": summary.get("chunks", 0),
+        "prewarm_ms": summary.get("prewarm_ms", 0),
+        "prewarm": summary.get("prewarm", []),
         "output_bytes": summary.get("output_bytes", 0),
         "targets": summary.get("targets", []),
         "stderr": proc.stderr.strip(),
@@ -157,6 +161,7 @@ def main():
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--max-attempts", type=int, default=3)
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--prewarm", action="store_true", help="prewarm workers before each run")
     ap.add_argument(
         "--allow-cold",
         action="store_true",
@@ -190,6 +195,7 @@ def main():
         "batch_frames": args.batch_frames if args.batch_frames else "auto",
         "repeats": args.repeats,
         "require_warm": not args.allow_cold,
+        "prewarm": args.prewarm,
         "listing_sha256": sha256(probe / "matmul-warm.asm"),
         "payload_sha256": {s: sha256(probe / f"{s}.json") for s in sizes},
         "results": [],

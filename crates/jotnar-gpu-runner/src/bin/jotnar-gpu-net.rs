@@ -54,6 +54,7 @@ struct RunArgs {
     batch_id: String,
     max_attempts: usize,
     batch_frames: usize,
+    prewarm: bool,
 }
 
 #[derive(Default)]
@@ -299,6 +300,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut batch_id = None;
     let mut max_attempts = 3usize;
     let mut batch_frames = 1usize;
+    let mut prewarm = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--payload" => {
@@ -345,6 +347,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
                     .parse()
                     .map_err(|_| "--batch-frames must be an integer")?
             }
+            "--prewarm" => prewarm = true,
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown run argument '{other}'")),
         }
@@ -363,6 +366,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
         batch_id: batch_id.unwrap_or_else(default_batch_id),
         max_attempts: max_attempts.max(1),
         batch_frames: batch_frames.clamp(1, MAX_BATCH_FRAMES),
+        prewarm,
     })
 }
 
@@ -537,6 +541,43 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     selected.sort_unstable();
     selected.dedup();
     let payload_ids = upload_payloads(cfg, &selected, &payload);
+    let failed_runners = Mutex::new(HashSet::new());
+    let prewarm_started = Instant::now();
+    let mut prewarm = Vec::new();
+    if run.prewarm {
+        for &ri in &selected {
+            let r = &cfg.runners[ri];
+            let reply = match payload_ids.get(&r.addr) {
+                Some(pid) => r.prepare(&listing, Some(pid), None, &run.outputs),
+                None => r.prepare(&listing, None, Some(&payload), &run.outputs),
+            };
+            match reply {
+                Ok(reply) => prewarm.push(json!({
+                    "target": r.target,
+                    "addr": r.addr,
+                    "ok": true,
+                    "warm": reply.header.get("warm").cloned().unwrap_or(Json::Null),
+                    "worker_start_ms": reply.header.get("worker_start_ms").cloned().unwrap_or(Json::Null),
+                    "worker_reused": reply.header.get("worker_reused").cloned().unwrap_or(Json::Null),
+                    "compile_ms": reply.header.get("compile_ms").cloned().unwrap_or(Json::Null),
+                    "build_ms": reply.header.get("build_ms").cloned().unwrap_or(Json::Null),
+                    "cache_hit": reply.header.get("cache_hit").cloned().unwrap_or(Json::Null),
+                })),
+                Err(e) => {
+                    eprintln!("warm prepare {} failed: {e}", r.addr);
+                    let mut failed = failed_runners.lock().unwrap_or_else(|e| e.into_inner());
+                    failed.insert(r.addr.clone());
+                    prewarm.push(json!({
+                        "target": r.target,
+                        "addr": r.addr,
+                        "ok": false,
+                        "error": e,
+                    }));
+                }
+            }
+        }
+    }
+    let prewarm_ms = prewarm_started.elapsed().as_millis();
 
     let pending: Vec<usize> = ledger
         .jobs
@@ -561,7 +602,6 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     let workers = run.parallel.min(work.max(1)).max(1);
     let next = AtomicUsize::new(0);
     let ledger_lock = Mutex::new(ledger);
-    let failed_runners = Mutex::new(HashSet::new());
     let started = Instant::now();
 
     std::thread::scope(|scope| {
@@ -713,6 +753,8 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         "parallel": workers,
         "batch_frames": run.batch_frames,
         "chunks": if run.batch_frames > 1 { chunks.len() } else { 0 },
+        "prewarm": prewarm,
+        "prewarm_ms": prewarm_ms,
         "warm_runs": warm_runs,
         "jobs_per_s": if wall_ms == 0 { 0.0 } else { run.count as f64 * 1000.0 / wall_ms as f64 },
         "cached": false,

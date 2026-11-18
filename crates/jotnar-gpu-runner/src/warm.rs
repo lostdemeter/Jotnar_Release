@@ -55,10 +55,13 @@ impl WarmCache {
         }
     }
 
-    pub fn get_or_create(&mut self, spec: &WarmSpec) -> Result<Arc<Mutex<WarmWorker>>, String> {
+    pub fn get_or_create(
+        &mut self,
+        spec: &WarmSpec,
+    ) -> Result<(Arc<Mutex<WarmWorker>>, bool), String> {
         if let Some(w) = self.workers.get(&spec.key) {
             touch(&mut self.order, &spec.key);
-            return Ok(w.clone());
+            return Ok((w.clone(), false));
         }
         while self.workers.len() >= self.limit {
             let Some(old) = self.order.pop_front() else {
@@ -69,7 +72,7 @@ impl WarmCache {
         let w = Arc::new(Mutex::new(WarmWorker::start(spec.clone())?));
         self.workers.insert(spec.key.clone(), w.clone());
         self.order.push_back(spec.key.clone());
-        Ok(w)
+        Ok((w, true))
     }
 
     pub fn remove(&mut self, key: &str) {
@@ -304,6 +307,10 @@ impl WarmWorker {
             output_maps,
             worker_start_ms,
         })
+    }
+
+    pub fn startup_ms(&self) -> u128 {
+        self.worker_start_ms
     }
 
     pub fn run_frame(&mut self, feeds: &Feeds) -> Result<WarmRun, String> {

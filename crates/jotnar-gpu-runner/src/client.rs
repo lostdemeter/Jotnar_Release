@@ -26,6 +26,11 @@ pub struct BatchReply {
     pub frames: Vec<Json>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PrepareReply {
+    pub header: Json,
+}
+
 fn send_frame(stream: &mut TcpStream, header: &Json, payload: &[u8]) -> Result<(), String> {
     let frame = encode_frame(header, payload).map_err(|e| e.to_string())?;
     stream.write_all(&frame).map_err(|e| format!("write: {e}"))
@@ -237,6 +242,42 @@ impl Runner {
         )
     }
 
+    pub fn prepare(
+        &self,
+        listing: &str,
+        payload_id: Option<&str>,
+        payload: Option<&Json>,
+        outputs: &[String],
+    ) -> Result<PrepareReply, String> {
+        let mut fields = json!({"target": self.target, "outputs": outputs});
+        let mut body = json!({"listing": listing});
+        match (payload_id, payload) {
+            (Some(pid), _) => {
+                if let Some(o) = fields.as_object_mut() {
+                    o.insert("payload_id".into(), json!(pid));
+                }
+                if let Some(o) = body.as_object_mut() {
+                    o.insert("payload_id".into(), json!(pid));
+                }
+            }
+            (None, Some(payload)) => {
+                if let Some(o) = body.as_object_mut() {
+                    o.insert("payload".into(), payload.clone());
+                }
+            }
+            (None, None) => return Err("prepare needs a payload or payload_id".to_string()),
+        }
+        let mut stream = self.connect()?;
+        let header = self.header("warm-prepare", fields);
+        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        send_frame(&mut stream, &header, &body)?;
+        let (reply, _) = recv_frame(&mut stream, 16 * 1024 * 1024)?;
+        if reply.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+            return Err(format!("{} warm-prepare failed: {reply}", self.addr));
+        }
+        Ok(PrepareReply { header: reply })
+    }
+
     pub fn run_batch(
         &self,
         listing: &str,
@@ -343,6 +384,56 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_reads_worker_timing() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut hdr = [0u8; 4];
+            stream.read_exact(&mut hdr).unwrap();
+            let n = u32::from_be_bytes(hdr) as usize;
+            let mut body = vec![0u8; n];
+            stream.read_exact(&mut body).unwrap();
+            let split = body.iter().position(|b| *b == b'\n').unwrap();
+            let head: Json = serde_json::from_slice(&body[..split]).unwrap();
+            assert_eq!(head["type"], "warm-prepare");
+            let reply = json!({
+                "v": 1,
+                "id": 1,
+                "type": "warm-prepare-ok",
+                "ok": true,
+                "target": "cuda",
+                "warm": true,
+                "worker_start_ms": 42,
+                "worker_reused": false,
+                "compile_ms": 0,
+                "build_ms": 0,
+                "cache_hit": true,
+            });
+            let mut h = serde_json::to_vec(&reply).unwrap();
+            h.push(b'\n');
+            stream.write_all(&(h.len() as u32).to_be_bytes()).unwrap();
+            stream.write_all(&h).unwrap();
+        });
+
+        let runner = Runner {
+            target: "cuda".to_string(),
+            addr: addr.to_string(),
+            token: None,
+        };
+        let reply = runner
+            .prepare("listing", Some("payload"), None, &["OUT".to_string()])
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply.header["warm"], true);
+        assert_eq!(reply.header["worker_start_ms"], 42);
+        assert_eq!(reply.header["worker_reused"], false);
+    }
 
     #[test]
     fn binary_batch_decodes_frames() {

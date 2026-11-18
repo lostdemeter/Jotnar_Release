@@ -468,6 +468,12 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             }
             Ok(())
         }
+        "warm-prepare" => {
+            if let Err(e) = warm_prepare(&mut stream, cfg, &id, &header, payload) {
+                send_error(&mut stream, &id, "warm-prepare-failed", &e)?;
+            }
+            Ok(())
+        }
         other => send_error(
             &mut stream,
             &id,
@@ -484,7 +490,7 @@ fn run(
     header: &Json,
     payload: &[u8],
 ) -> Result<(), String> {
-    run_impl(stream, cfg, id, header, payload, 1, false)
+    run_impl(stream, cfg, id, header, payload, 1, false, false)
 }
 
 fn run_batch(
@@ -506,7 +512,17 @@ fn run_batch(
             &format!("run-batch frames must be 1..={MAX_BATCH_FRAMES}"),
         );
     }
-    run_impl(stream, cfg, id, header, payload, frames, true)
+    run_impl(stream, cfg, id, header, payload, frames, true, false)
+}
+
+fn warm_prepare(
+    stream: &mut TcpStream,
+    cfg: &Config,
+    id: &Json,
+    header: &Json,
+    payload: &[u8],
+) -> Result<(), String> {
+    run_impl(stream, cfg, id, header, payload, 1, false, true)
 }
 
 fn run_impl(
@@ -517,6 +533,7 @@ fn run_impl(
     payload: &[u8],
     frames: usize,
     batch: bool,
+    prepare: bool,
 ) -> Result<(), String> {
     let requested_target = header
         .get("target")
@@ -618,13 +635,44 @@ fn run_impl(
     }
     let build_ms = t_build.elapsed().as_millis();
 
+    if prepare && !(cfg.warm && artifact.warm_frame) {
+        let timing = json!({
+            "compile_ms": compile_ms,
+            "build_ms": build_ms,
+            "worker_start_ms": 0,
+            "warm": false,
+            "worker_reused": false,
+            "cache_hit": cache_hit,
+        });
+        return send_prepare(stream, id, cfg, &artifact, timing);
+    }
+
     if cfg.warm && artifact.warm_frame {
         let spec = warm::spec_from_artifact(&artifact, &exe, &key, cfg.target)?;
         let cache_key = spec.key.clone();
-        let worker = {
+        let (worker, worker_started) = {
             let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.get_or_create(&spec)?
         };
+        if prepare {
+            let worker_start_ms = if worker_started {
+                worker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .startup_ms()
+            } else {
+                0
+            };
+            let timing = json!({
+                "compile_ms": compile_ms,
+                "build_ms": build_ms,
+                "worker_start_ms": worker_start_ms,
+                "warm": true,
+                "worker_reused": !worker_started,
+                "cache_hit": cache_hit,
+            });
+            return send_prepare(stream, id, cfg, &artifact, timing);
+        }
         let mut outputs = Vec::with_capacity(frames);
         let mut frame_ms = Vec::with_capacity(frames);
         let mut worker_start_ms = 0;
@@ -787,6 +835,32 @@ fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
         arch,
         if use_fp16 { 1 } else { 0 }
     )
+}
+
+fn send_prepare(
+    stream: &mut TcpStream,
+    id: &Json,
+    cfg: &Config,
+    artifact: &Artifact,
+    timing: Json,
+) -> Result<(), String> {
+    let field = |k: &str| timing.get(k).cloned().unwrap_or(Json::Null);
+    let header = json!({
+        "v": PROTO_V,
+        "id": id,
+        "type": "warm-prepare-ok",
+        "ok": true,
+        "target": cfg.target.as_str(),
+        "runtime_version": RUNTIME_VERSION,
+        "outputs": artifact.outputs,
+        "warm": field("warm"),
+        "worker_start_ms": field("worker_start_ms"),
+        "worker_reused": field("worker_reused"),
+        "compile_ms": field("compile_ms"),
+        "build_ms": field("build_ms"),
+        "cache_hit": field("cache_hit"),
+    });
+    send(stream, &header, &[])
 }
 
 fn send_run_batch_outputs(
