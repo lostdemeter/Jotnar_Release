@@ -211,3 +211,30 @@ impl Runner {
         h
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_output_decodes_f32_and_i64() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1.5f32.to_le_bytes());
+        body.extend_from_slice(&2.5f32.to_le_bytes());
+        body.extend_from_slice(&7i64.to_le_bytes());
+        let header = json!({
+            "output_format": "binary",
+            "outputs": [
+                {"name": "f", "kind": "F32", "shape": [2], "off": 0, "bytes": 8},
+                {"name": "i", "kind": "I64", "shape": [1], "off": 8, "bytes": 8},
+            ],
+        });
+        let out = decode_binary(&header, &body).unwrap();
+        let f = &out["outputs"]["f"];
+        assert_eq!(f["kind"], "F32");
+        assert_eq!(f["data"], json!([1.5, 2.5]));
+        let i = &out["outputs"]["i"];
+        assert_eq!(i["kind"], "I64");
+        assert_eq!(i["data"], json!(["7"]));
+    }
+}
