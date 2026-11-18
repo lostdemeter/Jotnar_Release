@@ -83,8 +83,7 @@ python3 scripts/gpu_runner_compare.py \
 
 ## Boundaries
 
-- Compile-on-host with a source/arch cache, parsed-payload cache, compiled
-  artifact cache, and binary output transport; no signed/prebuilt artifact
+- Compile-on-host with a source/arch cache; no signed/prebuilt artifact
   transport yet.
 - Trusted-LAN shared token; no TLS/mTLS. A non-loopback bind requires
   `--token`, and an empty token is rejected.
