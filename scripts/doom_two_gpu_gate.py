@@ -79,21 +79,27 @@ def annotate(im: Image.Image, meta: dict, run: dict) -> Image.Image:
     f13 = font(13)
     f11 = font(11)
     f11b = font(11, bold=True)
+    split = run.get("split", {"left_cols": 160, "right_cols": 160})
+    left_cols = int(split["left_cols"])
+    right_cols = int(split["right_cols"])
+    left_pct = round(100 * left_cols / max(1, left_cols + right_cols))
+    right_pct = 100 - left_pct
     d.text(
         (8, 7),
-        "Jotnar DOOM  |  node A RV32IM  ->  CUDA + HIP Jotnar",
+        f"Jotnar DOOM  |  node A RV32IM  ->  CUDA {left_pct}% + HIP {right_pct}%",
         fill=(232, 232, 232), font=f13,
     )
     label = f"frame {meta['frame']}"
     tw = d.textlength(label, font=f13)
     d.text((W - tw - 8, 7), label, fill=(232, 232, 232), font=f13)
 
-    # Show the split and name the two contributing nodes.
-    d.line([(W // 2, TOP), (W // 2, TOP + H)], fill=(0, 190, 240), width=1)
-    d.rectangle([(6, TOP + 6), (74, TOP + 22)], fill=(0, 0, 0))
-    d.text((10, TOP + 7), "CUDA left", fill=(0, 220, 255), font=f11b)
-    d.rectangle([(W - 82, TOP + 6), (W - 6, TOP + 22)], fill=(0, 0, 0))
-    d.text((W - 78, TOP + 7), "HIP right", fill=(255, 210, 90), font=f11b)
+    # Show the measured split and name the two contributing nodes.
+    split_x = max(1, min(W - 1, left_cols * 2))
+    d.line([(split_x, TOP), (split_x, TOP + H)], fill=(0, 190, 240), width=1)
+    d.rectangle([(6, TOP + 6), (92, TOP + 22)], fill=(0, 0, 0))
+    d.text((10, TOP + 7), f"CUDA {left_cols} cols", fill=(0, 220, 255), font=f11b)
+    d.rectangle([(W - 92, TOP + 6), (W - 6, TOP + 22)], fill=(0, 0, 0))
+    d.text((W - 88, TOP + 7), f"HIP {right_cols} cols", fill=(255, 210, 90), font=f11b)
 
     y = TOP + H + 5
     d.text((8, y), f"CUDA {meta['cuda_ms']} ms", fill=(0, 220, 255), font=f11)
@@ -112,10 +118,11 @@ def main() -> int:
     ap.add_argument("--hip", default=DEFAULT_HIP)
     ap.add_argument("--token", default="test")
     ap.add_argument("--frames", type=int, default=60)
-    ap.add_argument("--fps", type=int, default=12)
+    ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--start-frame", type=int, default=200)
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--gif", default=str(DEFAULT_GIF))
+    ap.add_argument("--no-auto-split", action="store_true")
     ap.add_argument("--no-build", action="store_true")
     args = ap.parse_args()
 
@@ -151,6 +158,8 @@ def main() -> int:
         "--fps", str(args.fps),
         "--out", str(out),
     ]
+    if args.no_auto_split:
+        cmd.append("--no-auto-split")
     print("coordinator:", " ".join(cmd))
     with open(log, "w") as f:
         r = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,

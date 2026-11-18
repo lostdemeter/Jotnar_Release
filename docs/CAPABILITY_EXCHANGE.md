@@ -92,6 +92,16 @@ cpu cpu  127.0.0.1:9999      node-... jobs.v1 workers=8 queue=64
 job controller, and `jotnar-native-runner` owns native process execution.
 Capabilities are an inventory, not a new execution path.
 
+`jotnar-net hardware` normalizes the same records into `jotnar.hardware/1`
+with typed CPU/GPU/native nodes and optional link probes:
+
+```sh
+jotnar-net --discover-timeout-ms 5000 hardware --probe
+```
+
+The profile is the controller's resource view; see
+[`docs/WORKLOAD_COORDINATION.md`](WORKLOAD_COORDINATION.md).
+
 ## Boundaries
 
 - The CPU node stays model-blind.

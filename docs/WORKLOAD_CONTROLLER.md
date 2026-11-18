@@ -212,3 +212,9 @@ frame is a per-frame request rather than a whole-file stage. It keeps the same
 executor contract and adds frame splitting, stitching, and latency receipts.
 See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md). A general streaming stage ABI
 is future work.
+
+The resource model, lease vocabulary, and measured placement policy that the
+next layer needs are in
+[`docs/WORKLOAD_COORDINATION.md`](WORKLOAD_COORDINATION.md). The first
+implemented slice is `jotnar-net hardware` plus the adaptive CUDA/HIP DOOM
+split.

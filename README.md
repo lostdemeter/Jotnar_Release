@@ -236,6 +236,8 @@ The front door is deliberately short. The actual parts are here:
   [`docs/EXECUTOR_CONTRACT.md`](docs/EXECUTOR_CONTRACT.md)
 - model-aware workload bundles, stage graphs, checkpoint handoff, and ledger:
   [`docs/WORKLOAD_CONTROLLER.md`](docs/WORKLOAD_CONTROLLER.md)
+- resource model, leases, adaptive placement, and measured role filling:
+  [`docs/WORKLOAD_COORDINATION.md`](docs/WORKLOAD_COORDINATION.md)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:

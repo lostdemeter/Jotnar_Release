@@ -24,8 +24,7 @@ use jotnar::payload::feeds_to_json;
 use jotnar::rv32::Rv32;
 use jotnar::value::{array_from_vec, Value};
 use jotnar_node_tools::doom_pipeline::{
-    f32_rgb_to_u8, latency_summary, rgb_half, sha256_hex, stitch_overlap, FB_H, OUT_H, OUT_W,
-    SEND_OUT_W, SEND_W,
+    choose_split, f32_rgb_to_u8, latency_summary, rgb_window, sha256_hex, Split, FB_H, OUT_H, OUT_W,
 };
 use jotnar_node_tools::executor::{validate_binary_result, Executor, RemoteExecutor};
 
@@ -42,11 +41,13 @@ fn usage() -> &'static str {
        jotnar-doom-coord --image FILE --wad FILE \\\n\
          --cuda ADDR --hip ADDR [--token T] \\\n\
          [--listing FILE] [--start-frame N] [--frames N] [--fps N] \\\n\
-         [--out DIR] [--max-instr N] [--no-warmup]\n\
+         [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
+         [--probe-iters N] [--min-cols N] [--max-cols N]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
-     program on the CUDA and HIP runners. The output is raw RGB frames plus\n\
-     metadata; scripts/doom_two_node_gate.py assembles the GIF."
+     program on the CUDA and HIP runners. By default the coordinator probes\n\
+     both cards and splits the frame by measured throughput. The output is raw\n\
+     RGB frames plus metadata; scripts/doom_two_gpu_gate.py assembles the GIF."
 }
 
 struct Config {
@@ -62,6 +63,10 @@ struct Config {
     out: PathBuf,
     max_instr: u64,
     warmup: bool,
+    auto_split: bool,
+    probe_iters: u32,
+    min_cols: usize,
+    max_cols: usize,
 }
 
 fn now_ms() -> u64 {
@@ -84,6 +89,10 @@ fn parse_args() -> Result<Config, String> {
     let mut out = PathBuf::from("/tmp/opencode/doom_two_nodes");
     let mut max_instr = 2_000_000_000u64;
     let mut warmup = true;
+    let mut auto_split = true;
+    let mut probe_iters = 3u32;
+    let mut min_cols = 32usize;
+    let mut max_cols = 288usize;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -149,6 +158,31 @@ fn parse_args() -> Result<Config, String> {
                     .map_err(|_| "--max-instr must be an integer")?;
             }
             "--no-warmup" => warmup = false,
+            "--no-auto-split" => auto_split = false,
+            "--probe-iters" => {
+                i += 1;
+                probe_iters = args
+                    .get(i)
+                    .ok_or("--probe-iters needs a number")?
+                    .parse()
+                    .map_err(|_| "--probe-iters must be an integer")?;
+            }
+            "--min-cols" => {
+                i += 1;
+                min_cols = args
+                    .get(i)
+                    .ok_or("--min-cols needs a number")?
+                    .parse()
+                    .map_err(|_| "--min-cols must be an integer")?;
+            }
+            "--max-cols" => {
+                i += 1;
+                max_cols = args
+                    .get(i)
+                    .ok_or("--max-cols needs a number")?
+                    .parse()
+                    .map_err(|_| "--max-cols must be an integer")?;
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -170,11 +204,15 @@ fn parse_args() -> Result<Config, String> {
         out,
         max_instr: max_instr.max(1),
         warmup,
+        auto_split: auto_split && warmup,
+        probe_iters: probe_iters.max(1),
+        min_cols: min_cols.max(1),
+        max_cols: max_cols.max(1),
     })
 }
 
-fn half_payload(data: Vec<f32>) -> Result<Json, String> {
-    let arr = array_from_vec(&[FB_H, SEND_W, 3], data).map_err(|e| e.to_string())?;
+fn half_payload(data: Vec<f32>, width: usize) -> Result<Json, String> {
+    let arr = array_from_vec(&[FB_H, width, 3], data).map_err(|e| e.to_string())?;
     let mut feeds = BTreeMap::new();
     feeds.insert("X".to_string(), Value::F32(arr));
     feeds_to_json(&feeds, Some(&["X".to_string()])).map_err(|e| e.to_string())
@@ -269,6 +307,41 @@ fn run_job(
         bytes: body[off..end].to_vec(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn bodies_for_frame(listing: &str, split: Split, fb: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let ((lx, lw), (rx, rw)) = split.windows();
+    let left = half_payload(rgb_window(fb, lx, lw)?, lw)?;
+    let right = half_payload(rgb_window(fb, rx, rw)?, rw)?;
+    Ok((body_for(listing, left)?, body_for(listing, right)?))
+}
+
+fn black_bodies(listing: &str, split: Split) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let ((_, lw), (_, rw)) = split.windows();
+    let left = half_payload(vec![0.0f32; FB_H * lw * 3], lw)?;
+    let right = half_payload(vec![0.0f32; FB_H * rw * 3], rw)?;
+    Ok((body_for(listing, left)?, body_for(listing, right)?))
+}
+
+fn run_bodies(
+    cfg: &Config,
+    cuda_body: &[u8],
+    hip_body: &[u8],
+    timeout: Duration,
+) -> Result<(HalfRun, HalfRun, u64), String> {
+    let cuda_addr = cfg.cuda.clone();
+    let hip_addr = cfg.hip.clone();
+    let token = cfg.token.clone();
+    let started = Instant::now();
+    let (a, b) = thread::scope(|s| {
+        let a = s.spawn(|| run_job(&cuda_addr, "cuda", token.clone(), cuda_body, timeout));
+        let b = s.spawn(|| run_job(&hip_addr, "hip", token.clone(), hip_body, timeout));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let total = started.elapsed().as_millis() as u64;
+    let a = a.map_err(|e| format!("cuda: {e}"))?;
+    let b = b.map_err(|e| format!("hip: {e}"))?;
+    Ok((a, b, total))
 }
 
 fn press(cpu: &mut Rv32, pressed: bool, key: u8) {
@@ -380,22 +453,54 @@ fn run() -> Result<(), String> {
     );
 
     let timeout = Duration::from_secs(120);
-    let mut warmup = json!({});
-    if cfg.warmup {
-        let black = half_payload(vec![0.0f32; FB_H * SEND_W * 3])?;
-        let cuda_body = body_for(&listing, black.clone())?;
-        let hip_body = body_for(&listing, black)?;
-        let cuda_addr = cfg.cuda.clone();
-        let hip_addr = cfg.hip.clone();
-        let token = cfg.token.clone();
-        let (a, b) = thread::scope(|s| {
-            let a = s.spawn(|| run_job(&cuda_addr, "cuda", token.clone(), &cuda_body, timeout));
-            let b = s.spawn(|| run_job(&hip_addr, "hip", token.clone(), &hip_body, timeout));
-            (a.join().unwrap(), b.join().unwrap())
+    let mut calibration = json!({});
+    let mut split = Split::EVEN;
+    if cfg.auto_split {
+        // Warm the even-split workers, then measure the same frame on both
+        // cards. The first job pays artifact build and worker startup; the
+        // probe iterations are steady state.
+        let even = Split::EVEN;
+        let (cb, hb) = black_bodies(&listing, even)?;
+        let (a, b, _) =
+            run_bodies(&cfg, &cb, &hb, timeout).map_err(|e| format!("even warmup: {e}"))?;
+        let fb = cpu.framebuffer();
+        let (cb, hb) = bodies_for_frame(&listing, even, fb)?;
+        let mut c = Vec::new();
+        let mut h = Vec::new();
+        for _ in 0..cfg.probe_iters {
+            let (a, b, _) =
+                run_bodies(&cfg, &cb, &hb, timeout).map_err(|e| format!("calibration: {e}"))?;
+            c.push(a.elapsed_ms);
+            h.push(b.elapsed_ms);
+        }
+        let (cp, _, _) = latency_summary(&c);
+        let (hp, _, _) = latency_summary(&h);
+        split = choose_split(cp, hp, cfg.min_cols, cfg.max_cols);
+        let (cb, hb) = black_bodies(&listing, split)?;
+        let (a, b, _) =
+            run_bodies(&cfg, &cb, &hb, timeout).map_err(|e| format!("split warmup: {e}"))?;
+        calibration = json!({
+            "probe": {"left_cols": even.left_cols, "right_cols": even.right_cols},
+            "probe_iters": cfg.probe_iters,
+            "cuda_ms": c,
+            "hip_ms": h,
+            "cuda_p50": cp,
+            "hip_p50": hp,
+            "chosen": {
+                "left_cols": split.left_cols,
+                "right_cols": split.right_cols,
+                "left_share": split.left_share(),
+            },
+            "warmup": {"cuda_ms": a.elapsed_ms, "hip_ms": b.elapsed_ms},
         });
-        let a = a.map_err(|e| format!("cuda warmup: {e}"))?;
-        let b = b.map_err(|e| format!("hip warmup: {e}"))?;
-        warmup = json!({"cuda_ms": a.elapsed_ms, "hip_ms": b.elapsed_ms});
+        eprintln!(
+            "calibration: cuda p50 {cp} ms, hip p50 {hp} ms -> split {}/{}",
+            split.left_cols, split.right_cols
+        );
+    } else if cfg.warmup {
+        let (cb, hb) = black_bodies(&listing, split)?;
+        let (a, b, _) = run_bodies(&cfg, &cb, &hb, timeout).map_err(|e| format!("warmup: {e}"))?;
+        calibration = json!({"warmup": {"cuda_ms": a.elapsed_ms, "hip_ms": b.elapsed_ms}});
         eprintln!("warmup: cuda {} ms, hip {} ms", a.elapsed_ms, b.elapsed_ms);
     }
 
@@ -423,28 +528,15 @@ fn run() -> Result<(), String> {
             ));
         }
         let fb = cpu.framebuffer();
-        let left = half_payload(rgb_half(fb, 0)?)?;
-        let right = half_payload(rgb_half(fb, 1)?)?;
-        let cuda_body = body_for(&listing, left)?;
-        let hip_body = body_for(&listing, right)?;
-        let cuda_addr = cfg.cuda.clone();
-        let hip_addr = cfg.hip.clone();
-        let token = cfg.token.clone();
-        let t_frame = Instant::now();
-        let (cuda, hip) = thread::scope(|s| {
-            let a = s.spawn(|| run_job(&cuda_addr, "cuda", token.clone(), &cuda_body, timeout));
-            let b = s.spawn(|| run_job(&hip_addr, "hip", token.clone(), &hip_body, timeout));
-            (a.join().unwrap(), b.join().unwrap())
-        });
-        let total_ms = t_frame.elapsed().as_millis() as u64;
-        let cuda = cuda.map_err(|e| format!("frame {frame} cuda: {e}"))?;
-        let hip = hip.map_err(|e| format!("frame {frame} hip: {e}"))?;
-        let left8 = f32_rgb_to_u8(&cuda.bytes, SEND_OUT_W, OUT_H)
+        let (cuda_body, hip_body) = bodies_for_frame(&listing, split, fb)?;
+        let (cuda, hip, total_ms) = run_bodies(&cfg, &cuda_body, &hip_body, timeout)?;
+        let left8 = f32_rgb_to_u8(&cuda.bytes, split.left_out_width(), OUT_H)
             .map_err(|e| format!("frame {frame} cuda output: {e}"))?;
-        let right8 = f32_rgb_to_u8(&hip.bytes, SEND_OUT_W, OUT_H)
+        let right8 = f32_rgb_to_u8(&hip.bytes, split.right_out_width(), OUT_H)
             .map_err(|e| format!("frame {frame} hip output: {e}"))?;
-        let frame_rgb =
-            stitch_overlap(&left8, &right8).map_err(|e| format!("frame {frame} stitch: {e}"))?;
+        let frame_rgb = split
+            .stitch(&left8, &right8)
+            .map_err(|e| format!("frame {frame} stitch: {e}"))?;
         let file = format!("frames/frame_{n:04}.rgb");
         fs::write(cfg.out.join(&file), &frame_rgb).map_err(|e| format!("write {file}: {e}"))?;
         let sha = sha256_hex(&frame_rgb);
@@ -454,6 +546,11 @@ fn run() -> Result<(), String> {
             "file": file,
             "width": OUT_W,
             "height": OUT_H,
+            "split": {
+                "left_cols": split.left_cols,
+                "right_cols": split.right_cols,
+                "left_share": split.left_share(),
+            },
             "core_ms": core_ms,
             "cuda_ms": cuda.elapsed_ms,
             "hip_ms": hip.elapsed_ms,
@@ -507,7 +604,13 @@ fn run() -> Result<(), String> {
         "frames": cfg.frames,
         "fps": cfg.fps,
         "frame_budget_ms": budget,
-        "warmup": warmup,
+        "auto_split": cfg.auto_split,
+        "split": {
+            "left_cols": split.left_cols,
+            "right_cols": split.right_cols,
+            "left_share": split.left_share(),
+        },
+        "calibration": calibration,
         "latency_ms": {
             "total_p50": p50,
             "total_p95": p95,

@@ -1,7 +1,7 @@
 # DOOM across two nodes
 
-**Status:** first cooperative per-frame pipeline; GIF recorded on the live
-CUDA + HIP fleet
+**Status:** cooperative per-frame pipeline with a measured throughput split;
+GIF recorded on the live CUDA + HIP fleet
 **Artifact:** [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif)
 
 ## Shape
@@ -9,18 +9,20 @@ CUDA + HIP fleet
 ```text
 node A (coordinator host)            node B (CUDA)             node C (HIP)
   RV32IM native core                   Jotnar INTERP 2x          Jotnar INTERP 2x
-  framebuffer 320x200 BGRA   ->        left 161x200 RGB   ->     right 161x200 RGB
+  framebuffer 320x200 BGRA   ->        left window        ->     right window
         |                                   |                         |
-        +-------- frame halves over TCP ----+                         |
+        +-------- frame windows over TCP ---+                         |
         |                                                             |
-        +<--------------- 322x400 RGB results -----------------------+
+        +<--------------- RGB results -------------------------------+
         |
   crop/stitch -> 640x400 RGB -> raw frames + latency metadata -> GIF
 ```
 
 Node A runs the responsive native RV32IM core. Nodes B and C each run the same
-Jotnar listing on one overlapping half of the frame. The overlap keeps the
-bilinear upscale continuous at the split.
+Jotnar listing on one overlapping window of the frame. The coordinator
+calibrates both cards and chooses the window widths from measured throughput;
+on this fleet CUDA gets about 32% of the columns and HIP about 68%. The
+overlap keeps the bilinear upscale continuous at the split.
 
 ## Why two nodes
 
@@ -62,11 +64,12 @@ cargo build --release -p jotnar-node-tools --bin jotnar-doom-coord
   --cuda 192.168.1.116:9997 \
   --hip 192.168.1.195:9997 \
   --token test \
-  --start-frame 200 --frames 60 --fps 12 \
+  --start-frame 200 --frames 60 --fps 15 \
   --out /tmp/opencode/doom_two_nodes
 ```
 
-The reproducible gate also annotates the frames and writes the GIF:
+`--no-auto-split` forces the even 160/160 split for comparison. The
+reproducible gate also annotates the frames and writes the GIF:
 
 ```sh
 python3 scripts/doom_two_gpu_gate.py
@@ -74,27 +77,36 @@ python3 scripts/doom_two_gpu_gate.py
 
 ## Receipt
 
-The checked run:
+The checked adaptive run:
 
 ```text
-node A  RV32IM native        core p50 33 ms
-node B  CUDA 192.168.1.116   p50 71 ms, p95 77 ms
-node C  HIP  192.168.1.195   p50 19 ms
-total                        p50 71 ms, p95 77 ms
-frame budget at 12 fps       83 ms
+node A  RV32IM native        core p50 32 ms
+node B  CUDA 192.168.1.116   p50 40 ms
+node C  HIP  192.168.1.195   p50 26 ms
+total                        p50 40 ms, p95 45 ms
+frame budget at 15 fps       66 ms
 real time at target          yes
+split                        101 CUDA / 219 HIP columns (32% / 68%)
 frames                       60
-warmup                       CUDA 6645 ms, HIP 2334 ms (first run)
+warmup                       CUDA 6644 ms, HIP 2316 ms (first run)
 ```
 
-The GIF is 640x454 (640x400 frame plus a HUD), 60 frames, 12 fps. The HUD
-shows the frame number, the CUDA/HIP split, per-card latency, and the frame
-budget.
+The calibration probes the even split three times and uses the median:
+
+```text
+CUDA probe p50  41 ms
+HIP  probe p50  19 ms
+chosen split    101 / 219
+```
+
+The GIF is 640x454 (640x400 frame plus a HUD), 60 frames, 15 fps. The HUD
+shows the frame number, the measured CUDA/HIP split, per-card latency, and the
+frame budget.
 
 The coordinator writes:
 
 ```text
-run.json        hashes, node addresses, latency p50/p95/max, real-time verdict
+run.json        hashes, node addresses, split, calibration, latency p50/p95/max
 frames.jsonl    one record per frame: input keys, per-card job ids/timings/hashes
 frames/*.rgb    raw 640x400 RGB frames
 poster.png      annotated first frame
@@ -108,6 +120,8 @@ The checked evidence is copied to
 
 - The GPU op is a 2x bilinear upscale, not a full distributed renderer. The
   RV32IM renderer still runs on node A.
+- The split is chosen at startup from a calibration probe. It does not yet
+  rebalance mid-run or fail over a stalled card.
 - The coordinator is DOOM-specific. A general streaming stage ABI is future
   work; the batch bundle/stage layer is separate.
 - The first frame pays artifact build and warm-worker startup. The receipt

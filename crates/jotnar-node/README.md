@@ -156,6 +156,9 @@ jotnar-osd --events 10,11,12          # stateful sequence
   `_jotnar-native` advertisements into one CPU/GPU/native inventory without
   moving execution into the node. See
   [`docs/CAPABILITY_EXCHANGE.md`](../../docs/CAPABILITY_EXCHANGE.md).
+- `hardware` normalizes the same records into `jotnar.hardware/1` and can
+  probe TCP reachability/RTT with `--probe`. See
+  [`docs/WORKLOAD_COORDINATION.md`](../../docs/WORKLOAD_COORDINATION.md).
 - `gpu` routes one stage to a GPU runner through the common executor contract
   (`submit`/`job-status`/`job-result`/`job-cancel`), selecting a runner from
   discovery unless `--addr` is given. Binary result descriptors are validated
@@ -187,10 +190,12 @@ a single-node reference. See
 [`docs/WORKLOAD_CONTROLLER.md`](../../docs/WORKLOAD_CONTROLLER.md).
 
 `jotnar-doom-coord` is the streaming companion. It runs the RV32IM core on the
-coordinator host, sends one overlapping half of each frame to the CUDA and HIP
-runners, runs the same Jotnar `INTERP` listing on both, and stitches the
-results. `scripts/doom_two_gpu_gate.py` records the annotated GIF and latency
-receipt. See [`docs/DOOM_TWO_NODE.md`](../../docs/DOOM_TWO_NODE.md).
+coordinator host, calibrates the CUDA and HIP runners, splits each frame by
+measured throughput, runs the same Jotnar `INTERP` listing on both, and
+stitches the results. `scripts/doom_two_gpu_gate.py` records the annotated GIF
+and latency receipt. See
+[`docs/DOOM_TWO_NODE.md`](../../docs/DOOM_TWO_NODE.md) and
+[`docs/WORKLOAD_COORDINATION.md`](../../docs/WORKLOAD_COORDINATION.md).
 
 `crates/jotnar-node/test/sched_two_nodes.sh` is the host gate.
 `crates/jotnar-node/test/qemu_two_nodes.sh` boots two disposable QEMU nodes.

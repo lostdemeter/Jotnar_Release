@@ -207,7 +207,8 @@ See [`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md).
 
 The cooperative streaming demo runs the RV32IM core on one node and splits
 each frame between the CUDA and HIP nodes, each running the Jotnar
-`INTERP` upscale. It records a GIF and per-frame latency:
+`INTERP` upscale. It calibrates both cards and chooses the split from measured
+throughput, then records a GIF and per-frame latency:
 
 ```sh
 python3 scripts/doom_two_gpu_gate.py
@@ -215,6 +216,8 @@ python3 scripts/doom_two_gpu_gate.py
 
 See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md) and
 [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif).
+The resource/placement model is in
+[`docs/WORKLOAD_COORDINATION.md`](WORKLOAD_COORDINATION.md).
 
 The Rust SDL player has intermittent frame-time spikes not seen in the
 original Python/C player. This is recorded as future work; add a frame-time
@@ -258,6 +261,7 @@ jotnar-det  <file.asm> <payload.ndjson> [--outputs a,b]
             [--concurrency 1,2,8] [--job-threads N] [--stagger-ms N]
 jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]
 jotnar-net  [--discover-timeout-ms N] capabilities
+jotnar-net  [--discover-timeout-ms N] hardware [--probe]
 jotnar-net  [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] --payload FILE --outputs a,b
 jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token T] [--mdns]
 jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]

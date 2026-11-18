@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value as Json};
 
 use jotnar_node_tools::executor::{validate_binary_result, Executor, RemoteExecutor};
+use jotnar_node_tools::hardware::HardwareInventory;
 
 #[path = "../sched.rs"]
 mod sched;
@@ -41,6 +42,7 @@ fn usage() -> &'static str {
          [--max-attempts N] [--batch-id ID] [--receipts FILE]\n\
        jotnar-net [--token T] [--discover] [--discover-timeout-ms N] discover\n\
        jotnar-net [--discover-timeout-ms N] capabilities\n\
+       jotnar-net [--discover-timeout-ms N] hardware [--probe]\n\
        jotnar-net [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] \\\n\
          --payload FILE --outputs a,b [--frames N] [--count N]\n\
      \n\
@@ -49,7 +51,8 @@ fn usage() -> &'static str {
      _jotnar-node._tcp and adds discovered ads; tokens are trusted-LAN secrets.\n\
      capabilities merges _jotnar-node, _jotnar-gpu, and _jotnar-native ads into\n\
      one capability list; it is discovery only and never bypasses a node token\n\
-     check.\n\
+     check. hardware normalizes the same records into jotnar.hardware/1 and can\n\
+     probe TCP reachability/RTT with --probe.\n\
      gpu routes one stage to a GPU runner through the common executor\n\
      contract (submit/job-status/job-result).\n"
 }
@@ -543,6 +546,16 @@ fn real_main() -> Result<(), String> {
         "capabilities" => {
             let out = discover_capabilities(Duration::from_millis(cfg.discover_timeout_ms.max(1)))?;
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            Ok(())
+        }
+        "hardware" => {
+            let caps =
+                discover_capabilities(Duration::from_millis(cfg.discover_timeout_ms.max(1)))?;
+            let mut inv = HardwareInventory::from_capabilities(&caps);
+            if args.iter().any(|a| a == "--probe") {
+                inv.probe_links(Duration::from_millis(500));
+            }
+            println!("{}", serde_json::to_string_pretty(&inv).unwrap());
             Ok(())
         }
         "discover" => {

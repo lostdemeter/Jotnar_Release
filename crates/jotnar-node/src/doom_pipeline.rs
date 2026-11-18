@@ -1,9 +1,13 @@
 //! Pure helpers for the two-node DOOM frame pipeline.
 //!
-//! The coordinator splits a 320x200 RV32IM framebuffer into two 160x200 RGB
-//! halves, each node runs the same Jotnar upscale program, and the coordinator
-//! stitches the two 320x400 results into one 640x400 frame. Keeping the pixel
-//! transforms here makes the network path testable without a GPU.
+//! The coordinator splits a 320x200 RV32IM framebuffer into two horizontal
+//! windows, each node runs the same Jotnar upscale program, and the coordinator
+//! stitches the results into one 640x400 frame. The windows overlap by one
+//! input column so bilinear upscaling is continuous at the split.
+//!
+//! The split is not fixed: the coordinator chooses it from measured per-node
+//! throughput. Keeping the geometry here makes the network path testable
+//! without a GPU.
 
 use sha2::{Digest, Sha256};
 
@@ -13,18 +17,118 @@ pub const FB_BYTES: usize = FB_W * FB_H * 4;
 pub const HALF_W: usize = FB_W / 2;
 pub const OUT_W: usize = FB_W * 2;
 pub const OUT_H: usize = FB_H * 2;
-/// The two nodes overlap by one input column so bilinear upscaling is
-/// continuous at the split. A 161-column window becomes 322 output columns;
-/// the coordinator keeps the 320 columns that belong to each side.
+pub const CHANNELS: usize = 3;
+
+/// Even split, with the one-column overlap the GPU windows need.
 pub const SEND_W: usize = HALF_W + 1;
 pub const SEND_OUT_W: usize = SEND_W * 2;
 pub const HALF_OUT_W: usize = HALF_W * 2;
-pub const CHANNELS: usize = 3;
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+/// A horizontal split of the 320-column framebuffer.
+///
+/// `left_cols + right_cols == FB_W`. Each side sends `cols + 1` input columns
+/// (one overlap column) and returns `(cols + 1) * 2` output columns. The
+/// coordinator keeps `cols * 2` output columns per side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Split {
+    pub left_cols: usize,
+    pub right_cols: usize,
+}
+
+impl Split {
+    pub const EVEN: Self = Self {
+        left_cols: HALF_W,
+        right_cols: HALF_W,
+    };
+
+    pub fn new(left_cols: usize, right_cols: usize) -> Result<Self, String> {
+        if left_cols == 0 || right_cols == 0 {
+            return Err("split needs at least one column per side".to_string());
+        }
+        if left_cols + right_cols != FB_W {
+            return Err(format!("split {} + {} != {FB_W}", left_cols, right_cols));
+        }
+        Ok(Self {
+            left_cols,
+            right_cols,
+        })
+    }
+
+    pub fn from_left(left_cols: usize) -> Result<Self, String> {
+        if left_cols == 0 || left_cols >= FB_W {
+            return Err(format!("left split {left_cols} is outside 1..{FB_W}"));
+        }
+        Self::new(left_cols, FB_W - left_cols)
+    }
+
+    /// `(x0, width)` for the left and right input windows.
+    pub fn windows(&self) -> ((usize, usize), (usize, usize)) {
+        let left = (0, self.left_cols + 1);
+        let right = (FB_W - self.right_cols - 1, self.right_cols + 1);
+        (left, right)
+    }
+
+    pub fn left_out_width(&self) -> usize {
+        (self.left_cols + 1) * 2
+    }
+
+    pub fn right_out_width(&self) -> usize {
+        (self.right_cols + 1) * 2
+    }
+
+    pub fn left_share(&self) -> f64 {
+        self.left_cols as f64 / FB_W as f64
+    }
+
+    /// Join the two overlapping F32-decoded RGB outputs into one RGB frame.
+    pub fn stitch(&self, left: &[u8], right: &[u8]) -> Result<Vec<u8>, String> {
+        let left_bytes = self.left_out_width() * OUT_H * CHANNELS;
+        let right_bytes = self.right_out_width() * OUT_H * CHANNELS;
+        if left.len() != left_bytes || right.len() != right_bytes {
+            return Err(format!(
+                "split {}:{} needs {left_bytes}+{right_bytes} bytes, got {}+{}",
+                self.left_cols,
+                self.right_cols,
+                left.len(),
+                right.len()
+            ));
+        }
+        let mut out = vec![0u8; OUT_W * OUT_H * CHANNELS];
+        let left_row = self.left_out_width() * CHANNELS;
+        let right_row = self.right_out_width() * CHANNELS;
+        let out_row = OUT_W * CHANNELS;
+        let keep_left = self.left_cols * 2 * CHANNELS;
+        let keep_right = self.right_cols * 2 * CHANNELS;
+        for y in 0..OUT_H {
+            let lsrc = y * left_row;
+            let rsrc = y * right_row + 2 * CHANNELS;
+            let dst = y * out_row;
+            out[dst..dst + keep_left].copy_from_slice(&left[lsrc..lsrc + keep_left]);
+            out[dst + keep_left..dst + out_row].copy_from_slice(&right[rsrc..rsrc + keep_right]);
+        }
+        Ok(out)
+    }
+}
+
+/// Pick a split from two measured probe times. A node that takes half as long
+/// for the same probe gets twice the columns, clamped to `min_cols..=max_cols`.
+pub fn choose_split(left_ms: u64, right_ms: u64, min_cols: usize, max_cols: usize) -> Split {
+    let min_cols = min_cols.clamp(1, FB_W / 2);
+    let max_cols = max_cols.clamp(FB_W / 2, FB_W - min_cols);
+    if left_ms == 0 || right_ms == 0 || left_ms == right_ms {
+        return Split::EVEN;
+    }
+    // throughput is 1/time, so the left share is right_time / total_time.
+    let share = right_ms as f64 / (left_ms + right_ms) as f64;
+    let left = (FB_W as f64 * share).round() as usize;
+    let left = left.clamp(min_cols, max_cols);
+    Split::from_left(left).unwrap_or(Split::EVEN)
 }
 
 /// Convert a horizontal window of the native BGRA framebuffer to packed RGB
@@ -52,13 +156,14 @@ pub fn rgb_window(fb: &[u8], x0: usize, width: usize) -> Result<Vec<f32>, String
     Ok(out)
 }
 
-/// Convert one logical half (with one overlap column) of the framebuffer.
+/// Convert one logical half of the even split.
 pub fn rgb_half(fb: &[u8], half: usize) -> Result<Vec<f32>, String> {
     if half > 1 {
         return Err(format!("half must be 0 or 1, got {half}"));
     }
-    let x0 = if half == 0 { 0 } else { FB_W - SEND_W };
-    rgb_window(fb, x0, SEND_W)
+    let (left, right) = Split::EVEN.windows();
+    let (x0, w) = if half == 0 { left } else { right };
+    rgb_window(fb, x0, w)
 }
 
 /// Decode a Jotnar F32 RGB output into tightly packed RGB8.
@@ -82,32 +187,9 @@ pub fn f32_rgb_to_u8(bytes: &[u8], width: usize, height: usize) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Join two overlapping 322x400 RGB halves into one 640x400 RGB frame.
-///
-/// The left window is columns 0..=160 and contributes output 0..319. The right
-/// window is columns 159..=319 and contributes its output 2..321 to output
-/// 320..639. The one-column overlap makes the bilinear result continuous.
+/// Backward-compatible even-split stitch.
 pub fn stitch_overlap(left: &[u8], right: &[u8]) -> Result<Vec<u8>, String> {
-    let send_bytes = SEND_OUT_W * OUT_H * CHANNELS;
-    if left.len() != send_bytes || right.len() != send_bytes {
-        return Err(format!(
-            "halves need {send_bytes} bytes each, got {} and {}",
-            left.len(),
-            right.len()
-        ));
-    }
-    let mut out = vec![0u8; OUT_W * OUT_H * CHANNELS];
-    let row_bytes = SEND_OUT_W * CHANNELS;
-    let out_row = OUT_W * CHANNELS;
-    let half_row = HALF_OUT_W * CHANNELS;
-    for y in 0..OUT_H {
-        let src = y * row_bytes;
-        let dst = y * out_row;
-        out[dst..dst + half_row].copy_from_slice(&left[src..src + half_row]);
-        let rsrc = src + 2 * CHANNELS;
-        out[dst + half_row..dst + out_row].copy_from_slice(&right[rsrc..rsrc + half_row]);
-    }
-    Ok(out)
+    Split::EVEN.stitch(left, right)
 }
 
 /// Median, p95, and max of a latency sample set.
@@ -141,48 +223,87 @@ mod tests {
         fb
     }
 
+    fn upscale(half: &[f32], width: usize) -> Vec<u8> {
+        let out_w = width * 2;
+        let mut out = Vec::with_capacity(out_w * OUT_H * CHANNELS);
+        for y in 0..FB_H {
+            let mut row = Vec::with_capacity(out_w * CHANNELS);
+            for x in 0..width {
+                let i = (y * width + x) * CHANNELS;
+                let px = [half[i] as u8, half[i + 1] as u8, half[i + 2] as u8];
+                row.extend_from_slice(&px);
+                row.extend_from_slice(&px);
+            }
+            out.extend_from_slice(&row);
+            out.extend_from_slice(&row);
+        }
+        out
+    }
+
     #[test]
-    fn halves_are_rgb_and_stitch_back() {
+    fn even_split_is_rgb_and_stitches_back() {
         let fb = framebuffer();
-        let left = rgb_half(&fb, 0).unwrap();
-        let right = rgb_half(&fb, 1).unwrap();
-        assert_eq!(left.len(), SEND_W * FB_H * CHANNELS);
-        // First left pixel: B=0,G=0,R=0.
+        let ((lx, lw), (rx, rw)) = Split::EVEN.windows();
+        assert_eq!((lx, lw), (0, 161));
+        assert_eq!((rx, rw), (159, 161));
+        let left = rgb_window(&fb, lx, lw).unwrap();
+        let right = rgb_window(&fb, rx, rw).unwrap();
+        assert_eq!(left.len(), lw * FB_H * CHANNELS);
         assert_eq!(&left[0..3], &[0.0, 0.0, 0.0]);
-        // Last left-window pixel is x=160,y=199.
         assert_eq!(
-            &left[(SEND_W * (FB_H - 1) + (SEND_W - 1)) * CHANNELS..][..3],
+            &left[(lw * (FB_H - 1) + (lw - 1)) * CHANNELS..][..3],
             &[103.0, 199.0, 160.0]
         );
-        // First right-window pixel is global x=159.
         assert_eq!(&right[0..3], &[159.0, 0.0, 159.0]);
 
-        // Round-trip through the F32 upscale shape by duplicating each pixel
-        // 2x2; this is the shape the GPU returns.
-        let up = |half: &[f32]| -> Vec<u8> {
-            let mut out = Vec::with_capacity(SEND_OUT_W * OUT_H * CHANNELS);
-            for y in 0..FB_H {
-                let mut row = Vec::with_capacity(SEND_OUT_W * CHANNELS);
-                for x in 0..SEND_W {
-                    let i = (y * SEND_W + x) * CHANNELS;
-                    let px = [half[i] as u8, half[i + 1] as u8, half[i + 2] as u8];
-                    row.extend_from_slice(&px);
-                    row.extend_from_slice(&px);
-                }
-                out.extend_from_slice(&row);
-                out.extend_from_slice(&row);
-            }
-            out
-        };
-        let l8 = up(&left);
-        let r8 = up(&right);
-        let stitched = stitch_overlap(&l8, &r8).unwrap();
+        let stitched = Split::EVEN
+            .stitch(&upscale(&left, lw), &upscale(&right, rw))
+            .unwrap();
         assert_eq!(stitched.len(), OUT_W * OUT_H * CHANNELS);
         assert_eq!(&stitched[0..3], &[0, 0, 0]);
         assert_eq!(&stitched[HALF_OUT_W * CHANNELS..][..3], &[160, 0, 160]);
         assert_eq!(&stitched[(OUT_W - 1) * CHANNELS..][..3], &[63, 0, 63]);
         let last = ((OUT_H - 1) * OUT_W + OUT_W - 1) * CHANNELS;
         assert_eq!(&stitched[last..last + 3], &[6, 199, 63]);
+    }
+
+    #[test]
+    fn weighted_split_moves_the_boundary() {
+        let split = Split::new(80, 240).unwrap();
+        let ((lx, lw), (rx, rw)) = split.windows();
+        assert_eq!((lx, lw), (0, 81));
+        assert_eq!((rx, rw), (79, 241));
+        assert_eq!(split.left_out_width(), 162);
+        assert_eq!(split.right_out_width(), 482);
+        let fb = framebuffer();
+        let left = rgb_window(&fb, lx, lw).unwrap();
+        let right = rgb_window(&fb, rx, rw).unwrap();
+        let stitched = split
+            .stitch(&upscale(&left, lw), &upscale(&right, rw))
+            .unwrap();
+        assert_eq!(stitched.len(), OUT_W * OUT_H * CHANNELS);
+        // Output column 160 is the first column owned by the right node.
+        assert_eq!(&stitched[160 * CHANNELS..][..3], &[80, 0, 80]);
+    }
+
+    #[test]
+    fn split_rejects_bad_geometry() {
+        assert!(Split::new(0, 320).is_err());
+        assert!(Split::new(160, 161).is_err());
+        assert!(Split::from_left(320).is_err());
+    }
+
+    #[test]
+    fn split_follows_measured_throughput() {
+        // CUDA 70 ms, HIP 20 ms for the same probe. HIP is 3.5x faster,
+        // so it should get roughly 3.5x the columns.
+        let s = choose_split(70, 20, 32, 288);
+        assert_eq!(s.left_cols + s.right_cols, FB_W);
+        assert!((55..=75).contains(&s.left_cols), "left {}", s.left_cols);
+        let even = choose_split(20, 20, 32, 288);
+        assert_eq!(even, Split::EVEN);
+        let clamped = choose_split(10_000, 1, 32, 288);
+        assert_eq!(clamped.left_cols, 32);
     }
 
     #[test]
