@@ -87,8 +87,9 @@ job controller. Capabilities are an inventory, not a new execution path.
 
 ## Next
 
-1. Add an executor interface that both `jotnar-noded` and the GPU runner can
-   implement.
-2. Let a workload controller consume the capability list and submit stages to
-   the correct executor.
-3. Keep discovery, execution, and workload planning as separate layers.
+The executor interface is documented in
+[`docs/EXECUTOR_CONTRACT.md`](EXECUTOR_CONTRACT.md): `submit`, `job-status`,
+`job-result`, and `job-cancel`, implemented by both the CPU node and the GPU
+runner. A workload controller consumes the capability list, picks an executor,
+and uses that contract. Discovery, execution, and workload planning stay
+separate.

@@ -52,8 +52,16 @@ frame:
  "payload_id":"a86e11ef3b2b8bf5", "auth":"..."}
 ```
 
-It returns `warm-prepare-ok` with `warm`, `worker_start_ms`, `warmup_ms`,
-`warmup`, `worker_reused`, `compile_ms`, `build_ms`, and `cache_hit`. The
+The runner also exposes the common executor contract used by `jotnar-net`:
+`submit`, `job-status`, `job-result`, and `job-cancel`. `submit` queues a job
+and runs it through the same `run`/`run-batch` path in a background thread;
+`job-result` returns the stored output frame and binary payload. The job table
+is bounded and evicts completed jobs before queued/running ones. See
+[`docs/EXECUTOR_CONTRACT.md`](../../docs/EXECUTOR_CONTRACT.md).
+
+`warm-prepare` returns `warm-prepare-ok` with `warm`, `worker_start_ms`,
+`warmup_ms`, `warmup`, `worker_reused`, `compile_ms`, `build_ms`, and
+`cache_hit`. The
 request runs one warm-up frame by default so the first real frame does not pay
 lazy kernel initialization; send `"warmup": false` to only start the worker.
 Repeated prepares reuse the worker. If the runner is started with `--no-warm`,

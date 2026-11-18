@@ -224,6 +224,8 @@ The front door is deliberately short. The actual parts are here:
   [`crates/jotnar-gpu-runner/`](crates/jotnar-gpu-runner/)
 - unified CPU/GPU capability discovery without merging executors:
   [`docs/CAPABILITY_EXCHANGE.md`](docs/CAPABILITY_EXCHANGE.md)
+- common executor contract (`submit`/`job-status`/`job-result`/`job-cancel`):
+  [`docs/EXECUTOR_CONTRACT.md`](docs/EXECUTOR_CONTRACT.md)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:
@@ -247,7 +249,7 @@ Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-413/413 workspace tests
+414/414 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 
