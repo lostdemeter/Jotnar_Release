@@ -7,6 +7,7 @@ pub mod hip;
 pub mod infer;
 pub mod nonfpu;
 pub mod rust;
+pub(crate) mod warm;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -93,6 +94,8 @@ pub struct Artifact {
     pub source_outputs: Vec<String>,
     pub config: crate::ir::Config,
     pub n_argv: usize,
+    /// The artifact also supports `--warm-frame CONFIG`.
+    pub warm_frame: bool,
 }
 
 /// Rewrite `name#k.stream` (CALL namespacing) to valid C identifiers.
@@ -589,6 +592,7 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
         source_outputs,
         config: bound.config.clone(),
         n_argv,
+        warm_frame: false,
     })
 }
 

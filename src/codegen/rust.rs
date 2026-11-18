@@ -531,6 +531,7 @@ pub fn compile_rust(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         source_outputs,
         config: bound.config.clone(),
         n_argv,
+        warm_frame: false,
     })
 }
 

@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::payload::Feeds;
 
 use super::infer::{infer_shapes, CKind, StreamInfo};
-use super::{sanitize_cnames, Artifact, CompileOptions};
+use super::{sanitize_cnames, warm, Artifact, CompileOptions};
 
 const HIP_RUNTIME: &str = r#"
 #include <hip/hip_runtime.h>
@@ -1025,6 +1025,30 @@ pub fn compile_hip(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<A
     let source_outputs = opts.outputs.clone();
     let in_names: Vec<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
     let f16 = opts.use_fp16;
+    let warm_frame = bound
+        .config
+        .get("warm_frame")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if warm_frame {
+        if f16 {
+            return Err(Error::unimplemented(
+                "HIP warm_frame does not support --fp16 yet",
+            ));
+        }
+        for (name, s) in &streams {
+            if s.kind == CKind::T {
+                return Err(Error::unimplemented(format!(
+                    "HIP warm_frame does not support T stream {name:?}"
+                )));
+            }
+            if s.shape.iter().any(|d| d.is_none()) {
+                return Err(Error::unimplemented(format!(
+                    "HIP warm_frame needs static shapes: {name:?}"
+                )));
+            }
+        }
+    }
     let ftype = if f16 { "__half" } else { "float" };
     let mut c = C {
         streams: streams.clone(),
@@ -1078,7 +1102,29 @@ pub fn compile_hip(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<A
             1
         };
     }
+    let mut ops = String::new();
+    for ins in &bound.instrs {
+        match ins.mn.as_str() {
+            "__REPEAT__" => {
+                ops.push_str("  for (int64_t _it = 0; _it < 1; ++_it) {\n");
+            }
+            "__END__" => ops.push_str("  }\n"),
+            "__BREAK__" => {}
+            _ => {
+                let body = pattern(&ins.mn, &ins.outs, &ins.args, &c)?;
+                ops.push_str(&format!("  /* L{}: {} */\n{}\n", ins.line, ins.mn, body));
+            }
+        }
+    }
+    if warm_frame {
+        src.push_str("int warm_main(int argc, char **argv);\n");
+    }
     src.push_str("\nint main(int argc, char **argv) {\n");
+    if warm_frame {
+        src.push_str(
+            "  if (argc >= 2 && strcmp(argv[1], \"--warm-frame\") == 0) return warm_main(argc, argv);\n",
+        );
+    }
     src.push_str(&format!("  if (argc != {}) return 9;\n", n_argv + 1));
     let mut idx = 1usize;
     for n in &in_names {
@@ -1143,20 +1189,7 @@ pub fn compile_hip(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<A
         }
     }
 
-    for ins in &bound.instrs {
-        match ins.mn.as_str() {
-            "__REPEAT__" => {
-                src.push_str("  for (int64_t _it = 0; _it < 1; ++_it) {\n");
-            }
-            "__END__" => src.push_str("  }\n"),
-            "__BREAK__" => {}
-            _ => {
-                let body = pattern(&ins.mn, &ins.outs, &ins.args, &c)?;
-                src.push_str(&format!("  /* L{}: {} */\n{}\n", ins.line, ins.mn, body));
-            }
-        }
-    }
-
+    src.push_str(&ops);
     for o in &outputs {
         let s = streams.get(o).unwrap();
         let n = s.elems().unwrap();
@@ -1179,6 +1212,51 @@ pub fn compile_hip(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<A
     }
     src.push_str("  return 0;\n}\n");
 
+    if warm_frame {
+        let inputs: Vec<warm::WarmBuffer> = in_names
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let inters: Vec<warm::WarmBuffer> = inter
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let outs: Vec<warm::WarmBuffer> = outputs
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let api = warm::WarmApi {
+            target: "hip",
+            malloc: "hipMalloc",
+            memcpy: "hipMemcpy",
+            host_to_device: "hipMemcpyHostToDevice",
+            device_to_host: "hipMemcpyDeviceToHost",
+            sync: "hipDeviceSynchronize",
+        };
+        src.push_str(&warm::emit_main(&api, &inputs, &inters, &outs, &ops));
+    }
+
     Ok(Artifact {
         source: src,
         streams,
@@ -1188,6 +1266,7 @@ pub fn compile_hip(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<A
         source_outputs,
         config: bound.config.clone(),
         n_argv,
+        warm_frame,
     })
 }
 

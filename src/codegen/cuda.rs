@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::payload::Feeds;
 
 use super::infer::{infer_shapes, CKind, StreamInfo};
-use super::{sanitize_cnames, Artifact, CompileOptions};
+use super::{sanitize_cnames, warm, Artifact, CompileOptions};
 
 const CU_RUNTIME: &str = r#"
 #include <cuda_runtime.h>
@@ -850,7 +850,16 @@ impl C {
     }
 }
 
-fn lt_epilogue(m: usize, k: usize, n: usize, a0: &str, a1: &str, b: &str, o: &str, ep: &str) -> String {
+fn lt_epilogue(
+    m: usize,
+    k: usize,
+    n: usize,
+    a0: &str,
+    a1: &str,
+    b: &str,
+    o: &str,
+    ep: &str,
+) -> String {
     format!(
         "    static cublasLtMatmulDesc_t _lt_op_{o} = NULL;\n\
          \x20   static cublasLtMatrixLayout_t _lt_a_{o} = NULL, _lt_b_{o} = NULL, _lt_c_{o} = NULL;\n\
@@ -1039,8 +1048,16 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             } else {
                 format!(
                     "{}  k_add_bias<<<{}, 256>>>({}, {}, {}, {});\n  CK(cudaGetLastError());",
-                    one("k_matmul", m * n, &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n)),
-                    grid_expr(&(m * n).to_string()), o, a(2), m * n, n
+                    one(
+                        "k_matmul",
+                        m * n,
+                        &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n)
+                    ),
+                    grid_expr(&(m * n).to_string()),
+                    o,
+                    a(2),
+                    m * n,
+                    n
                 )
             };
             let cublaslt = c
@@ -1060,10 +1077,14 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             let ash = c.s(a(0))?.shape.clone();
             let bsh = c.s(a(1))?.shape.clone();
             if ash.len() != 2 || bsh.len() != 2 {
-                return Err(Error::unimplemented("CUDA MATMUL_BIAS_RESIDUAL needs 2D operands"));
+                return Err(Error::unimplemented(
+                    "CUDA MATMUL_BIAS_RESIDUAL needs 2D operands",
+                ));
             }
             let (Some(m), Some(k), Some(n)) = (ash[0], ash[1], bsh[1]) else {
-                return Err(Error::unimplemented("CUDA MATMUL_BIAS_RESIDUAL needs static shapes"));
+                return Err(Error::unimplemented(
+                    "CUDA MATMUL_BIAS_RESIDUAL needs static shapes",
+                ));
             };
             if bsh[0] != Some(k) {
                 return Err(Error::asm("CUDA MATMUL_BIAS_RESIDUAL inner dims mismatch"));
@@ -1074,7 +1095,11 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
                     n, m, k, a(1), n, a(0), k, o, n
                 )
             } else {
-                one("k_matmul", m * n, &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n))
+                one(
+                    "k_matmul",
+                    m * n,
+                    &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n),
+                )
             };
             Ok(format!(
                 "{}  k_add_bias_residual<<<{}, 256>>>({}, {}, {}, {}, {});\n  CK(cudaGetLastError());",
@@ -1085,10 +1110,14 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             let ash = c.s(a(0))?.shape.clone();
             let bsh = c.s(a(1))?.shape.clone();
             if ash.len() != 2 || bsh.len() != 2 {
-                return Err(Error::unimplemented("CUDA MATMUL_BIAS_GELU needs 2D operands"));
+                return Err(Error::unimplemented(
+                    "CUDA MATMUL_BIAS_GELU needs 2D operands",
+                ));
             }
             let (Some(m), Some(k), Some(n)) = (ash[0], ash[1], bsh[1]) else {
-                return Err(Error::unimplemented("CUDA MATMUL_BIAS_GELU needs static shapes"));
+                return Err(Error::unimplemented(
+                    "CUDA MATMUL_BIAS_GELU needs static shapes",
+                ));
             };
             if bsh[0] != Some(k) {
                 return Err(Error::asm("CUDA MATMUL_BIAS_GELU inner dims mismatch"));
@@ -1108,8 +1137,16 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
                 format!(
                     "{}  k_add_bias_gelu<<<{}, 256>>>({}, {}, {}, {});
   CK(cudaGetLastError());",
-                    one("k_matmul", m * n, &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n)),
-                    grid_expr(&(m * n).to_string()), o, a(2), m * n, n
+                    one(
+                        "k_matmul",
+                        m * n,
+                        &format!("{}, {}, {}, {}, {}, {}", a(0), a(1), o, m, k, n)
+                    ),
+                    grid_expr(&(m * n).to_string()),
+                    o,
+                    a(2),
+                    m * n,
+                    n
                 )
             };
             let cublaslt = c
@@ -1120,10 +1157,7 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             if !cublaslt || m * n * k < 4096 {
                 return Ok(fallback);
             }
-            let lt = lt_epilogue(
-                m, k, n, a(0), a(1), a(2), o,
-                "CUBLASLT_EPILOGUE_GELU_BIAS",
-            );
+            let lt = lt_epilogue(m, k, n, a(0), a(1), a(2), o, "CUBLASLT_EPILOGUE_GELU_BIAS");
             Ok(format!(
                 "  {{
 #ifdef JOTNAR_CUBLASLT
@@ -1879,7 +1913,9 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             let ksh = c.s(k)?.shape.clone();
             let vsh = c.s(v)?.shape.clone();
             if qsh.len() != 2 || ksh != qsh || vsh != qsh {
-                return Err(Error::unimplemented("CUDA LINEAR_ATTN needs equal 2D Q/K/V"));
+                return Err(Error::unimplemented(
+                    "CUDA LINEAR_ATTN needs equal 2D Q/K/V",
+                ));
             }
             let (Some(n), Some(h)) = (qsh[0], qsh[1]) else {
                 return Err(Error::unimplemented("CUDA LINEAR_ATTN: dynamic shape"));
@@ -1893,9 +1929,12 @@ pub fn pattern(mn: &str, outs: &[String], args: &[String], c: &C) -> Result<Stri
             let w1sh = c.s(w1)?.shape.clone();
             let w2sh = c.s(w2)?.shape.clone();
             if w1sh.len() != 2 || w1sh[0] != Some(dh as usize) {
-                return Err(Error::unimplemented("CUDA LINEAR_ATTN: W1 must be (dh,hid)"));
+                return Err(Error::unimplemented(
+                    "CUDA LINEAR_ATTN: W1 must be (dh,hid)",
+                ));
             }
-            let hid = w1sh[1].ok_or_else(|| Error::unimplemented("CUDA LINEAR_ATTN: dynamic hid"))?;
+            let hid =
+                w1sh[1].ok_or_else(|| Error::unimplemented("CUDA LINEAR_ATTN: dynamic hid"))?;
             if w2sh.len() != 2 || w2sh[0] != Some(hid) {
                 return Err(Error::unimplemented("CUDA LINEAR_ATTN: W2 must be (hid,m)"));
             }
@@ -2161,8 +2200,10 @@ fn plan_cuda_arena(
     let mut slots = HashMap::new();
     for (d, e, size, name, kind) in intervals {
         active.retain(|(end, _, _)| *end > d);
-        let mut occupied: Vec<(usize, usize)> =
-            active.iter().map(|(_, off, sz)| (*off, *off + *sz)).collect();
+        let mut occupied: Vec<(usize, usize)> = active
+            .iter()
+            .map(|(_, off, sz)| (*off, *off + *sz))
+            .collect();
         occupied.sort_unstable();
         let mut gaps = Vec::new();
         let mut cursor = 0usize;
@@ -2254,6 +2295,35 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         }
     }
     let serve = serve_in.is_some();
+    let warm_frame = bound
+        .config
+        .get("warm_frame")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if warm_frame {
+        if serve {
+            return Err(Error::asm(
+                "CUDA CONFIG warm_frame and serve_* are mutually exclusive",
+            ));
+        }
+        if opts.use_fp16 {
+            return Err(Error::unimplemented(
+                "CUDA warm_frame does not support --fp16 yet",
+            ));
+        }
+        for (name, s) in &streams {
+            if s.kind == CKind::T {
+                return Err(Error::unimplemented(format!(
+                    "CUDA warm_frame does not support T stream {name:?}"
+                )));
+            }
+            if s.shape.iter().any(|d| d.is_none()) {
+                return Err(Error::unimplemented(format!(
+                    "CUDA warm_frame needs static shapes: {name:?}"
+                )));
+            }
+        }
+    }
     let profile = bound
         .config
         .get("profile")
@@ -2282,6 +2352,11 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
         || std::env::var("JOTNAR_ARENA").ok().as_deref() == Some("1");
+    if warm_frame && arena_enabled {
+        return Err(Error::unimplemented(
+            "CUDA warm_frame does not support cuda_arena yet",
+        ));
+    }
     let arena = if arena_enabled {
         plan_cuda_arena(&bound, &streams, &in_names, &outputs, f16)
     } else {
@@ -2361,7 +2436,15 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     }
     let serve_argc = 2 + in_names.len();
     let normal_argc = n_argv + 1;
+    if warm_frame {
+        src.push_str("int warm_main(int argc, char **argv);\n");
+    }
     src.push_str("\nint main(int argc, char **argv) {\n");
+    if warm_frame {
+        src.push_str(
+            "  if (argc >= 2 && strcmp(argv[1], \"--warm-frame\") == 0) return warm_main(argc, argv);\n",
+        );
+    }
     src.push_str("  bool __serve = argc >= 2 && strcmp(argv[1], \"--serve\") == 0;\n");
     src.push_str("  int argi = __serve ? 2 : 1;\n");
     if arena.is_some() {
@@ -2590,6 +2673,51 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     }
     src.push_str("  return 0;\n}\n");
 
+    if warm_frame {
+        let inputs: Vec<warm::WarmBuffer> = in_names
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let inters: Vec<warm::WarmBuffer> = inter
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let outs: Vec<warm::WarmBuffer> = outputs
+            .iter()
+            .map(|n| {
+                let s = streams.get(n).unwrap();
+                warm::WarmBuffer {
+                    name: n.clone(),
+                    kind: s.kind,
+                    elems: s.elems().unwrap(),
+                }
+            })
+            .collect();
+        let api = warm::WarmApi {
+            target: "cuda",
+            malloc: "cudaMalloc",
+            memcpy: "cudaMemcpy",
+            host_to_device: "cudaMemcpyHostToDevice",
+            device_to_host: "cudaMemcpyDeviceToHost",
+            sync: "cudaDeviceSynchronize",
+        };
+        src.push_str(&warm::emit_main(&api, &inputs, &inters, &outs, &ops));
+    }
+
     Ok(Artifact {
         source: src,
         streams,
@@ -2599,6 +2727,7 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
         source_outputs,
         config: bound.config.clone(),
         n_argv,
+        warm_frame,
     })
 }
 

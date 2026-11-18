@@ -106,27 +106,30 @@ the generated executable's argv format.
 ## Worker config
 
 The worker reads a line-oriented text config, not JSON. C++ JSON parsing would
-add a dependency for no benefit.
+add a dependency for no benefit. Stream order and shapes are compiled into the
+artifact; the config only supplies the shared-buffer paths in that order.
 
 ```text
 jotnar-warm 1
-target hip
-in a f32 256 512 524288 /dev/shm/jotnar-xxxx/a
-in b f32 512 256 524288 /dev/shm/jotnar-xxxx/b
-out OUT f32 256 256 262144 /dev/shm/jotnar-xxxx/OUT
+target cuda
+input /dev/shm/jotnar-xxxx/a
+input /dev/shm/jotnar-xxxx/b
+output /dev/shm/jotnar-xxxx/OUT
 ```
 
 Rules:
 
-- `jotnar-warm 1` is the first line.
-- `target` must match the executable.
-- every `in`/`out` has name, dtype, shape, bytes, and path;
-- shapes are checked against the compiled artifact;
-- byte counts are checked against `shape × dtype`;
-- duplicate names and unknown directives fail startup.
+- `jotnar-warm 1` is the first line;
+- `target` must match the executable;
+- exactly `inputs.len()` `input` lines and `outputs.len()` `output` lines
+  follow, in artifact order;
+- the runner creates and sizes the files; the worker maps exactly the compiled
+  byte count and fails if a file is too small;
+- unknown directives, duplicate/missing lines, or extra lines fail startup.
 
 The runner writes this file itself, so the worker does not need to trust
-caller-provided paths.
+caller-provided paths. A richer named/shape-checked config can come later if
+the worker is ever driven by something other than this runner.
 
 ## Control protocol
 
