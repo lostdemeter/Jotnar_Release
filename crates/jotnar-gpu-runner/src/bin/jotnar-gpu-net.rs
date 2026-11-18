@@ -501,14 +501,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     let mut selected: Vec<usize> = groups.iter().flatten().copied().collect();
     selected.sort_unstable();
     selected.dedup();
-    let mut payload_ids: HashMap<String, String> = HashMap::new();
-    for &ri in &selected {
-        let r = &cfg.runners[ri];
-        let id = r
-            .put_payload(&payload)
-            .map_err(|e| format!("upload payload to {}: {e}", r.addr))?;
-        payload_ids.insert(r.addr.clone(), id);
-    }
+    let payload_ids = upload_payloads(cfg, &selected, &payload);
 
     let pending: Vec<usize> = ledger
         .jobs
@@ -633,6 +626,25 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         return Err("GPU batch failed or outputs differed".to_string());
     }
     Ok(())
+}
+
+fn upload_payloads(cfg: &Config, selected: &[usize], payload: &Json) -> HashMap<String, String> {
+    let mut payload_ids = HashMap::new();
+    for &ri in selected {
+        let r = &cfg.runners[ri];
+        match r.put_payload(payload) {
+            Ok(id) => {
+                payload_ids.insert(r.addr.clone(), id);
+            }
+            Err(e) => {
+                eprintln!(
+                    "payload upload to {} failed; job will use the inline payload: {e}",
+                    r.addr
+                );
+            }
+        }
+    }
+    payload_ids
 }
 
 fn run_one_job(
@@ -839,6 +851,79 @@ mod tests {
         let z = json!({"kind":"F32","shape":[2],"data":[1.0,2.1]});
         assert!(compare_stream("OUT", &x, &z, 1e-4, 1e-4).is_err());
     }
+}
+
+#[test]
+fn dead_runner_upload_is_tolerated() {
+    let cfg = Config {
+        runners: vec![Runner {
+            target: "cuda".to_string(),
+            addr: "127.0.0.1:9".to_string(),
+            token: None,
+        }],
+        atol: 1e-4,
+        rtol: 1e-4,
+    };
+    let ids = upload_payloads(&cfg, &[0], &json!({"streams": {}}));
+    assert!(ids.is_empty());
+}
+
+#[test]
+fn missing_payload_id_falls_back_to_inline() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut hdr = [0u8; 4];
+        stream.read_exact(&mut hdr).unwrap();
+        let n = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; n];
+        stream.read_exact(&mut body).unwrap();
+        tx.send(()).unwrap();
+        let reply = json!({
+            "v": 1,
+            "id": 1,
+            "type": "run-ok",
+            "ok": true,
+            "target": "cuda",
+        });
+        let body = json!({"outputs": {"OUT": {"kind": "I64", "shape": [1], "data": ["7"]}}});
+        let body = body.to_string().into_bytes();
+        let mut h = serde_json::to_vec(&reply).unwrap();
+        h.push(b'\n');
+        h.extend_from_slice(&body);
+        stream.write_all(&(h.len() as u32).to_be_bytes()).unwrap();
+        stream.write_all(&h).unwrap();
+    });
+
+    let cfg = Config {
+        runners: vec![Runner {
+            target: "cuda".to_string(),
+            addr: addr.to_string(),
+            token: None,
+        }],
+        atol: 1e-4,
+        rtol: 1e-4,
+    };
+    let (state, error, _, runs) = run_one_job(
+        0,
+        &[vec![0]],
+        &cfg,
+        "listing",
+        &json!({"streams": {}}),
+        &HashMap::new(),
+        &["OUT".to_string()],
+        1,
+    );
+    rx.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(state, "done", "{error:?}");
+    assert_eq!(runs.len(), 1);
 }
 
 #[test]

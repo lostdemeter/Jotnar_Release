@@ -1,7 +1,7 @@
 //! Framed client for `jotnar-gpu-runner`.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use jotnar::protocol::{decode_frame, encode_frame, PROTO_V};
@@ -104,12 +104,26 @@ fn decode_binary(header: &Json, body: &[u8]) -> Result<Json, String> {
 
 impl Runner {
     pub fn connect(&self) -> Result<TcpStream, String> {
-        let stream =
-            TcpStream::connect(&self.addr).map_err(|e| format!("connect {}: {e}", self.addr))?;
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
-        Ok(stream)
+        let addrs = self
+            .addr
+            .to_socket_addrs()
+            .map_err(|e| format!("resolve {}: {e}", self.addr))?;
+        let mut last_err = None;
+        for addr in addrs {
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+                    return Ok(stream);
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let err = last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no socket addresses".to_string());
+        Err(format!("connect {}: {err}", self.addr))
     }
 
     pub fn ping(&self) -> Result<Json, String> {
