@@ -38,7 +38,7 @@ window. If no display is available it falls back to a headless frame.
 To play across the CUDA and HIP nodes with the live HUD:
 
 ```sh
-./demos/doom_two_nodes.sh
+./demos/doom-two-nodes/run.sh
 ```
 
 See [`demos/README.md`](../../demos/README.md) for options and troubleshooting.
@@ -76,7 +76,7 @@ first 64 MB of memory, and framebuffer.
 The next step after checkpoint handoff is per-frame cooperation. The RV32IM
 core runs on node A; the CUDA and HIP runners are nodes B and C. Each GPU gets
 one overlapping horizontal window of the framebuffer and runs the same Jotnar
-program (`upscale-half.asm`: `INTERP(X, 2.0, 2.0)`). The coordinator stitches
+program (`../../demos/doom-two-nodes/upscale-half.asm`: `INTERP(X, 2.0, 2.0)`). The coordinator stitches
 the two results into one 640x400 frame.
 
 The split is not fixed. The coordinator probes both cards on the same frame,

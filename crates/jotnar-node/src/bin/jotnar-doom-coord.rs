@@ -2,7 +2,7 @@
 //!
 //! Node A runs the RV32IM machine in this process. Nodes B and C are the CUDA
 //! and HIP GPU runners: each receives one half of the framebuffer and runs the
-//! same Jotnar upscale program (`showcase/doom/upscale-half.asm`). The
+//! same Jotnar upscale program (`demos/doom-two-nodes/upscale-half.asm`). The
 //! coordinator stitches the two results into one frame and records the raw
 //! frames plus latency metadata for the GIF assembler.
 //!
@@ -49,7 +49,7 @@ fn usage() -> &'static str {
          [--listing FILE] [--start-frame N] [--frames N] [--fps N] \\\n\
          [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
          [--probe-iters N] [--min-cols N] [--max-cols N] [--job-timeout-ms N] \\\n\
-         [--viewer-listen ADDR] [--recover-every N]\n\
+         [--viewer-listen ADDR] [--recover-every N] [--no-record]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
      program on the CUDA and HIP runners. By default the coordinator probes\n\
@@ -77,6 +77,7 @@ struct Config {
     job_timeout_ms: u64,
     viewer: Option<String>,
     recover_every: u32,
+    record: bool,
 }
 
 fn now_ms() -> u64 {
@@ -92,7 +93,7 @@ fn parse_args() -> Result<Config, String> {
     let mut cuda = None;
     let mut hip = None;
     let mut token = None;
-    let mut listing = PathBuf::from("showcase/doom/upscale-half.asm");
+    let mut listing = PathBuf::from("demos/doom-two-nodes/upscale-half.asm");
     let mut start_frame = 200u32;
     let mut frames = 72u32;
     let mut fps = 12u32;
@@ -106,6 +107,7 @@ fn parse_args() -> Result<Config, String> {
     let mut job_timeout_ms = 5000u64;
     let mut viewer = None;
     let mut recover_every = 20u32;
+    let mut record = true;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -216,6 +218,7 @@ fn parse_args() -> Result<Config, String> {
                     .parse()
                     .map_err(|_| "--recover-every must be an integer")?;
             }
+            "--no-record" => record = false,
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -244,6 +247,7 @@ fn parse_args() -> Result<Config, String> {
         job_timeout_ms: job_timeout_ms.max(1),
         viewer,
         recover_every,
+        record,
     })
 }
 
@@ -676,8 +680,11 @@ fn run() -> Result<(), String> {
     let listing_sha = sha256_hex(listing.as_bytes());
     let image_sha = sha256_hex(&image);
     let wad_sha = sha256_hex(&wad);
-    fs::create_dir_all(cfg.out.join("frames"))
-        .map_err(|e| format!("create {}: {e}", cfg.out.display()))?;
+    fs::create_dir_all(&cfg.out).map_err(|e| format!("create {}: {e}", cfg.out.display()))?;
+    if cfg.record {
+        fs::create_dir_all(cfg.out.join("frames"))
+            .map_err(|e| format!("create {}: {e}", cfg.out.display()))?;
+    }
     let viewer_hub = ViewerHub::default();
     if let Some(addr) = &cfg.viewer {
         start_viewer(addr, viewer_hub.clone())?;
@@ -919,9 +926,13 @@ fn run() -> Result<(), String> {
     }
 
     let meta_path = cfg.out.join("frames.jsonl");
-    let mut meta = BufWriter::new(
-        File::create(&meta_path).map_err(|e| format!("create {}: {e}", meta_path.display()))?,
-    );
+    let mut meta = if cfg.record {
+        Some(BufWriter::new(File::create(&meta_path).map_err(|e| {
+            format!("create {}: {e}", meta_path.display())
+        })?))
+    } else {
+        None
+    };
     let mut totals = Vec::new();
     let mut cuda_samples = Vec::new();
     let mut hip_samples = Vec::new();
@@ -1113,8 +1124,10 @@ fn run() -> Result<(), String> {
         };
         let total_ms = t_frame.elapsed().as_millis() as u64;
         let file = format!("frames/frame_{n:04}.rgb");
-        fs::write(cfg.out.join(&file), &frame_rgb).map_err(|e| format!("write {file}: {e}"))?;
         let sha = sha256_hex(&frame_rgb);
+        if cfg.record {
+            fs::write(cfg.out.join(&file), &frame_rgb).map_err(|e| format!("write {file}: {e}"))?;
+        }
         let record = json!({
             "index": n,
             "frame": frame,
@@ -1138,8 +1151,12 @@ fn run() -> Result<(), String> {
             "sha256": sha,
             "inputs": actions,
         });
-        writeln!(meta, "{}", serde_json::to_string(&record).unwrap())
-            .map_err(|e| format!("write metadata: {e}"))?;
+        if cfg.record {
+            if let Some(m) = meta.as_mut() {
+                writeln!(m, "{}", serde_json::to_string(&record).unwrap())
+                    .map_err(|e| format!("write metadata: {e}"))?;
+            }
+        }
         totals.push(total_ms);
         recent_totals.push(total_ms);
         if recent_totals.len() > 30 {
@@ -1247,7 +1264,9 @@ fn run() -> Result<(), String> {
             thread::sleep(Duration::from_millis(budget - total_ms));
         }
     }
-    meta.flush().map_err(|e| format!("flush metadata: {e}"))?;
+    if let Some(m) = meta.as_mut() {
+        m.flush().map_err(|e| format!("flush metadata: {e}"))?;
+    }
 
     let (p50, p95, max) = latency_summary(&totals);
     let (c50, _, _) = latency_summary(&cuda_samples);
@@ -1295,8 +1314,17 @@ fn run() -> Result<(), String> {
         },
         "real_time_at_target": p95 <= budget,
         "wall_ms": started.elapsed().as_millis() as u64,
-        "frames_dir": cfg.out.join("frames").display().to_string(),
-        "metadata": meta_path.display().to_string(),
+        "record": cfg.record,
+        "frames_dir": if cfg.record {
+            json!(cfg.out.join("frames").display().to_string())
+        } else {
+            Json::Null
+        },
+        "metadata": if cfg.record {
+            json!(meta_path.display().to_string())
+        } else {
+            Json::Null
+        },
         "finished_unix_ms": now_ms(),
     });
     let summary_path = cfg.out.join("run.json");

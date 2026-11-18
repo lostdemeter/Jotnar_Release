@@ -91,7 +91,7 @@ take the full frame.
 ```sh
 ./run_doom_demo.sh                 # playable local
 ./run_doom_demo.sh --frames 100    # headless local
-./demos/doom_two_nodes.sh          # playable across CUDA + HIP nodes
+./demos/doom-two-nodes/run.sh          # playable across CUDA + HIP nodes
 python3 scripts/doom_two_gpu_gate.py
 python3 scripts/doom_failover_gate.py
 ```

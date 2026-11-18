@@ -220,7 +220,7 @@ The same coordinator can open an SDL viewer with a live node/latency HUD and
 forward keys. The one-command launcher is:
 
 ```sh
-./demos/doom_two_nodes.sh
+./demos/doom-two-nodes/run.sh
 ```
 
 or run the pieces directly:

@@ -1,0 +1,6 @@
+bin/*
+!bin/.gitkeep
+assets/doom.bin
+assets/doom1.wad
+out/
+dist/

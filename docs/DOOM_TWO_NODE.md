@@ -41,7 +41,7 @@ model or stage format.
 
 ## Listing
 
-[`showcase/doom/upscale-half.asm`](../showcase/doom/upscale-half.asm):
+[`demos/doom-two-nodes/upscale-half.asm`](../demos/doom-two-nodes/upscale-half.asm):
 
 ```text
 CONFIG warm_frame 1
@@ -81,8 +81,11 @@ python3 scripts/doom_two_gpu_gate.py
 The quick launcher is:
 
 ```sh
-./demos/doom_two_nodes.sh
+./demos/doom-two-nodes/run.sh
 ```
+
+The launcher uses `--no-record` by default so a long play session does not fill
+the disk. Pass `--record` to write raw frames and `frames.jsonl`.
 
 Start the coordinator with a viewer listener and open the SDL window on this
 machine:
