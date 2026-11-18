@@ -16,7 +16,7 @@
 //! Messages are one frame per connection. `ping` is available for capability
 //! checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -28,10 +28,10 @@ use std::time::Instant;
 
 use jotnar::asm::AsmOptions;
 use jotnar::codegen::infer::CKind;
-use jotnar::codegen::{build, compile_program, CompileOptions, Target};
+use jotnar::codegen::{build, compile_program, Artifact, CompileOptions, Target};
 use jotnar::payload::{feeds_from_json, value_to_json, Feeds};
 use jotnar::protocol::{decode_frame, encode_frame, PROTO_V, RUNTIME_VERSION};
-use jotnar::value::{array_from_vec, Value};
+use jotnar::value::{array_from_vec, hash_bytes, Value};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde_json::{json, Value as Json};
 
@@ -51,6 +51,58 @@ struct Config {
     mdns: bool,
     warm: bool,
     warm_cache: Arc<Mutex<warm::WarmCache>>,
+    payload_cache: Arc<Mutex<PayloadCache>>,
+    artifact_cache: Arc<Mutex<HashMap<String, Arc<Artifact>>>>,
+}
+
+struct CachedPayload {
+    feeds: Arc<Feeds>,
+    bytes: usize,
+}
+
+struct PayloadCache {
+    map: HashMap<String, CachedPayload>,
+    order: VecDeque<String>,
+    bytes: usize,
+    limit: usize,
+}
+
+impl PayloadCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            limit,
+        }
+    }
+
+    fn put(&mut self, id: String, feeds: Feeds, bytes: usize) -> String {
+        if self.map.contains_key(&id) {
+            return id;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.map.insert(
+            id.clone(),
+            CachedPayload {
+                feeds: Arc::new(feeds),
+                bytes,
+            },
+        );
+        self.order.push_back(id.clone());
+        while self.bytes > self.limit && self.order.len() > 1 {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(p) = self.map.remove(&old) {
+                    self.bytes = self.bytes.saturating_sub(p.bytes);
+                }
+            }
+        }
+        id
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<Feeds>> {
+        self.map.get(id).map(|p| p.feeds.clone())
+    }
 }
 
 fn usage() -> &'static str {
@@ -98,6 +150,7 @@ fn real_main() -> Result<(), String> {
     let mut cache_dir = std::env::temp_dir().join("jotnar-gpu-runner-cache");
     let mut mdns = false;
     let mut warm = true;
+    let mut payload_cache_bytes = 256 * 1024 * 1024usize;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -136,6 +189,14 @@ fn real_main() -> Result<(), String> {
             "--no-warm" => {
                 warm = false;
             }
+            "--payload-cache-bytes" => {
+                i += 1;
+                payload_cache_bytes = args
+                    .get(i)
+                    .ok_or("--payload-cache-bytes needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --payload-cache-bytes: {e}"))?;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -161,6 +222,8 @@ fn real_main() -> Result<(), String> {
         mdns,
         warm,
         warm_cache: Arc::new(Mutex::new(warm::WarmCache::new())),
+        payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
+        artifact_cache: Arc::new(Mutex::new(HashMap::new())),
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     let port = listener
@@ -305,6 +368,37 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
                 &[],
             )
         }
+        "payload-put" => {
+            let pid = format!("{:016x}", hash_bytes(payload));
+            let cached = {
+                let cache = cfg.payload_cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.get(&pid).is_some()
+            };
+            if !cached {
+                let parsed: Json = match serde_json::from_slice(payload) {
+                    Ok(v) => v,
+                    Err(e) => return send_error(&mut stream, &id, "bad-payload", &format!("{e}")),
+                };
+                let feeds = match feeds_from_json(&parsed) {
+                    Ok(f) => f,
+                    Err(e) => return send_error(&mut stream, &id, "bad-payload", &e.to_string()),
+                };
+                let mut cache = cfg.payload_cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.put(pid.clone(), feeds, payload.len());
+            }
+            send(
+                &mut stream,
+                &json!({
+                    "v": PROTO_V,
+                    "id": id,
+                    "type": "payload-ok",
+                    "ok": true,
+                    "payload_id": pid,
+                    "bytes": payload.len(),
+                }),
+                &[],
+            )
+        }
         "run" => {
             if let Err(e) = run(&mut stream, cfg, &id, &header, payload) {
                 send_error(&mut stream, &id, "run-failed", &e)?;
@@ -361,22 +455,49 @@ fn run(
         .get("listing")
         .and_then(|x| x.as_str())
         .ok_or("run body needs listing")?;
-    let payload_json = body.get("payload").ok_or("run body needs payload")?;
+    let payload_id = header
+        .get("payload_id")
+        .or_else(|| body.get("payload_id"))
+        .and_then(|x| x.as_str());
+    let feeds: Arc<Feeds> = if let Some(pid) = payload_id {
+        let cache = cfg.payload_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .get(pid)
+            .ok_or_else(|| format!("unknown-payload {pid}"))?
+    } else {
+        let payload_json = body
+            .get("payload")
+            .ok_or("run body needs payload or payload_id")?;
+        Arc::new(feeds_from_json(payload_json).map_err(|e| e.to_string())?)
+    };
     let use_fp16 = body
         .get("use_fp16")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    let feeds: Feeds = feeds_from_json(payload_json).map_err(|e| e.to_string())?;
     let opts = CompileOptions {
         target: cfg.target,
         outputs: outputs.clone(),
         asm: AsmOptions::new("."),
         use_fp16,
     };
-    let t0 = Instant::now();
-    let artifact =
-        compile_program(listing, &opts, feeds.clone()).map_err(|e| format!("compile: {e}"))?;
-    let compile_ms = t0.elapsed().as_millis();
+    let artifact_key = artifact_key(listing, &outputs, &feeds, use_fp16, cfg.target);
+    let cached_art = {
+        let cache = cfg.artifact_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(&artifact_key).cloned()
+    };
+    let (artifact, compile_ms) = if let Some(artifact) = cached_art {
+        (artifact, 0)
+    } else {
+        let t0 = Instant::now();
+        let artifact = Arc::new(
+            compile_program(listing, &opts, (*feeds).clone())
+                .map_err(|e| format!("compile: {e}"))?,
+        );
+        let compile_ms = t0.elapsed().as_millis();
+        let mut cache = cfg.artifact_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(artifact_key, artifact.clone());
+        (artifact, compile_ms)
+    };
     let dir = tempfile::Builder::new()
         .prefix("jotnar-gpu-runner-")
         .tempdir()
@@ -520,6 +641,29 @@ fn run(
         }),
         body.to_string().as_bytes(),
     )
+}
+
+fn artifact_key(
+    listing: &str,
+    outputs: &[String],
+    feeds: &Feeds,
+    use_fp16: bool,
+    target: Target,
+) -> String {
+    let mut key = format!(
+        "{:016x}|{}|{}",
+        hash_bytes(listing.as_bytes()),
+        use_fp16,
+        target.as_str()
+    );
+    for o in outputs {
+        key.push('|');
+        key.push_str(o);
+    }
+    for (name, value) in feeds {
+        key.push_str(&format!("|{}:{:?}:{:?}", name, value.kind(), value.shape()));
+    }
+    key
 }
 
 fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
@@ -698,4 +842,17 @@ mod bind_tests {
         assert!(!is_loopback_bind("0.0.0.0:9997"));
         assert!(!is_loopback_bind("[::]:9997"));
     }
+}
+
+#[test]
+fn payload_cache_reuses_and_evicts() {
+    let mut cache = PayloadCache::new(8);
+    let feeds = Feeds::new();
+    assert!(cache.get("a").is_none());
+    cache.put("a".to_string(), feeds.clone(), 4);
+    assert!(cache.get("a").is_some());
+    cache.put("a".to_string(), feeds.clone(), 4);
+    cache.put("b".to_string(), feeds, 8);
+    assert!(cache.get("a").is_none());
+    assert!(cache.get("b").is_some());
 }

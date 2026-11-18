@@ -4,7 +4,7 @@
 //! model-blind; this controller is explicitly target-aware and runs the same
 //! listing on selected GPU runners, comparing outputs with a tolerance policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -498,6 +498,18 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         return Err(format!("no runner for target {}", run.target));
     }
 
+    let mut selected: Vec<usize> = groups.iter().flatten().copied().collect();
+    selected.sort_unstable();
+    selected.dedup();
+    let mut payload_ids: HashMap<String, String> = HashMap::new();
+    for &ri in &selected {
+        let r = &cfg.runners[ri];
+        let id = r
+            .put_payload(&payload)
+            .map_err(|e| format!("upload payload to {}: {e}", r.addr))?;
+        payload_ids.insert(r.addr.clone(), id);
+    }
+
     let pending: Vec<usize> = ledger
         .jobs
         .iter()
@@ -524,6 +536,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
                     cfg,
                     &listing,
                     &payload,
+                    &payload_ids,
                     &run.outputs,
                     run.max_attempts,
                 );
@@ -628,6 +641,7 @@ fn run_one_job(
     cfg: &Config,
     listing: &str,
     payload: &Json,
+    payload_ids: &HashMap<String, String>,
     outputs: &[String],
     max_attempts: usize,
 ) -> (String, Option<String>, usize, Vec<RunRecord>) {
@@ -642,7 +656,11 @@ fn run_one_job(
         for attempt in 1..=max_attempts {
             let ri = group[(job + attempt - 1) % group.len()];
             let r = &cfg.runners[ri];
-            match r.run(listing, payload, outputs) {
+            let reply = match payload_ids.get(&r.addr) {
+                Some(pid) => r.run_with_payload_id(listing, pid, outputs),
+                None => r.run(listing, payload, outputs),
+            };
+            match reply {
                 Ok(reply) => {
                     let (bytes, output_hash) = record_hash(&reply);
                     let meta = &reply.header;

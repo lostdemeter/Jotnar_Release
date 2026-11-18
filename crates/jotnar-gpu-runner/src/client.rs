@@ -66,15 +66,53 @@ impl Runner {
         Ok(reply)
     }
 
+    pub fn put_payload(&self, payload: &Json) -> Result<String, String> {
+        let mut stream = self.connect()?;
+        let header = self.header("payload-put", json!({}));
+        let body = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
+        send_frame(&mut stream, &header, &body)?;
+        let (reply, _) = recv_frame(&mut stream, 16 * 1024 * 1024)?;
+        if reply.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+            return Err(format!("{} payload-put failed: {reply}", self.addr));
+        }
+        reply
+            .get("payload_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("{} payload-put returned no payload_id", self.addr))
+    }
+
     pub fn run(
         &self,
         listing: &str,
         payload: &Json,
         outputs: &[String],
     ) -> Result<RunReply, String> {
-        let mut stream = self.connect()?;
-        let header = self.header("run", json!({"target": self.target, "outputs": outputs}));
         let body = json!({"listing": listing, "payload": payload});
+        self.run_body(
+            listing,
+            body,
+            json!({"target": self.target, "outputs": outputs}),
+        )
+    }
+
+    pub fn run_with_payload_id(
+        &self,
+        listing: &str,
+        payload_id: &str,
+        outputs: &[String],
+    ) -> Result<RunReply, String> {
+        let body = json!({"listing": listing, "payload_id": payload_id});
+        self.run_body(
+            listing,
+            body,
+            json!({"target": self.target, "outputs": outputs, "payload_id": payload_id}),
+        )
+    }
+
+    fn run_body(&self, _listing: &str, body: Json, fields: Json) -> Result<RunReply, String> {
+        let mut stream = self.connect()?;
+        let header = self.header("run", fields);
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         send_frame(&mut stream, &header, &body)?;
         let (reply, body) = recv_frame(&mut stream, 512 * 1024 * 1024)?;
