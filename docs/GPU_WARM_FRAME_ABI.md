@@ -1,6 +1,6 @@
 # GPU warm-frame ABI (design)
 
-**Status:** proposed, not implemented
+**Status:** implemented for CUDA and HIP; runner integration active; performance gate pending
 **Scope:** host-side `jotnar-gpu-runner`; CUDA and HIP targets
 **Branch:** `gpu-warm-frame-design`
 
@@ -265,6 +265,13 @@ Do not move warm-frame logic into `jotnar-noded`.
 
 A warm worker is trusted local code, but the runner must still validate
 layout and sizes before writing any buffer.
+
+## Implementation status
+
+The CUDA and HIP emitters now support `CONFIG warm_frame 1`, and the runner
+uses warm workers automatically for eligible artifacts. `--no-warm` falls back
+to process-per-job execution. The phases below are the implementation record;
+the remaining work is payload transport and the formal performance gate.
 
 ## Implementation phases
 

@@ -128,7 +128,7 @@ target pool up to `--max-attempts`.
 
 ## Warm frames
 
-The process-per-job runner is correct but startup-bound. The proposed
-persistent warm-frame ABI (shared buffers, one GPU context per worker, same
-protocol for CUDA and HIP) is documented in
+Warm frames are implemented for CUDA and HIP. The runner uses a persistent
+worker automatically for eligible artifacts; `--no-warm` forces the old
+process-per-job path. The ABI and boundaries are documented in
 [`docs/GPU_WARM_FRAME_ABI.md`](../../docs/GPU_WARM_FRAME_ABI.md).

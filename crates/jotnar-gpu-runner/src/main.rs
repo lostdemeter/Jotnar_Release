@@ -35,6 +35,8 @@ use jotnar::value::{array_from_vec, Value};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde_json::{json, Value as Json};
 
+mod warm;
+
 const DEFAULT_BIND: &str = "127.0.0.1:9997";
 const DEFAULT_MAX_FRAME: usize = 64 * 1024 * 1024;
 
@@ -47,6 +49,8 @@ struct Config {
     cache_dir: PathBuf,
     build_lock: Arc<Mutex<()>>,
     mdns: bool,
+    warm: bool,
+    warm_cache: Arc<Mutex<warm::WarmCache>>,
 }
 
 fn usage() -> &'static str {
@@ -93,6 +97,7 @@ fn real_main() -> Result<(), String> {
     let mut max_frame = DEFAULT_MAX_FRAME;
     let mut cache_dir = std::env::temp_dir().join("jotnar-gpu-runner-cache");
     let mut mdns = false;
+    let mut warm = true;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -128,6 +133,9 @@ fn real_main() -> Result<(), String> {
             "--mdns" => {
                 mdns = true;
             }
+            "--no-warm" => {
+                warm = false;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -151,6 +159,8 @@ fn real_main() -> Result<(), String> {
         cache_dir,
         build_lock: Arc::new(Mutex::new(())),
         mdns,
+        warm,
+        warm_cache: Arc::new(Mutex::new(warm::WarmCache::new())),
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     let port = listener
@@ -388,6 +398,63 @@ fn run(
         }
     }
     let build_ms = t_build.elapsed().as_millis();
+
+    if cfg.warm && artifact.warm_frame {
+        let spec = warm::spec_from_artifact(&artifact, &exe, &key, cfg.target)?;
+        let cache_key = spec.key.clone();
+        let worker = {
+            let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.get_or_create(&spec)?
+        };
+        let run = {
+            let mut worker = worker.lock().unwrap_or_else(|e| e.into_inner());
+            worker.run_frame(&feeds)
+        };
+        let run = match run {
+            Ok(run) => run,
+            Err(e) => {
+                let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.remove(&cache_key);
+                return Err(e);
+            }
+        };
+        let mut out = serde_json::Map::new();
+        for (name, value) in run.outputs {
+            out.insert(name, value_to_json(&value).map_err(|e| e.to_string())?);
+        }
+        let body = json!({
+            "outputs": out,
+            "timing": {
+                "compile_ms": compile_ms,
+                "build_ms": build_ms,
+                "worker_start_ms": run.worker_start_ms,
+                "frame_ms": run.frame_ms,
+                "run_ms": run.frame_ms,
+                "warm": true,
+                "cache_hit": cache_hit,
+            },
+        });
+        return send(
+            stream,
+            &json!({
+                "v": PROTO_V,
+                "id": id,
+                "type": "run-ok",
+                "ok": true,
+                "target": cfg.target.as_str(),
+                "runtime_version": RUNTIME_VERSION,
+                "compile_ms": compile_ms,
+                "build_ms": build_ms,
+                "worker_start_ms": run.worker_start_ms,
+                "frame_ms": run.frame_ms,
+                "run_ms": run.frame_ms,
+                "warm": true,
+                "cache_hit": cache_hit,
+            }),
+            body.to_string().as_bytes(),
+        );
+    }
+
     let mut argv = Vec::new();
     for name in &artifact.inputs {
         let value = feeds
@@ -470,7 +537,7 @@ fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
     )
 }
 
-fn write_value(path: &Path, value: &Value, kind: CKind, target: Target) -> Result<(), String> {
+fn encode_value(value: &Value, kind: CKind, target: Target) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     match kind {
         CKind::F => {
@@ -494,11 +561,16 @@ fn write_value(path: &Path, value: &Value, kind: CKind, target: Target) -> Resul
         }
         CKind::T => return Err("T streams are not supported by the GPU runner".to_string()),
     }
+    Ok(bytes)
+}
+
+fn write_value(path: &Path, value: &Value, kind: CKind, target: Target) -> Result<(), String> {
+    let bytes = encode_value(value, kind, target)?;
     fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-fn read_value(
-    path: &Path,
+fn decode_value(
+    bytes: &[u8],
     kind: CKind,
     target: Target,
     shape: &[Option<usize>],
@@ -508,7 +580,6 @@ fn read_value(
         .map(|x| x.ok_or_else(|| "dynamic output shape is not supported".to_string()))
         .collect::<Result<_, _>>()?;
     let n = shape.iter().product::<usize>();
-    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     match kind {
         CKind::F => {
             if matches!(target, Target::Cuda | Target::Hip) {
@@ -517,11 +588,7 @@ fn read_value(
                     .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .collect::<Vec<_>>();
                 if data.len() != n {
-                    return Err(format!(
-                        "{} has {} floats, expected {n}",
-                        path.display(),
-                        data.len()
-                    ));
+                    return Err(format!("output has {} floats, expected {n}", data.len()));
                 }
                 let arr = array_from_vec(&shape, data).map_err(|e| e.to_string())?;
                 Ok(Value::F32(arr))
@@ -531,11 +598,7 @@ fn read_value(
                     .map(|b| f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
                     .collect::<Vec<_>>();
                 if data.len() != n {
-                    return Err(format!(
-                        "{} has {} doubles, expected {n}",
-                        path.display(),
-                        data.len()
-                    ));
+                    return Err(format!("output has {} doubles, expected {n}", data.len()));
                 }
                 let arr = array_from_vec(&shape, data).map_err(|e| e.to_string())?;
                 Ok(Value::F64(arr))
@@ -547,17 +610,23 @@ fn read_value(
                 .map(|b| i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
                 .collect::<Vec<_>>();
             if data.len() != n {
-                return Err(format!(
-                    "{} has {} ints, expected {n}",
-                    path.display(),
-                    data.len()
-                ));
+                return Err(format!("output has {} ints, expected {n}", data.len()));
             }
             let arr = array_from_vec(&shape, data).map_err(|e| e.to_string())?;
             Ok(Value::I64(arr))
         }
         CKind::T => Err("T streams are not supported by the GPU runner".to_string()),
     }
+}
+
+fn read_value(
+    path: &Path,
+    kind: CKind,
+    target: Target,
+    shape: &[Option<usize>],
+) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    decode_value(&bytes, kind, target, shape)
 }
 
 fn send(stream: &mut TcpStream, header: &Json, payload: &[u8]) -> Result<(), String> {

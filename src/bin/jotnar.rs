@@ -366,6 +366,7 @@ fn real_main() -> Result<(), String> {
                 "outputs": art.source_outputs,
                 "shapes": shapes,
                 "argv": art.n_argv,
+                "warm_frame": art.warm_frame,
                 "executable": exe.file_name()
                     .map(|x| x.to_string_lossy().into_owned())
                     .unwrap_or_default(),
