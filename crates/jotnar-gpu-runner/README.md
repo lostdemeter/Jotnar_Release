@@ -39,7 +39,7 @@ response:
 
 ```json
 {"v":1, "id":1, "type":"run-ok", "ok":true, "target":"hip",
- "runtime_version":"...", "build_ms":0, "run_ms":12}
+ "runtime_version":"...", "compile_ms":0, "build_ms":900, "run_ms":12}
 ```
 
 with a body containing typed `outputs`.

@@ -10,7 +10,7 @@
 //!   body:   {"listing": "...", "payload": {"streams": {...}}, "use_fp16": false}
 //!
 //! Response:
-//!   header: type=run-ok, target, runtime_version, build_ms, run_ms
+//!   header: type=run-ok, target, runtime_version, compile_ms, build_ms, run_ms
 //!   body:   {"outputs": {name: <payload stream>, ...}, "timing": {...}}
 //!
 //! Messages are one frame per connection. `ping` is available for capability
@@ -259,13 +259,15 @@ fn run(
     let t0 = Instant::now();
     let artifact =
         compile_program(listing, &opts, feeds.clone()).map_err(|e| format!("compile: {e}"))?;
-    let build_ms = t0.elapsed().as_millis();
+    let compile_ms = t0.elapsed().as_millis();
     let dir = tempfile::Builder::new()
         .prefix("jotnar-gpu-runner-")
         .tempdir()
         .map_err(|e| format!("tempdir: {e}"))?;
+    let t_build = Instant::now();
     let exe = build(&artifact.source, dir.path(), "job", cfg.target)
         .map_err(|e| format!("build: {e}"))?;
+    let build_ms = t_build.elapsed().as_millis();
     let mut argv = Vec::new();
     for name in &artifact.inputs {
         let value = feeds
@@ -313,7 +315,7 @@ fn run(
     }
     let body = json!({
         "outputs": out,
-        "timing": {"build_ms": build_ms, "run_ms": run_ms},
+        "timing": {"compile_ms": compile_ms, "build_ms": build_ms, "run_ms": run_ms},
     });
     send(
         stream,
@@ -324,6 +326,7 @@ fn run(
             "ok": true,
             "target": cfg.target.as_str(),
             "runtime_version": RUNTIME_VERSION,
+            "compile_ms": compile_ms,
             "build_ms": build_ms,
             "run_ms": run_ms,
         }),
