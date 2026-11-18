@@ -19,8 +19,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -41,6 +42,8 @@ struct Config {
     token: Option<String>,
     target: Target,
     max_frame: usize,
+    cache_dir: PathBuf,
+    build_lock: Arc<Mutex<()>>,
 }
 
 fn usage() -> &'static str {
@@ -48,7 +51,7 @@ fn usage() -> &'static str {
      \n\
      usage:\n\
        jotnar-gpu-runner --target hip|cuda [--bind ADDR] [--token SECRET]\n\
-                         [--max-frame BYTES]\n\
+                         [--max-frame BYTES] [--cache-dir DIR]\n\
      \n\
      The runner compiles and runs Jotnar listings on the local GPU host. Set\n\
      HIPCC / HIP_ARCH for HIP, or NVCC / CUDA_ARCH for CUDA."
@@ -69,6 +72,7 @@ fn real_main() -> Result<(), String> {
     let mut token = None;
     let mut target = None;
     let mut max_frame = DEFAULT_MAX_FRAME;
+    let mut cache_dir = std::env::temp_dir().join("jotnar-gpu-runner-cache");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -97,6 +101,10 @@ fn real_main() -> Result<(), String> {
                     _ => return Err("runner target must be hip or cuda".to_string()),
                 });
             }
+            "--cache-dir" => {
+                i += 1;
+                cache_dir = PathBuf::from(args.get(i).ok_or("--cache-dir needs a path")?);
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -108,6 +116,8 @@ fn real_main() -> Result<(), String> {
         token,
         target,
         max_frame: max_frame.max(1024),
+        cache_dir,
+        build_lock: Arc::new(Mutex::new(())),
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     eprintln!(
@@ -264,9 +274,22 @@ fn run(
         .prefix("jotnar-gpu-runner-")
         .tempdir()
         .map_err(|e| format!("tempdir: {e}"))?;
+    let key = cache_key(&artifact.source, cfg.target, use_fp16);
+    let cache = cfg.cache_dir.join(&key);
+    let exe = cache.join("job");
     let t_build = Instant::now();
-    let exe = build(&artifact.source, dir.path(), "job", cfg.target)
-        .map_err(|e| format!("build: {e}"))?;
+    let mut cache_hit = exe.is_file();
+    if !cache_hit {
+        let _guard = cfg.build_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !exe.is_file() {
+            fs::create_dir_all(&cache)
+                .map_err(|e| format!("cache dir {}: {e}", cache.display()))?;
+            build(&artifact.source, &cache, "job", cfg.target)
+                .map_err(|e| format!("build: {e}"))?;
+        } else {
+            cache_hit = true;
+        }
+    }
     let build_ms = t_build.elapsed().as_millis();
     let mut argv = Vec::new();
     for name in &artifact.inputs {
@@ -315,7 +338,7 @@ fn run(
     }
     let body = json!({
         "outputs": out,
-        "timing": {"compile_ms": compile_ms, "build_ms": build_ms, "run_ms": run_ms},
+        "timing": {"compile_ms": compile_ms, "build_ms": build_ms, "run_ms": run_ms, "cache_hit": cache_hit},
     });
     send(
         stream,
@@ -329,8 +352,24 @@ fn run(
             "compile_ms": compile_ms,
             "build_ms": build_ms,
             "run_ms": run_ms,
+            "cache_hit": cache_hit,
         }),
         body.to_string().as_bytes(),
+    )
+}
+
+fn cache_key(source: &str, target: Target, use_fp16: bool) -> String {
+    let arch = if target == Target::Hip {
+        std::env::var("HIP_ARCH").unwrap_or_default()
+    } else {
+        std::env::var("CUDA_ARCH").unwrap_or_default()
+    };
+    format!(
+        "{:016x}-{}-{}-{}",
+        jotnar::value::hash_bytes(source.as_bytes()),
+        target.as_str(),
+        arch,
+        if use_fp16 { 1 } else { 0 }
     )
 }
 

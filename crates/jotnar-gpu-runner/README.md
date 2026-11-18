@@ -39,7 +39,8 @@ response:
 
 ```json
 {"v":1, "id":1, "type":"run-ok", "ok":true, "target":"hip",
- "runtime_version":"...", "compile_ms":0, "build_ms":900, "run_ms":12}
+ "runtime_version":"...", "compile_ms":0, "build_ms":900, "run_ms":12,
+ "cache_hit":false}
 ```
 
 with a body containing typed `outputs`.
@@ -55,7 +56,8 @@ HIP host:
 ```sh
 env HIPCC=/opt/rocm-7.2.4/bin/hipcc HIP_ARCH=gfx1100 \
   PATH=/opt/rocm-7.2.4/bin:$PATH \
-  ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target hip --token "$TOKEN"
+  ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target hip --token "$TOKEN" \
+  --cache-dir /tmp/jotnar-gpu-runner-cache
 ```
 
 CUDA host:
@@ -63,7 +65,8 @@ CUDA host:
 ```sh
 env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
   CUDA_ARCH=sm_120 \
-  ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target cuda --token "$TOKEN"
+  ./jotnar-gpu-runner --bind 0.0.0.0:9997 --target cuda --token "$TOKEN" \
+  --cache-dir /tmp/jotnar-gpu-runner-cache
 ```
 
 Client and two-host comparison:
@@ -80,7 +83,8 @@ python3 scripts/gpu_runner_compare.py \
 
 ## Boundaries
 
-- Compile-on-host; no signed/prebuilt artifact transport yet.
+- Compile-on-host with a source/arch cache; no signed/prebuilt artifact
+  transport yet.
 - Trusted-LAN shared token; no TLS/mTLS.
 - No GPU passthrough into the Alpine node.
 - Target-aware by design; not part of the model-blind node or the language
@@ -89,3 +93,24 @@ python3 scripts/gpu_runner_compare.py \
   can be compared exactly; float cross-vendor results need tolerance.
 - No scheduler integration yet; the next step is target-aware placement in
   `jotnar-net`.
+
+## Scheduler
+
+`jotnar-gpu-net` is the target-aware controller for these runners. It is a
+companion to `jotnar-net`; the CPU node remains model-blind.
+
+```sh
+# health of each runner
+./jotnar-gpu-net --runner hip=192.168.1.195:9997 \
+  --runner cuda=192.168.1.116:9997 --token "$TOKEN" health
+
+# run the same job on both targets and compare
+./jotnar-gpu-net --runner hip=192.168.1.195:9997 \
+  --runner cuda=192.168.1.116:9997 --token "$TOKEN" \
+  run job.asm --payload payload.json --outputs OUT \
+  --target both --count 10
+```
+
+`--target hip` or `--target cuda` runs only that target. `both` runs one
+runner per target and compares outputs using the scheduler's `atol`/`rtol`.
+`--count` submits N copies and reports the aggregate summary.

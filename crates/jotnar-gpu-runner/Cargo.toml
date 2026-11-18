@@ -5,9 +5,17 @@ edition = "2021"
 license = "GPL-3.0-only"
 description = "Host-side HIP/CUDA runner for networked Jotnar jobs"
 
+[lib]
+name = "jotnar_gpu_runner"
+path = "src/lib.rs"
+
 [[bin]]
 name = "jotnar-gpu-runner"
 path = "src/main.rs"
+
+[[bin]]
+name = "jotnar-gpu-net"
+path = "src/bin/jotnar-gpu-net.rs"
 
 [dependencies]
 jotnar = { path = "../.." }
