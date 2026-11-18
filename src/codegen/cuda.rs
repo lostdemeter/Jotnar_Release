@@ -2602,6 +2602,27 @@ pub fn compile_cuda(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<
     })
 }
 
+/// Normalize a CUDA architecture name for `-gencode`.
+///
+/// Accepts `sm_120`, `compute_120`, or a bare `120`; the default is `sm_86`
+/// so existing hosts keep their current code generation.
+fn cuda_arch_args_for(arch: &str) -> Vec<String> {
+    let trimmed = arch.trim();
+    let n = trimmed
+        .strip_prefix("sm_")
+        .or_else(|| trimmed.strip_prefix("compute_"))
+        .unwrap_or(trimmed);
+    let n = if n.is_empty() { "86" } else { n };
+    vec![
+        "-gencode".to_string(),
+        format!("arch=compute_{n},code=sm_{n}"),
+    ]
+}
+
+fn cuda_arch_args() -> Vec<String> {
+    cuda_arch_args_for(&std::env::var("CUDA_ARCH").unwrap_or_else(|_| "sm_86".to_string()))
+}
+
 /// Build a .cu source with nvcc.
 pub fn build_cu(source: &str, workdir: &std::path::Path, name: &str) -> Result<std::path::PathBuf> {
     std::fs::create_dir_all(workdir)?;
@@ -2671,18 +2692,12 @@ pub fn build_cu(source: &str, workdir: &std::path::Path, name: &str) -> Result<s
             cmd.env("CUDA_HOME", root);
         }
     }
-    cmd.args([
-        "-O2",
-        "-std=c++14",
-        "-Xcompiler",
-        "-O2",
-        "-gencode",
-        "arch=compute_86,code=sm_86",
-    ])
-    .arg(&src)
-    .arg("-o")
-    .arg(&exe)
-    .args(["-l:libcublas.so.13", "-Xlinker", "--no-as-needed"]);
+    cmd.args(["-O2", "-std=c++14", "-Xcompiler", "-O2"]);
+    cmd.args(cuda_arch_args());
+    cmd.arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .args(["-l:libcublas.so.13", "-Xlinker", "--no-as-needed"]);
     if cublaslt {
         cmd.arg("-DJOTNAR_CUBLASLT");
         cmd.arg("-l:libcublasLt.so.13");
@@ -2698,4 +2713,41 @@ pub fn build_cu(source: &str, workdir: &std::path::Path, name: &str) -> Result<s
         )));
     }
     Ok(exe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuda_arch_args_normalize() {
+        assert_eq!(
+            cuda_arch_args_for("sm_120"),
+            vec![
+                "-gencode".to_string(),
+                "arch=compute_120,code=sm_120".to_string()
+            ]
+        );
+        assert_eq!(
+            cuda_arch_args_for("compute_90"),
+            vec![
+                "-gencode".to_string(),
+                "arch=compute_90,code=sm_90".to_string()
+            ]
+        );
+        assert_eq!(
+            cuda_arch_args_for("86"),
+            vec![
+                "-gencode".to_string(),
+                "arch=compute_86,code=sm_86".to_string()
+            ]
+        );
+        assert_eq!(
+            cuda_arch_args_for(""),
+            vec![
+                "-gencode".to_string(),
+                "arch=compute_86,code=sm_86".to_string()
+            ]
+        );
+    }
 }

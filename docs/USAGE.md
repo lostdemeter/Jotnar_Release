@@ -39,7 +39,8 @@ are independent of the thread count. `jotnar build` writes a sibling
 `serve_input`/`serve_output`; emitted Rust artifacts with those config keys also
 support a warm `--serve` framing mode.
 The CUDA build finds the toolkit relative to `nvcc`; set `NVCC` if it is not
-on `PATH`.
+on `PATH`. Set `CUDA_ARCH` (for example `sm_120`; default `sm_86`) to match the
+GPU; the default preserves the original SM86 code generation.
 The HIP build uses `hipcc` on `PATH` (falling back to `/opt/rocm/bin/hipcc`);
 set `HIPCC` to override and `HIP_ARCH` (for example `gfx1100`) to pin the
 offload target. The HIP target is a correctness-first port of the 51-mnemonic
@@ -77,7 +78,7 @@ HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness o
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          388/388
+workspace tests          389/389
 ```
 
 The GPU parity gates fail if `nvcc`/`hipcc` is unavailable. Set `NVCC`/`HIPCC`
