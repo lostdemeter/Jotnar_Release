@@ -4,8 +4,11 @@
 //! model-blind; this controller is explicitly target-aware and runs the same
 //! listing on selected GPU runners, comparing outputs with a tolerance policy.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use jotnar_gpu_runner::client::{RunReply, Runner};
@@ -19,7 +22,7 @@ fn usage() -> &'static str {
          [--atol X] [--rtol X] health\n\
        jotnar-gpu-net [--token T] [--runner hip=ADDR] [--runner cuda=ADDR] \\\n\
          [--atol X] [--rtol X] run <listing.asm> --payload FILE \\\n\
-         --outputs a,b [--target hip|cuda|both] [--count N]\n\
+         --outputs a,b [--target hip|cuda|both] [--count N] [--parallel N]\n\
      \n\
      --runner may be repeated. --target both runs the same job on one runner\n\
      of each target and compares the outputs. --count runs N copies.\n"
@@ -37,6 +40,7 @@ struct RunArgs {
     outputs: Vec<String>,
     target: String,
     count: usize,
+    parallel: usize,
 }
 
 #[derive(Default)]
@@ -146,6 +150,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
     let mut outputs = None;
     let mut target = "both".to_string();
     let mut count = 1usize;
+    let mut parallel = 1usize;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--payload" => {
@@ -169,6 +174,13 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
                     .parse()
                     .map_err(|_| "--count must be an integer")?
             }
+            "--parallel" => {
+                parallel = it
+                    .next()
+                    .ok_or("--parallel needs a number")?
+                    .parse()
+                    .map_err(|_| "--parallel must be an integer")?
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown run argument '{other}'")),
         }
@@ -182,6 +194,7 @@ fn parse_run(args: Vec<String>) -> Result<RunArgs, String> {
         outputs: outputs.ok_or("run needs --outputs a,b")?,
         target,
         count: count.max(1),
+        parallel: parallel.max(1),
     })
 }
 
@@ -215,84 +228,151 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     let payload_text = std::fs::read_to_string(&run.payload)
         .map_err(|e| format!("read {}: {e}", run.payload.display()))?;
     let payload: Json = serde_json::from_str(&payload_text).map_err(|e| e.to_string())?;
-    let selected: Vec<&Runner> = match run.target.as_str() {
-        "hip" => cfg.runners.iter().filter(|r| r.target == "hip").collect(),
-        "cuda" => cfg.runners.iter().filter(|r| r.target == "cuda").collect(),
+
+    let hip: Vec<usize> = cfg
+        .runners
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.target == "hip")
+        .map(|(i, _)| i)
+        .collect();
+    let cuda: Vec<usize> = cfg
+        .runners
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.target == "cuda")
+        .map(|(i, _)| i)
+        .collect();
+    let groups: Vec<Vec<usize>> = match run.target.as_str() {
+        "hip" => vec![hip],
+        "cuda" => vec![cuda],
         _ => {
-            let hip = cfg.runners.iter().find(|r| r.target == "hip");
-            let cuda = cfg.runners.iter().find(|r| r.target == "cuda");
-            match (hip, cuda) {
-                (Some(h), Some(c)) => vec![h, c],
-                _ => return Err("--target both needs one hip and one cuda runner".to_string()),
+            if hip.is_empty() || cuda.is_empty() {
+                return Err("--target both needs one hip and one cuda runner".to_string());
             }
+            vec![hip, cuda]
         }
     };
-    if selected.is_empty() {
+    if groups.iter().any(|g| g.is_empty()) {
         return Err(format!("no runner for target {}", run.target));
     }
-    let mut stats: Vec<TargetStats> = selected
+
+    let mut selected: Vec<usize> = groups.iter().flatten().copied().collect();
+    selected.sort_unstable();
+    selected.dedup();
+    let stat_index: HashMap<usize, usize> = selected
         .iter()
-        .map(|r| TargetStats {
+        .enumerate()
+        .map(|(si, &ri)| (ri, si))
+        .collect();
+    let mut initial_stats = Vec::with_capacity(selected.len());
+    for &ri in &selected {
+        let r = &cfg.runners[ri];
+        initial_stats.push(TargetStats {
             target: r.target.clone(),
             addr: r.addr.clone(),
             ..Default::default()
-        })
-        .collect();
-    let started = Instant::now();
-    let mut done = 0usize;
-    let mut failed = 0usize;
-    let mut identical = true;
-    let mut output_bytes = 0usize;
-    let mut errors = Vec::new();
-    for job in 0..run.count {
-        let mut replies: Vec<RunReply> = Vec::new();
-        let mut job_failed = false;
-        for (idx, r) in selected.iter().enumerate() {
-            match r.run(&listing, &payload, &run.outputs) {
-                Ok(reply) => {
-                    let meta = &reply.header;
-                    stats[idx].jobs += 1;
-                    stats[idx].compile_ms +=
-                        meta.get("compile_ms").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
-                    stats[idx].build_ms +=
-                        meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
-                    stats[idx].run_ms +=
-                        meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
-                    if meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true) {
-                        stats[idx].cache_hits += 1;
-                    }
-                    output_bytes += serde_json::to_vec(&reply.outputs)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
-                    replies.push(reply);
-                }
-                Err(e) => {
-                    stats[idx].failed += 1;
-                    job_failed = true;
-                    errors.push(format!("job {job} {} {}: {e}", r.target, r.addr));
-                }
-            }
-        }
-        if job_failed || replies.len() != selected.len() {
-            failed += 1;
-            continue;
-        }
-        if replies.len() > 1 {
-            for idx in 1..replies.len() {
-                if let Err(e) =
-                    compare_replies(&replies[0], &replies[idx], &run.outputs, cfg.atol, cfg.rtol)
-                {
-                    identical = false;
-                    errors.push(format!(
-                        "job {job} {} vs {}: {e}",
-                        selected[0].target, selected[idx].target
-                    ));
-                }
-            }
-        }
-        done += 1;
+        });
     }
+
+    let workers = run.parallel.min(run.count).max(1);
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+    let output_bytes = AtomicUsize::new(0);
+    let identical = AtomicBool::new(true);
+    let errors = Mutex::new(Vec::<String>::new());
+    let stats = Mutex::new(initial_stats);
+    let started = Instant::now();
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let job = next.fetch_add(1, Ordering::SeqCst);
+                if job >= run.count {
+                    break;
+                }
+                let plan: Vec<usize> = groups.iter().map(|g| g[job % g.len()]).collect();
+                let mut replies: Vec<RunReply> = Vec::new();
+                let mut job_ok = true;
+                for &ri in &plan {
+                    let r = &cfg.runners[ri];
+                    match r.run(&listing, &payload, &run.outputs) {
+                        Ok(reply) => {
+                            let meta = &reply.header;
+                            let si = stat_index[&ri];
+                            {
+                                let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
+                                s[si].jobs += 1;
+                                s[si].compile_ms +=
+                                    meta.get("compile_ms").and_then(|x| x.as_u64()).unwrap_or(0)
+                                        as u128;
+                                s[si].build_ms +=
+                                    meta.get("build_ms").and_then(|x| x.as_u64()).unwrap_or(0)
+                                        as u128;
+                                s[si].run_ms +=
+                                    meta.get("run_ms").and_then(|x| x.as_u64()).unwrap_or(0)
+                                        as u128;
+                                if meta.get("cache_hit").and_then(|x| x.as_bool()) == Some(true) {
+                                    s[si].cache_hits += 1;
+                                }
+                            }
+                            output_bytes.fetch_add(
+                                serde_json::to_vec(&reply.outputs)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0),
+                                Ordering::Relaxed,
+                            );
+                            replies.push(reply);
+                        }
+                        Err(e) => {
+                            job_ok = false;
+                            let si = stat_index[&ri];
+                            {
+                                let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
+                                s[si].failed += 1;
+                            }
+                            errors
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(format!("job {job} {} {}: {e}", r.target, r.addr));
+                        }
+                    }
+                }
+                if job_ok && replies.len() == plan.len() && replies.len() > 1 {
+                    for idx in 1..replies.len() {
+                        if let Err(e) = compare_replies(
+                            &replies[0],
+                            &replies[idx],
+                            &run.outputs,
+                            cfg.atol,
+                            cfg.rtol,
+                        ) {
+                            job_ok = false;
+                            identical.store(false, Ordering::SeqCst);
+                            let a = &cfg.runners[plan[0]];
+                            let b = &cfg.runners[plan[idx]];
+                            errors
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(format!(
+                                    "job {job} {} {} vs {} {}: {e}",
+                                    a.target, a.addr, b.target, b.addr
+                                ));
+                        }
+                    }
+                }
+                if job_ok {
+                    done.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    failed.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+
     let wall_ms = started.elapsed().as_millis();
+    let stats = stats.into_inner().unwrap_or_else(|e| e.into_inner());
     let targets: Vec<Json> = stats
         .iter()
         .map(|s| {
@@ -308,6 +388,11 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
             })
         })
         .collect();
+    let done = done.load(Ordering::SeqCst);
+    let failed = failed.load(Ordering::SeqCst);
+    let identical = identical.load(Ordering::SeqCst);
+    let output_bytes = output_bytes.load(Ordering::SeqCst);
+    let errors = errors.into_inner().unwrap_or_else(|e| e.into_inner());
     let summary = json!({
         "targets": targets,
         "submitted": run.count,
@@ -316,6 +401,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         "identical_outputs": identical,
         "output_bytes": output_bytes,
         "wall_ms": wall_ms,
+        "parallel": workers,
         "jobs_per_s": if wall_ms == 0 { 0.0 } else { run.count as f64 * 1000.0 / wall_ms as f64 },
         "errors": errors,
     });
