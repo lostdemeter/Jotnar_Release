@@ -29,10 +29,12 @@ fn usage() -> &'static str {
          [--atol X] [--rtol X] [--discover] run <listing.asm> --payload FILE \\\n\
          --outputs a,b [--target hip|cuda|both] [--count N] [--parallel N]\n\
          [--ledger DIR] [--batch-id ID] [--max-attempts N]\n\
+         [--batch-frames N]\n\
      \n\
      --runner may be repeated. --target both runs the same job on one runner\n\
      of each target and compares the outputs. --count runs N copies. --ledger\n\
-     defaults to artifacts/gpu-batches; a repeated batch id resumes a batch.\n"
+     defaults to artifacts/gpu-batches; a repeated batch id resumes a batch.\n\
+     --batch-frames N sends N frames per run-batch request (default 1).\n"
 }
 
 struct Config {
