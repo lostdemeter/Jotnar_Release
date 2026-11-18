@@ -222,6 +222,8 @@ The front door is deliberately short. The actual parts are here:
   [`showcase/node-os/`](showcase/node-os/)
 - GPU runner and scheduler (HIP/CUDA over framed TCP, opt-in warm frames):
   [`crates/jotnar-gpu-runner/`](crates/jotnar-gpu-runner/)
+- unified CPU/GPU capability discovery without merging executors:
+  [`docs/CAPABILITY_EXCHANGE.md`](docs/CAPABILITY_EXCHANGE.md)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:

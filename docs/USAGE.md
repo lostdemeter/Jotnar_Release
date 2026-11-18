@@ -225,6 +225,7 @@ jotnar-det  <file.asm> <payload.ndjson> [--outputs a,b]
             [--threads 1,4,16] [--repeat N]
             [--concurrency 1,2,8] [--job-threads N] [--stagger-ms N]
 jotnar-node [--bind ADDR] [--allow lattice,...] [--max-frame N] [--token SECRET] [--stats]
+jotnar-net  [--discover-timeout-ms N] capabilities
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
 jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
 jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>
@@ -240,6 +241,7 @@ cargo run --release --bin jotnar-repl -- showcase/language/saxpy.asm --outputs O
 
 cargo run --release --bin jotnar-node -- --bind 127.0.0.1:9999
 cargo run --release --bin jotnar-node -- --bind 0.0.0.0:9999 --token "$SECRET"  # non-loopback requires --token
+cargo run --release --bin jotnar-net -- --discover-timeout-ms 5000 capabilities
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 ping
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 program tile showcase/language/matmul2.asm
 cargo run --release --bin jotnar-ctl -- --addr 127.0.0.1:9999 exec tile --payload payload.json --outputs c00

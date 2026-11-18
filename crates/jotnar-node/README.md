@@ -148,7 +148,10 @@ jotnar-osd --events 10,11,12          # stateful sequence
 - placement and aggregation across nodes;
 - durable per-batch ledger, cached summaries, resume, and retries;
 - stable node IDs and mDNS advertisement/discovery (`_jotnar-node._tcp.local.`);
-- `run` for distributed batches and `discover` / `--discover` for registration.
+- `run` for distributed batches and `discover` / `--discover` for registration;
+- `capabilities` merges `_jotnar-node` and `_jotnar-gpu` advertisements into one
+  CPU/GPU inventory without moving GPU execution into the node. See
+  [`docs/CAPABILITY_EXCHANGE.md`](../../docs/CAPABILITY_EXCHANGE.md).
 
 `crates/jotnar-node/test/sched_two_nodes.sh` is the host gate.
 `crates/jotnar-node/test/qemu_two_nodes.sh` boots two disposable QEMU nodes.

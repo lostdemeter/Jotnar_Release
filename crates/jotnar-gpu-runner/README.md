@@ -138,8 +138,9 @@ python3 scripts/gpu_runner_compare.py \
 - Current slices: HIP 51 CUDA-equivalent mnemonics; CUDA 65. Integer results
   can be compared exactly; float cross-vendor results need tolerance.
 - The target-aware scheduler lives in this crate (`jotnar-gpu-net`) and stays
-  separate from `jotnar-net`; capability exchange is still an open design
-  choice.
+  separate from `jotnar-net`. `jotnar-net capabilities` discovers both CPU
+  nodes and GPU runners for inventory only; execution remains separate. See
+  [`docs/CAPABILITY_EXCHANGE.md`](../../docs/CAPABILITY_EXCHANGE.md).
 
 ## Scheduler
 
