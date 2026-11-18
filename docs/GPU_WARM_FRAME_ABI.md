@@ -217,7 +217,8 @@ Lifecycle:
 - restart on nonzero status or child exit;
 - on shutdown, send the stop token, wait two seconds, then kill;
 - sweep `/dev/shm/jotnar-warm-*` directories whose owner pid is gone at
-  runner startup;
+  runner startup, plus owner-less directories older than ten minutes from
+  pre-owner builds;
 - keep the compiled artifact cache independent, so a runner restart does not
   require a rebuild.
 
