@@ -153,7 +153,9 @@ number of concurrent chunks. `--ledger` defaults to `artifacts/gpu-batches`; a
 repeated `--batch-id` resumes pending jobs and replays a completed batch from
 its cached summary. Failures retry across the target pool up to
 `--max-attempts`. If a batch request fails or the runner does not support it,
-those jobs fall back to the normal per-job request path.
+those jobs fall back to the normal per-job request path. Within a batch, a
+runner that fails a batch request is skipped by later chunks; if every runner
+for a target has failed, the scheduler tries the group again.
 
 The controller uploads the batch payload once per runner with
 `payload-put`, then sends only the payload id per job. The runner caches parsed

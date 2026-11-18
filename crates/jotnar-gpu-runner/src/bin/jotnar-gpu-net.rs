@@ -4,7 +4,7 @@
 //! model-blind; this controller is explicitly target-aware and runs the same
 //! listing on selected GPU runners, comparing outputs with a tolerance policy.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -559,6 +559,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
     let workers = run.parallel.min(work.max(1)).max(1);
     let next = AtomicUsize::new(0);
     let ledger_lock = Mutex::new(ledger);
+    let failed_runners = Mutex::new(HashSet::new());
     let started = Instant::now();
 
     std::thread::scope(|scope| {
@@ -580,6 +581,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
                         &payload_ids,
                         &run.outputs,
                         run.max_attempts,
+                        &failed_runners,
                     ) {
                         Some(jobs) => jobs,
                         None => chunk
@@ -744,6 +746,24 @@ fn upload_payloads(cfg: &Config, selected: &[usize], payload: &Json) -> HashMap<
     payload_ids
 }
 
+fn batch_candidates(
+    group: &[usize],
+    cfg: &Config,
+    failed_runners: &Mutex<HashSet<String>>,
+) -> Vec<usize> {
+    let failed = failed_runners.lock().unwrap_or_else(|e| e.into_inner());
+    let healthy: Vec<usize> = group
+        .iter()
+        .copied()
+        .filter(|&ri| !failed.contains(&cfg.runners[ri].addr))
+        .collect();
+    if healthy.is_empty() {
+        group.to_vec()
+    } else {
+        healthy
+    }
+}
+
 fn run_batch_chunk(
     chunk: &[usize],
     batch_index: usize,
@@ -754,21 +774,29 @@ fn run_batch_chunk(
     payload_ids: &HashMap<String, String>,
     outputs: &[String],
     max_attempts: usize,
+    failed_runners: &Mutex<HashSet<String>>,
 ) -> Option<Vec<LedgerJob>> {
     let frames = chunk.len();
     let mut per_group: Vec<(Runner, usize, Vec<RunReply>)> = Vec::new();
     for group in groups {
+        let candidates = batch_candidates(group, cfg, failed_runners);
         let mut got: Option<(Runner, usize, BatchReply)> = None;
         for attempt in 1..=max_attempts {
-            let ri = group[(batch_index + attempt - 1) % group.len()];
+            let ri = candidates[(batch_index + attempt - 1) % candidates.len()];
             let r = &cfg.runners[ri];
             let reply = match payload_ids.get(&r.addr) {
                 Some(pid) => r.run_batch(listing, Some(pid), None, outputs, frames),
                 None => r.run_batch(listing, None, Some(payload), outputs, frames),
             };
-            if let Ok(reply) = reply {
-                got = Some((r.clone(), attempt, reply));
-                break;
+            match reply {
+                Ok(reply) => {
+                    got = Some((r.clone(), attempt, reply));
+                    break;
+                }
+                Err(_) => {
+                    let mut failed = failed_runners.lock().unwrap_or_else(|e| e.into_inner());
+                    failed.insert(r.addr.clone());
+                }
             }
         }
         let (runner, attempt, reply) = got?;
@@ -1134,6 +1162,42 @@ fn missing_payload_id_falls_back_to_inline() {
 }
 
 #[test]
+fn batch_candidates_skip_failed_runners() {
+    let cfg = Config {
+        runners: vec![
+            Runner {
+                target: "cuda".to_string(),
+                addr: "a".to_string(),
+                token: None,
+            },
+            Runner {
+                target: "cuda".to_string(),
+                addr: "b".to_string(),
+                token: None,
+            },
+            Runner {
+                target: "cuda".to_string(),
+                addr: "c".to_string(),
+                token: None,
+            },
+        ],
+        atol: 1e-4,
+        rtol: 1e-4,
+    };
+    let failed = Mutex::new(HashSet::from(["b".to_string()]));
+    assert_eq!(batch_candidates(&[0, 1, 2], &cfg, &failed), vec![0, 2]);
+    let all_failed = Mutex::new(HashSet::from([
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+    ]));
+    assert_eq!(
+        batch_candidates(&[0, 1, 2], &cfg, &all_failed),
+        vec![0, 1, 2]
+    );
+}
+
+#[test]
 fn batch_chunk_maps_frames_to_jobs() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1200,6 +1264,7 @@ fn batch_chunk_maps_frames_to_jobs() {
         &HashMap::new(),
         &["OUT".to_string()],
         1,
+        &Mutex::new(HashSet::new()),
     )
     .unwrap();
     server.join().unwrap();
@@ -1236,6 +1301,7 @@ fn batch_chunk_falls_back_when_no_runner_answers() {
         &HashMap::new(),
         &["OUT".to_string()],
         1,
+        &Mutex::new(HashSet::new()),
     )
     .is_none());
 }
