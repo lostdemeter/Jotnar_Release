@@ -2,7 +2,7 @@
 
 **Status:** implemented for CUDA and HIP; runner integration active; performance gate pending
 **Scope:** host-side `jotnar-gpu-runner`; CUDA and HIP targets
-**Branch:** `gpu-warm-frame-design`
+**Branch:** `gpu-warm-frame`
 
 ## Why
 
@@ -10,13 +10,15 @@ The current runner compiles once and caches the executable, but it spawns that
 executable once per job. Each job pays process launch, GPU context creation,
 kernel/module loading, and input/output file I/O.
 
-Profiling at `efc4f0c`, one warm artifact, one runner per target:
+Profiling at `efc4f0c`, one warm artifact, one runner per target. HIP is a
+gfx1100 host with ROCm 7.2.4 `hipcc`; CUDA is an sm_120 (RTX 5060) host with
+CUDA 13 `nvcc`:
 
-| MATMUL size | HIP per job | CUDA per job |
+| MATMUL size | HIP per job (ms) | CUDA per job (ms) |
 |---|---:|---:|
-| 64³ | ~126 ms | ~439 ms |
-| 256×512×256 | ~129 ms | ~443 ms |
-| 512³ | ~131 ms | ~424 ms |
+| 64³ | ~126 | ~439 |
+| 256×512×256 | ~129 | ~443 |
+| 512³ | ~131 | ~424 |
 
 The time is nearly flat across a 512× increase in work, so the fixed per-job
 cost dominates. `--parallel` hides some of it by overlapping processes, but it

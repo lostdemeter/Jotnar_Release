@@ -75,6 +75,11 @@ env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
   --cache-dir /tmp/jotnar-gpu-runner-cache --mdns
 ```
 
+`--no-warm` disables persistent workers. `--warm-cache-workers N` bounds the
+worker pool (default 8, least-recently-used eviction). Workers use `/dev/shm`
+when available; stale directories owned by dead processes are swept at startup,
+and shutdown kills a worker after a two-second grace period.
+
 Client and two-host comparison:
 
 ```sh
@@ -89,7 +94,8 @@ python3 scripts/gpu_runner_compare.py \
 
 ## Boundaries
 
-- Compile-on-host with a source/arch cache; no signed/prebuilt artifact
+- Compile-on-host with a source/arch cache, parsed-payload cache, compiled
+  artifact cache, and binary output transport; no signed/prebuilt artifact
   transport yet.
 - Trusted-LAN shared token; no TLS/mTLS. A non-loopback bind requires
   `--token`, and an empty token is rejected.
