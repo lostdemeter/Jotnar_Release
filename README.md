@@ -84,10 +84,14 @@ one half. The coordinator stitches the halves and records per-frame latency.
 [Two-node cooperative GIF](showcase/doom/doom_two_nodes.gif) ·
 [Two-node details](docs/DOOM_TWO_NODE.md)
 
+The same run can open an SDL window and forward keys to the RV32IM core, or
+close one node's network path and let the survivor take the full frame.
+
 ```sh
 ./run_doom_demo.sh                 # playable
 ./run_doom_demo.sh --frames 100    # headless
 python3 scripts/doom_two_gpu_gate.py
+python3 scripts/doom_failover_gate.py
 ```
 
 [Behind the scenes](showcase/doom/) · [RV32IM source](src/rv32.rs)

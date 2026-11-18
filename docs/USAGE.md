@@ -216,6 +216,20 @@ python3 scripts/doom_two_gpu_gate.py
 
 See [`docs/DOOM_TWO_NODE.md`](DOOM_TWO_NODE.md) and
 [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif).
+The same coordinator can open an SDL viewer and forward keys:
+
+```sh
+jotnar-doom-coord ... --viewer-listen 127.0.0.1:10000
+jotnar-doom-view --addr 127.0.0.1:10000
+```
+
+The network-outage gate closes one local proxy mid-run and checks that the
+surviving node finishes the frames:
+
+```sh
+python3 scripts/doom_failover_gate.py
+```
+
 The resource/placement model is in
 [`docs/WORKLOAD_COORDINATION.md`](WORKLOAD_COORDINATION.md).
 
@@ -267,6 +281,8 @@ jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token
 jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]
 jotnar-workload run --bundle PATH --ledger DIR --program FILE [--executor ADDR]... [--place STAGE=ADDR]...
 jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
+jotnar-doom-coord ... --viewer-listen ADDR
+jotnar-doom-view --addr ADDR
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list
 jotnar-ctl  [--addr ADDR] [--token SECRET] program <name> <file.asm> [--backend lattice]
 jotnar-ctl  [--addr ADDR] [--token SECRET] store <name> --payload <payload.json> --stream <NAME>

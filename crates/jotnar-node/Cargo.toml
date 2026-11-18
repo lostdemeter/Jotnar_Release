@@ -38,6 +38,10 @@ name = "jotnar-doom-coord"
 path = "src/bin/jotnar-doom-coord.rs"
 
 [[bin]]
+name = "jotnar-doom-view"
+path = "src/bin/jotnar-doom-view.rs"
+
+[[bin]]
 name = "jotnar-supervisord"
 path = "src/bin/jotnar-supervisord.rs"
 

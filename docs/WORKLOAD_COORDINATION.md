@@ -1,6 +1,7 @@
 # Workload coordination
 
-**Status:** first slice implemented; hardware inventory and adaptive DOOM split
+**Status:** first slice implemented; hardware inventory, adaptive split,
+interactive viewer, and single-node failover
 **Scope:** model-aware planning above the CPU, GPU, and native executors
 
 ## Position
@@ -194,6 +195,20 @@ constant.
 The coordinator records the calibration, the chosen split, per-frame job ids,
 and per-card latency in `run.json` and `frames.jsonl`.
 
+The same run now has two operational checks:
+
+- **interactive path**: `jotnar-doom-view` displays the stitched frame in an
+  SDL window and forwards keypresses to the RV32IM core over TCP;
+- **outage path**: both nodes pre-warm a full-frame fallback. If a node fails,
+  the coordinator marks it down, records the failure, and finishes the frame
+  on the survivor. The checked outage gate completes 45/45 frames in both
+  directions with exit 0. CUDA outage falls back to HIP at
+  `p50 47 ms / p95 52 ms`; HIP outage falls back to CUDA at
+  `p50 120 ms / p95 137 ms`.
+
+This is the first measured role-filling loop: calibration decides the split,
+and a runtime failure decides the fallback role.
+
 ## 7. Next slices
 
 1. **Telemetry**: executors report queue depth, running jobs, GPU utilization,
@@ -201,8 +216,8 @@ and per-card latency in `run.json` and `frames.jsonl`.
 2. **Stage descriptors**: compiler emits `jotnar.stage/1` requirements and
    legal partitions.
 3. **Leases**: reserve workers/GPU slots/memory/bandwidth; enforce admission.
-4. **Iterative rebalance**: after the chosen split, measure again and adjust
-   once; then add mid-run failover if a card misses the deadline.
+4. **Iterative rebalance and recovery**: after the chosen split, measure again
+   and adjust once; then add mid-run recovery when a failed node returns.
 5. **General streaming ABI**: move the DOOM-specific coordinator logic into a
    reusable streaming stage contract.
 6. **Link-aware placement**: use the measured RTT/bandwidth matrix for stage

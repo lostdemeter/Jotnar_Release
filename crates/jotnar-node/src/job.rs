@@ -5,7 +5,7 @@
 //! opaque to the node; the module sees only the capability operation.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use jotnar::protocol::{decode_frame, request};
@@ -15,6 +15,24 @@ use serde_json::{json, Value as Json};
 pub struct JobClient {
     pub endpoint: String,
     pub token: Option<String>,
+}
+
+fn connect_with_timeout(endpoint: &str, timeout: Duration) -> Result<TcpStream, String> {
+    let addrs = endpoint
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {endpoint}: {e}"))?;
+    let mut last = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(format!(
+        "connect {endpoint}: {}",
+        last.map(|e| e.to_string())
+            .unwrap_or_else(|| "no addresses".to_string())
+    ))
 }
 
 impl JobClient {
@@ -36,15 +54,11 @@ impl JobClient {
         fields: Json,
         payload: &[u8],
     ) -> Result<(Json, Vec<u8>), (String, String)> {
-        let mut stream = TcpStream::connect(&self.endpoint).map_err(|e| {
-            (
-                "job-unavailable".to_string(),
-                format!("connect {}: {e}", self.endpoint),
-            )
-        })?;
+        let mut stream = connect_with_timeout(&self.endpoint, Duration::from_secs(5))
+            .map_err(|e| ("job-unavailable".to_string(), e))?;
         let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(600)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(600)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
         let mut fields = fields;
         if let Some(token) = &self.token {
             if let Some(o) = fields.as_object_mut() {

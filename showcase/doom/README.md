@@ -108,6 +108,39 @@ is not yet a general streaming workload contract; the batch bundle/stage layer
 is documented in
 [`docs/WORKLOAD_CONTROLLER.md`](../../docs/WORKLOAD_CONTROLLER.md).
 
+### Play it on this machine
+
+Start the coordinator with a viewer listener, then open the SDL viewer:
+
+```sh
+./target/release/jotnar-doom-coord \
+  --image "$HOME/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin" \
+  --wad "$HOME/Documents/OpenCode/jotnar-assets/doom1.wad" \
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 \
+  --token test --start-frame 200 --frames 10000 --fps 20 \
+  --viewer-listen 127.0.0.1:10000 --out /tmp/opencode/doom_live
+
+./target/release/jotnar-doom-view --addr 127.0.0.1:10000
+```
+
+The viewer displays the stitched frame and forwards keys to the RV32IM core.
+Arrows move, ctrl fires, space uses, shift runs, esc menu, q quits.
+
+![two-node viewer](doom_two_nodes_view.png)
+
+### Network outage
+
+Both nodes pre-warm a full-frame fallback. If one node disappears, the
+coordinator marks it down and finishes the frame on the survivor:
+
+```sh
+python3 scripts/doom_failover_gate.py
+```
+
+Checked results: CUDA outage -> HIP full frame, `p50 47 ms / p95 52 ms`;
+HIP outage -> CUDA full frame, `p50 120 ms / p95 137 ms`. Both runs completed
+45/45 frames and exited 0.
+
 ## Checkpoint / migration gate
 
 ```sh

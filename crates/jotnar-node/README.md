@@ -16,6 +16,7 @@ jotnar-net           multi-node scheduler / discovery client
 jotnar-native-runner model-blind native/process executor
 jotnar-workload      model-aware bundle/stage/checkpoint controller
 jotnar-doom-coord    cooperative two-node DOOM frame coordinator
+jotnar-doom-view     SDL2 viewer and key forwarder
 ```
 
 In the image, `jotnar-noded` is installed as `/usr/local/bin/jotnar-node` so
@@ -192,8 +193,10 @@ a single-node reference. See
 `jotnar-doom-coord` is the streaming companion. It runs the RV32IM core on the
 coordinator host, calibrates the CUDA and HIP runners, splits each frame by
 measured throughput, runs the same Jotnar `INTERP` listing on both, and
-stitches the results. `scripts/doom_two_gpu_gate.py` records the annotated GIF
-and latency receipt. See
+stitches the results. `jotnar-doom-view` displays the stitched frame and
+forwards keys over TCP. `scripts/doom_two_gpu_gate.py` records the annotated
+GIF and latency receipt; `scripts/doom_failover_gate.py` closes one node's
+proxy mid-run and checks that the survivor finishes the frames. See
 [`docs/DOOM_TWO_NODE.md`](../../docs/DOOM_TWO_NODE.md) and
 [`docs/WORKLOAD_COORDINATION.md`](../../docs/WORKLOAD_COORDINATION.md).
 

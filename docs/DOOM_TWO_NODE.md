@@ -1,7 +1,7 @@
 # DOOM across two nodes
 
-**Status:** cooperative per-frame pipeline with a measured throughput split;
-GIF recorded on the live CUDA + HIP fleet
+**Status:** cooperative per-frame pipeline with measured split, interactive
+viewer, and single-node failover; GIF recorded on the live CUDA + HIP fleet
 **Artifact:** [`showcase/doom/doom_two_nodes.gif`](../showcase/doom/doom_two_nodes.gif)
 
 ## Shape
@@ -75,6 +75,59 @@ reproducible gate also annotates the frames and writes the GIF:
 python3 scripts/doom_two_gpu_gate.py
 ```
 
+## Interactive viewer
+
+Start the coordinator with a viewer listener and open the SDL window on this
+machine:
+
+```sh
+./target/release/jotnar-doom-coord \
+  --image "$HOME/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin" \
+  --wad "$HOME/Documents/OpenCode/jotnar-assets/doom1.wad" \
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 \
+  --token test --start-frame 200 --frames 10000 --fps 20 \
+  --viewer-listen 127.0.0.1:10000 \
+  --out /tmp/opencode/doom_live
+
+./target/release/jotnar-doom-view --addr 127.0.0.1:10000
+```
+
+The viewer loads SDL2 through its C ABI. It displays the stitched 640x400
+frame in a 960x600 window, puts the current mode/frame/latency in the title
+bar, and forwards key events to the coordinator over TCP. Arrows move, ctrl
+fires, space uses, shift runs, esc opens the menu, and q quits.
+
+The coordinator runs the RV32IM core and the GPU pipeline; the viewer only
+displays and forwards keys. The startup script still advances to gameplay, so
+the viewer can connect before or during the run.
+
+![two-node viewer](../showcase/doom/doom_two_nodes_view.png)
+
+## Failover
+
+Both nodes pre-warm a full-frame fallback shape at startup. If a node fails,
+the coordinator marks it down, records the error, and retries that frame on
+the surviving node with the full 320-column input. Later frames stay in
+single-node mode. The RV32IM loop and the frame writer keep running.
+
+The reproducible outage gate uses local TCP proxies in front of the real GPU
+runners, then closes one proxy mid-run:
+
+```sh
+python3 scripts/doom_failover_gate.py
+```
+
+Checked results:
+
+```text
+CUDA outage  -> hip-full   p50 47 ms, p95 52 ms, 45/45 frames, exit 0
+HIP outage   -> cuda-full  p50 120 ms, p95 137 ms, 45/45 frames, exit 0
+```
+
+The HIP outage is slower because CUDA is slower on this op, but the run still
+completes and the coordinator does not crash. The failover event includes the
+frame, failed node, error, and action.
+
 ## Receipt
 
 The checked adaptive run:
@@ -114,14 +167,26 @@ contact.png     six-frame contact sheet
 ```
 
 The checked evidence is copied to
-`/home/balrog/Documents/OpenCode/jotnaros/artifacts/doom-two-nodes/`.
+`/home/balrog/Documents/OpenCode/jotnaros/artifacts/doom-two-nodes/`:
+
+```text
+run.json, frames.jsonl, hardware.json, poster.png, contact.png
+viewer.png, viewer-key-test.jsonl
+viewer-failover.png
+failover/summary.json, failover/cuda-outage.log, failover/hip-outage.log
+```
 
 ## Limits
 
 - The GPU op is a 2x bilinear upscale, not a full distributed renderer. The
   RV32IM renderer still runs on node A.
 - The split is chosen at startup from a calibration probe. It does not yet
-  rebalance mid-run or fail over a stalled card.
+  rebalance mid-run or recover a failed node.
+- Failover switches to a single node for the rest of the run. The full-frame
+  fallback is pre-warmed, so the surviving node does not pay artifact build in
+  the failover frame.
+- The viewer protocol is a simple length-prefixed frame stream and JSON key
+  messages; it has no authentication beyond the trusted-LAN assumption.
 - The coordinator is DOOM-specific. A general streaming stage ABI is future
   work; the batch bundle/stage layer is separate.
 - The first frame pays artifact build and warm-worker startup. The receipt
