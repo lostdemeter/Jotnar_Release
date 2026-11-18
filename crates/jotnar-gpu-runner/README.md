@@ -89,10 +89,13 @@ env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
 ```
 
 `--no-warm` disables persistent workers. `--warm-cache-workers N` bounds the
-worker pool (default 8, least-recently-used eviction). Workers use `/dev/shm`
-when available; at startup the runner sweeps directories owned by dead
-processes, plus unowned directories older than ten minutes (the pre-owner
-layout), and shutdown kills a worker after a two-second grace period.
+worker pool (default 8, least-recently-used eviction).
+`--payload-cache-bytes` bounds parsed payloads (default 256 MiB), and
+`--artifact-cache-entries` bounds compiled artifacts (default 64, LRU).
+Workers use `/dev/shm` when available; at startup the runner sweeps
+directories owned by dead processes, plus unowned directories older than ten
+minutes (the pre-owner layout), and shutdown kills a worker after a two-second
+grace period.
 
 Client and two-host comparison:
 
@@ -108,8 +111,8 @@ python3 scripts/gpu_runner_compare.py \
 
 ## Boundaries
 
-- Compile-on-host with a source/arch cache, parsed-payload cache, compiled
-  artifact cache, and binary output transport; no signed/prebuilt artifact
+- Compile-on-host with a source/arch cache, bounded parsed-payload and compiled
+  artifact caches, and binary output transport; no signed/prebuilt artifact
   transport yet.
 - Trusted-LAN shared token; no TLS/mTLS. A non-loopback bind requires
   `--token`, and an empty token is rejected.

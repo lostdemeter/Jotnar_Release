@@ -53,7 +53,7 @@ struct Config {
     warm: bool,
     warm_cache: Arc<Mutex<warm::WarmCache>>,
     payload_cache: Arc<Mutex<PayloadCache>>,
-    artifact_cache: Arc<Mutex<HashMap<String, Arc<Artifact>>>>,
+    artifact_cache: Arc<Mutex<ArtifactCache>>,
 }
 
 struct CachedPayload {
@@ -106,6 +106,44 @@ impl PayloadCache {
     }
 }
 
+struct ArtifactCache {
+    map: HashMap<String, Arc<Artifact>>,
+    order: VecDeque<String>,
+    limit: usize,
+}
+
+impl ArtifactCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Arc<Artifact>> {
+        let value = self.map.get(key).cloned();
+        if value.is_some() {
+            if let Some(pos) = self.order.iter().position(|k| k == key) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(key.to_string());
+        }
+        value
+    }
+
+    fn put(&mut self, key: String, value: Arc<Artifact>) {
+        if self.map.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
+        }
+        while self.map.len() > self.limit {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+}
+
 fn usage() -> &'static str {
     "jotnar-gpu-runner — host-side HIP/CUDA job runner\n\
      \n\
@@ -153,6 +191,7 @@ fn real_main() -> Result<(), String> {
     let mut warm = true;
     let mut warm_cache_workers = 8usize;
     let mut payload_cache_bytes = 256 * 1024 * 1024usize;
+    let mut artifact_cache_entries = 64usize;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -207,6 +246,14 @@ fn real_main() -> Result<(), String> {
                     .parse()
                     .map_err(|e| format!("bad --payload-cache-bytes: {e}"))?;
             }
+            "--artifact-cache-entries" => {
+                i += 1;
+                artifact_cache_entries = args
+                    .get(i)
+                    .ok_or("--artifact-cache-entries needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --artifact-cache-entries: {e}"))?;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -233,7 +280,7 @@ fn real_main() -> Result<(), String> {
         warm,
         warm_cache: Arc::new(Mutex::new(warm::WarmCache::new(warm_cache_workers))),
         payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
-        artifact_cache: Arc::new(Mutex::new(HashMap::new())),
+        artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(artifact_cache_entries))),
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     let port = listener
@@ -533,8 +580,8 @@ fn run_impl(
     };
     let artifact_key = artifact_key(listing, &outputs, &feeds, use_fp16, cfg.target);
     let cached_art = {
-        let cache = cfg.artifact_cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.get(&artifact_key).cloned()
+        let mut cache = cfg.artifact_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(&artifact_key)
     };
     let (artifact, compile_ms) = if let Some(artifact) = cached_art {
         (artifact, 0)
@@ -546,7 +593,7 @@ fn run_impl(
         );
         let compile_ms = t0.elapsed().as_millis();
         let mut cache = cfg.artifact_cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.insert(artifact_key, artifact.clone());
+        cache.put(artifact_key, artifact.clone());
         (artifact, compile_ms)
     };
     let dir = tempfile::Builder::new()
@@ -1115,4 +1162,36 @@ fn payload_cache_reuses_and_evicts() {
     cache.put("b".to_string(), feeds, 8);
     assert!(cache.get("a").is_none());
     assert!(cache.get("b").is_some());
+}
+
+#[cfg(test)]
+mod artifact_cache_tests {
+    use super::ArtifactCache;
+    use std::sync::Arc;
+
+    fn artifact(name: &str) -> Arc<jotnar::codegen::Artifact> {
+        Arc::new(jotnar::codegen::Artifact {
+            source: name.to_string(),
+            streams: Default::default(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            source_inputs: Vec::new(),
+            source_outputs: Vec::new(),
+            config: jotnar::ir::Config::default(),
+            n_argv: 0,
+            warm_frame: false,
+        })
+    }
+
+    #[test]
+    fn artifact_cache_evicts_lru() {
+        let mut cache = ArtifactCache::new(2);
+        cache.put("a".into(), artifact("a"));
+        cache.put("b".into(), artifact("b"));
+        assert!(cache.get("a").is_some());
+        cache.put("c".into(), artifact("c"));
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+    }
 }
