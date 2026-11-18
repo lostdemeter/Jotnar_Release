@@ -220,6 +220,8 @@ The front door is deliberately short. The actual parts are here:
 - node OS: async jobs, supervisor, emitted system modules, scheduler, image:
   [`crates/jotnar-node/`](crates/jotnar-node/),
   [`showcase/node-os/`](showcase/node-os/)
+- GPU runner and scheduler (HIP/CUDA over framed TCP, opt-in warm frames):
+  [`crates/jotnar-gpu-runner/`](crates/jotnar-gpu-runner/)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
 - opt-in stream arena, allocation discipline, and flat payloads:
@@ -243,7 +245,7 @@ Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-392/392 workspace tests
+393/393 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 

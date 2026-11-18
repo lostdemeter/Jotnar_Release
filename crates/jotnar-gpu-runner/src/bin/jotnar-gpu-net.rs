@@ -252,7 +252,8 @@ fn batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
             }
         })
         .collect();
-    dir.join(format!("{safe}.json"))
+    let hash = format!("{:016x}", hash_bytes(batch_id.as_bytes()));
+    dir.join(format!("{safe}-{hash}.json"))
 }
 
 fn save_ledger(path: &Path, ledger: &Ledger) -> Result<(), String> {
@@ -461,6 +462,7 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         if let Some(mut summary) = ledger.summary.clone() {
             if let Some(o) = summary.as_object_mut() {
                 o.insert("cached".into(), json!(true));
+                o.insert("jobs_per_s".into(), Json::Null);
             }
             println!("{}", serde_json::to_string_pretty(&summary).unwrap());
             return Ok(());
@@ -825,7 +827,13 @@ mod tests {
 fn ledger_path_and_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = batch_ledger_path(dir.path(), "a/b c");
-    assert_eq!(path.file_name().unwrap(), "a_b_c.json");
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with("a_b_c-"));
+    assert!(name.ends_with(".json"));
+    assert_ne!(
+        batch_ledger_path(dir.path(), "a/b"),
+        batch_ledger_path(dir.path(), "a_b")
+    );
     let ledger = Ledger {
         v: 1,
         batch_id: "a/b c".to_string(),

@@ -70,6 +70,22 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+fn is_loopback_bind(bind: &str) -> bool {
+    if bind == "localhost" {
+        return true;
+    }
+    if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&bind) {
+        let ips: Vec<std::net::IpAddr> = addrs.map(|a| a.ip()).collect();
+        if !ips.is_empty() {
+            return ips.iter().all(|ip| ip.is_loopback());
+        }
+    }
+    false
+}
+
 fn real_main() -> Result<(), String> {
     let mut bind = DEFAULT_BIND.to_string();
     let mut token = None;
@@ -118,6 +134,15 @@ fn real_main() -> Result<(), String> {
         i += 1;
     }
     let target = target.ok_or("--target hip|cuda is required")?;
+    if token.as_deref().map(str::trim).is_some_and(str::is_empty) {
+        return Err("--token must not be empty".to_string());
+    }
+    if !is_loopback_bind(&bind) && token.is_none() {
+        return Err(format!(
+            "refusing non-loopback bind {bind} without --token\n\n{}",
+            usage()
+        ));
+    }
     let cfg = Config {
         bind,
         token,
@@ -589,5 +614,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1.5, 2.5]
         );
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::is_loopback_bind;
+
+    #[test]
+    fn loopback_bind_guard() {
+        assert!(is_loopback_bind("127.0.0.1:9997"));
+        assert!(is_loopback_bind("localhost:9997"));
+        assert!(is_loopback_bind("[::1]:9997"));
+        assert!(!is_loopback_bind("0.0.0.0:9997"));
+        assert!(!is_loopback_bind("[::]:9997"));
     }
 }

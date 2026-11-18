@@ -83,16 +83,19 @@ python3 scripts/gpu_runner_compare.py \
 
 ## Boundaries
 
-- Compile-on-host with a source/arch cache; no signed/prebuilt artifact
+- Compile-on-host with a source/arch cache, parsed-payload cache, compiled
+  artifact cache, and binary output transport; no signed/prebuilt artifact
   transport yet.
-- Trusted-LAN shared token; no TLS/mTLS.
+- Trusted-LAN shared token; no TLS/mTLS. A non-loopback bind requires
+  `--token`, and an empty token is rejected.
 - No GPU passthrough into the Alpine node.
 - Target-aware by design; not part of the model-blind node or the language
   contract.
 - Current slices: HIP 51 CUDA-equivalent mnemonics; CUDA 65. Integer results
   can be compared exactly; float cross-vendor results need tolerance.
-- No scheduler integration yet; the next step is target-aware placement in
-  `jotnar-net`.
+- The target-aware scheduler lives in this crate (`jotnar-gpu-net`) and stays
+  separate from `jotnar-net`; capability exchange is still an open design
+  choice.
 
 ## Scheduler
 
