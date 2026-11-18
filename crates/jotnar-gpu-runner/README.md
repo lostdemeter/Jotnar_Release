@@ -77,8 +77,9 @@ env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
 
 `--no-warm` disables persistent workers. `--warm-cache-workers N` bounds the
 worker pool (default 8, least-recently-used eviction). Workers use `/dev/shm`
-when available; stale directories owned by dead processes are swept at startup,
-and shutdown kills a worker after a two-second grace period.
+when available; at startup the runner sweeps directories owned by dead
+processes, plus unowned directories older than ten minutes (the pre-owner
+layout), and shutdown kills a worker after a two-second grace period.
 
 Client and two-host comparison:
 

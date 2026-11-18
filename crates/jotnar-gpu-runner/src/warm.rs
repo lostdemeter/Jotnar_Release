@@ -94,11 +94,21 @@ fn warm_base() -> PathBuf {
 }
 
 fn sweep_stale_workers() {
+    sweep_stale_workers_in(&warm_base(), Duration::from_secs(600));
+}
+
+/// Remove worker directories left by dead runners.
+///
+/// A live worker always has an `owner` file (startup fails if it cannot write
+/// one), so a directory with no owner marker can only come from a runner that
+/// died before the marker existed, or from a pre-owner build. Those are
+/// removed once they are older than `stale_after`, so a worker that is still
+/// starting up is not mistaken for debris.
+fn sweep_stale_workers_in(base: &Path, stale_after: Duration) {
     if !cfg!(target_os = "linux") {
         return;
     }
-    let base = warm_base();
-    let Ok(entries) = std::fs::read_dir(&base) else {
+    let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
     for entry in entries.flatten() {
@@ -106,15 +116,35 @@ fn sweep_stale_workers() {
         if !name.to_string_lossy().starts_with("jotnar-warm-") {
             continue;
         }
-        let Ok(owner) = std::fs::read_to_string(entry.path().join("owner")) else {
-            continue;
-        };
-        let Ok(pid) = owner.trim().parse::<u32>() else {
-            continue;
-        };
-        if !Path::new("/proc").join(pid.to_string()).exists() {
-            let _ = std::fs::remove_dir_all(entry.path());
+        let path = entry.path();
+        match std::fs::read_to_string(path.join("owner")) {
+            Ok(owner) => {
+                if let Ok(pid) = owner.trim().parse::<u32>() {
+                    if !Path::new("/proc").join(pid.to_string()).exists() {
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
+            }
+            // Only an absent marker is debris; never delete a directory whose
+            // marker exists but cannot be read or parsed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                sweep_if_old(&path, &entry, stale_after);
+            }
+            Err(_) => {}
         }
+    }
+}
+
+fn sweep_if_old(path: &Path, entry: &std::fs::DirEntry, stale_after: Duration) {
+    let old = entry
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|age| age >= stale_after)
+        .unwrap_or(false);
+    if old {
+        let _ = std::fs::remove_dir_all(path);
     }
 }
 
@@ -356,26 +386,60 @@ impl Drop for WarmWorker {
 mod tests {
     use super::*;
 
-    fn temp_warm_dir(prefix: &str) -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix(prefix)
-            .tempdir_in(warm_base())
-            .unwrap()
+    fn base() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn worker_dir(base: &Path, name: &str) -> PathBuf {
+        let p = base.join(name);
+        std::fs::create_dir(&p).unwrap();
+        p
     }
 
     #[test]
     fn sweep_removes_dead_owner() {
-        let dir = temp_warm_dir("jotnar-warm-test-dead-");
-        std::fs::write(dir.path().join("owner"), "4294967295").unwrap();
-        sweep_stale_workers();
-        assert!(!dir.path().exists());
+        let b = base();
+        let d = worker_dir(b.path(), "jotnar-warm-dead");
+        std::fs::write(d.join("owner"), "4294967295").unwrap();
+        sweep_stale_workers_in(b.path(), Duration::from_secs(3600));
+        assert!(!d.exists());
     }
 
     #[test]
     fn sweep_keeps_live_owner() {
-        let dir = temp_warm_dir("jotnar-warm-test-live-");
-        std::fs::write(dir.path().join("owner"), std::process::id().to_string()).unwrap();
-        sweep_stale_workers();
-        assert!(dir.path().exists());
+        let b = base();
+        let d = worker_dir(b.path(), "jotnar-warm-live");
+        std::fs::write(d.join("owner"), std::process::id().to_string()).unwrap();
+        sweep_stale_workers_in(b.path(), Duration::ZERO);
+        assert!(d.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_recent_unowned_then_removes_it() {
+        let b = base();
+        let d = worker_dir(b.path(), "jotnar-warm-unowned");
+        // A fresh directory could still be starting up.
+        sweep_stale_workers_in(b.path(), Duration::from_secs(3600));
+        assert!(d.exists());
+        // Once the grace period has elapsed it is debris.
+        sweep_stale_workers_in(b.path(), Duration::ZERO);
+        assert!(!d.exists());
+    }
+
+    #[test]
+    fn sweep_ignores_other_directories() {
+        let b = base();
+        let d = worker_dir(b.path(), "not-a-worker");
+        sweep_stale_workers_in(b.path(), Duration::ZERO);
+        assert!(d.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_malformed_owner() {
+        let b = base();
+        let d = worker_dir(b.path(), "jotnar-warm-malformed");
+        std::fs::write(d.join("owner"), "not-a-pid").unwrap();
+        sweep_stale_workers_in(b.path(), Duration::ZERO);
+        assert!(d.exists());
     }
 }
