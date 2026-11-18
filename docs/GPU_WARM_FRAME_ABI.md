@@ -214,6 +214,8 @@ Lifecycle:
 - serialize frames per worker with a lock;
 - keep at most `--warm-cache-workers` workers (default 8), evicting the
   least-recently-used key;
+- release workers idle for `--warm-idle-ms` (default 300000; `0` disables)
+  when no request holds them;
 - restart on nonzero status or child exit;
 - on shutdown, send the stop token, wait two seconds, then kill;
 - sweep `/dev/shm/jotnar-warm-*` directories whose owner pid is gone at

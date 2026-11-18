@@ -107,7 +107,8 @@ env NVCC="$HOME/.local/lib/python3.12/site-packages/nvidia/cu13/bin/nvcc" \
 worker pool (default 8, least-recently-used eviction).
 `--payload-cache-bytes` bounds parsed payloads (default 256 MiB), and
 `--artifact-cache-entries` bounds compiled artifacts (default 64, LRU).
-Workers use `/dev/shm` when available; at startup the runner sweeps
+`--warm-idle-ms` releases workers idle for that long (default 300000; `0`
+disables). Workers use `/dev/shm` when available; at startup the runner sweeps
 directories owned by dead processes, plus unowned directories older than ten
 minutes (the pre-owner layout), and shutdown kills a worker after a two-second
 grace period.
@@ -181,8 +182,13 @@ runner for a target has failed, the scheduler tries the group again.
 The controller uploads the batch payload once per runner with
 `payload-put`, then sends only the payload id per job. The runner caches parsed
 payloads and compiled artifacts; large outputs use binary transport. The summary
-reports `batch_frames`, `chunks`, and `warm_runs` alongside wall time and
-throughput.
+reports `batch_frames`, `chunks`, `warm_runs`, and `prewarm_ms` alongside wall
+time and throughput.
+
+Scheduler replies are validated before hashing: every requested output must be
+present, have a known kind, integer shape, and exactly the shape-many values.
+A malformed single reply is retried; a malformed batch falls back to the
+per-job path.
 
 ## Warm frames
 
