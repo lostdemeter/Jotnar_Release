@@ -241,8 +241,8 @@ fn default_batch_id() -> String {
     format!("gpu-batch-{}-{}", now_ms() / 1000, std::process::id())
 }
 
-fn batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
-    let safe: String = batch_id
+fn sanitize_batch_id(batch_id: &str) -> String {
+    batch_id
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -251,9 +251,17 @@ fn batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+fn batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
+    let safe = sanitize_batch_id(batch_id);
     let hash = format!("{:016x}", hash_bytes(batch_id.as_bytes()));
     dir.join(format!("{safe}-{hash}.json"))
+}
+
+fn legacy_batch_ledger_path(dir: &Path, batch_id: &str) -> PathBuf {
+    dir.join(format!("{}.json", sanitize_batch_id(batch_id)))
 }
 
 fn save_ledger(path: &Path, ledger: &Ledger) -> Result<(), String> {
@@ -424,16 +432,27 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         count: run.count,
     };
     let path = batch_ledger_path(&run.ledger, &run.batch_id);
-    let existed = path.exists();
+    let mut read_path = path.clone();
+    if !read_path.exists() {
+        let legacy = legacy_batch_ledger_path(&run.ledger, &run.batch_id);
+        if let Ok(text) = std::fs::read_to_string(&legacy) {
+            if let Ok(l) = serde_json::from_str::<Ledger>(&text) {
+                if l.batch_id == run.batch_id {
+                    read_path = legacy;
+                }
+            }
+        }
+    }
+    let existed = read_path.exists();
     let ledger = if existed {
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let l: Ledger =
-            serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(&read_path)
+            .map_err(|e| format!("read {}: {e}", read_path.display()))?;
+        let l: Ledger = serde_json::from_str(&text)
+            .map_err(|e| format!("parse {}: {e}", read_path.display()))?;
         if l.spec != spec {
             return Err(format!(
                 "ledger {} is for a different spec (target/outputs/count/listing/payload)",
-                path.display()
+                read_path.display()
             ));
         }
         l
@@ -936,6 +955,10 @@ fn ledger_path_and_roundtrip() {
     assert_ne!(
         batch_ledger_path(dir.path(), "a/b"),
         batch_ledger_path(dir.path(), "a_b")
+    );
+    assert_eq!(
+        legacy_batch_ledger_path(dir.path(), "a/b c"),
+        dir.path().join("a_b_c.json")
     );
     let ledger = Ledger {
         v: 1,
