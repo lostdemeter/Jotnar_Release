@@ -270,7 +270,11 @@ group is retried.
 
 ### Prewarm
 
-`warm-prepare` compiles/builds and starts the worker without running a frame.
+`warm-prepare` compiles/builds, starts the worker, and runs one warm-up frame
+so the first real frame does not pay lazy kernel initialization. Send
+`"warmup": false` to only start the worker. The response reports
+`worker_start_ms`, `warmup_ms`, and `worker_reused`.
+
 The scheduler's `--prewarm` calls it once per selected runner before the
 measured batch and reports `prewarm_ms` separately from `wall_ms`. A failed
 prewarm marks that runner failed for the batch, so jobs go straight to a live

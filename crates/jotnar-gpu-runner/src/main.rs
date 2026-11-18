@@ -490,7 +490,7 @@ fn run(
     header: &Json,
     payload: &[u8],
 ) -> Result<(), String> {
-    run_impl(stream, cfg, id, header, payload, 1, false, false)
+    run_impl(stream, cfg, id, header, payload, 1, false, false, false)
 }
 
 fn run_batch(
@@ -512,7 +512,7 @@ fn run_batch(
             &format!("run-batch frames must be 1..={MAX_BATCH_FRAMES}"),
         );
     }
-    run_impl(stream, cfg, id, header, payload, frames, true, false)
+    run_impl(stream, cfg, id, header, payload, frames, true, false, false)
 }
 
 fn warm_prepare(
@@ -522,7 +522,11 @@ fn warm_prepare(
     header: &Json,
     payload: &[u8],
 ) -> Result<(), String> {
-    run_impl(stream, cfg, id, header, payload, 1, false, true)
+    let warmup = header
+        .get("warmup")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    run_impl(stream, cfg, id, header, payload, 1, false, true, warmup)
 }
 
 fn run_impl(
@@ -534,6 +538,7 @@ fn run_impl(
     frames: usize,
     batch: bool,
     prepare: bool,
+    warmup: bool,
 ) -> Result<(), String> {
     let requested_target = header
         .get("target")
@@ -640,7 +645,9 @@ fn run_impl(
             "compile_ms": compile_ms,
             "build_ms": build_ms,
             "worker_start_ms": 0,
+            "warmup_ms": 0,
             "warm": false,
+            "warmup": false,
             "worker_reused": false,
             "cache_hit": cache_hit,
         });
@@ -655,19 +662,31 @@ fn run_impl(
             cache.get_or_create(&spec)?
         };
         if prepare {
+            let mut worker = worker.lock().unwrap_or_else(|e| e.into_inner());
             let worker_start_ms = if worker_started {
-                worker
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .startup_ms()
+                worker.startup_ms()
             } else {
                 0
             };
+            let mut warmup_ms = 0;
+            if warmup {
+                let t = Instant::now();
+                if let Err(e) = worker.run_frame(&feeds) {
+                    drop(worker);
+                    let mut cache = cfg.warm_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    cache.remove(&cache_key);
+                    return Err(e);
+                }
+                warmup_ms = t.elapsed().as_millis();
+            }
+            drop(worker);
             let timing = json!({
                 "compile_ms": compile_ms,
                 "build_ms": build_ms,
                 "worker_start_ms": worker_start_ms,
+                "warmup_ms": warmup_ms,
                 "warm": true,
+                "warmup": warmup,
                 "worker_reused": !worker_started,
                 "cache_hit": cache_hit,
             });
@@ -855,6 +874,8 @@ fn send_prepare(
         "outputs": artifact.outputs,
         "warm": field("warm"),
         "worker_start_ms": field("worker_start_ms"),
+        "warmup_ms": field("warmup_ms"),
+        "warmup": field("warmup"),
         "worker_reused": field("worker_reused"),
         "compile_ms": field("compile_ms"),
         "build_ms": field("build_ms"),

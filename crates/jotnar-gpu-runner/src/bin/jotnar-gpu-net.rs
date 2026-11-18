@@ -548,8 +548,8 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
         for &ri in &selected {
             let r = &cfg.runners[ri];
             let reply = match payload_ids.get(&r.addr) {
-                Some(pid) => r.prepare(&listing, Some(pid), None, &run.outputs),
-                None => r.prepare(&listing, None, Some(&payload), &run.outputs),
+                Some(pid) => r.prepare(&listing, Some(pid), None, &run.outputs, true),
+                None => r.prepare(&listing, None, Some(&payload), &run.outputs, true),
             };
             match reply {
                 Ok(reply) => prewarm.push(json!({
@@ -558,6 +558,8 @@ fn run_jobs(cfg: &Config, run: RunArgs) -> Result<(), String> {
                     "ok": true,
                     "warm": reply.header.get("warm").cloned().unwrap_or(Json::Null),
                     "worker_start_ms": reply.header.get("worker_start_ms").cloned().unwrap_or(Json::Null),
+                    "warmup_ms": reply.header.get("warmup_ms").cloned().unwrap_or(Json::Null),
+                    "warmup": reply.header.get("warmup").cloned().unwrap_or(Json::Null),
                     "worker_reused": reply.header.get("worker_reused").cloned().unwrap_or(Json::Null),
                     "compile_ms": reply.header.get("compile_ms").cloned().unwrap_or(Json::Null),
                     "build_ms": reply.header.get("build_ms").cloned().unwrap_or(Json::Null),

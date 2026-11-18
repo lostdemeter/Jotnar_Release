@@ -248,8 +248,13 @@ impl Runner {
         payload_id: Option<&str>,
         payload: Option<&Json>,
         outputs: &[String],
+        warmup: bool,
     ) -> Result<PrepareReply, String> {
-        let mut fields = json!({"target": self.target, "outputs": outputs});
+        let mut fields = json!({
+            "target": self.target,
+            "outputs": outputs,
+            "warmup": warmup,
+        });
         let mut body = json!({"listing": listing});
         match (payload_id, payload) {
             (Some(pid), _) => {
@@ -427,7 +432,7 @@ mod tests {
             token: None,
         };
         let reply = runner
-            .prepare("listing", Some("payload"), None, &["OUT".to_string()])
+            .prepare("listing", Some("payload"), None, &["OUT".to_string()], true)
             .unwrap();
         server.join().unwrap();
         assert_eq!(reply.header["warm"], true);

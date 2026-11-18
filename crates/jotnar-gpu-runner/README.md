@@ -52,10 +52,12 @@ frame:
  "payload_id":"a86e11ef3b2b8bf5", "auth":"..."}
 ```
 
-It returns `warm-prepare-ok` with `warm`, `worker_start_ms`,
-`worker_reused`, `compile_ms`, `build_ms`, and `cache_hit`. Repeated prepares
-reuse the worker. If the runner is started with `--no-warm`, it returns
-`warm:false` after the build.
+It returns `warm-prepare-ok` with `warm`, `worker_start_ms`, `warmup_ms`,
+`warmup`, `worker_reused`, `compile_ms`, `build_ms`, and `cache_hit`. The
+request runs one warm-up frame by default so the first real frame does not pay
+lazy kernel initialization; send `"warmup": false` to only start the worker.
+Repeated prepares reuse the worker. If the runner is started with `--no-warm`,
+it returns `warm:false` after the build.
 
 payload:
 
@@ -166,8 +168,9 @@ the pool for each selected target. `--count` submits N copies and `--parallel`
 sets the number of concurrent job workers. `--batch-frames N` sends up to N
 jobs per `run-batch` request (default 1, maximum 64); `--parallel` is the
 number of concurrent chunks. `--prewarm` prepares every selected runner before
-the measured batch, so worker startup is reported separately as `prewarm_ms`
-and excluded from `wall_ms`. `--ledger` defaults to `artifacts/gpu-batches`; a
+the measured batch, including one warm-up frame, so worker startup and lazy
+kernel initialization are reported separately as `prewarm_ms` and excluded
+from `wall_ms`. `--ledger` defaults to `artifacts/gpu-batches`; a
 repeated `--batch-id` resumes pending jobs and replays a completed batch from
 its cached summary. Failures retry across the target pool up to
 `--max-attempts`. If a batch request fails or the runner does not support it,
