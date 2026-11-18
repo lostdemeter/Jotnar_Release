@@ -161,7 +161,7 @@ parity gate measures rather than hides.
 | `cudaGetLastError`, `cudaDeviceSynchronize` | `hipGetLastError`, `hipDeviceSynchronize` | after every launch |
 | `kernel<<<grid, block>>>(args)` | `hipLaunchKernelGGL(kernel, dim3(grid), dim3(block), 0, 0, args)` | explicit HIP launch |
 | `atomicExch`, `rsqrtf`, `expf`, `powf`, `sinf`, `cosf`, `floorf` | unchanged | HIP device intrinsics |
-| `nvcc`, `.cu`, `-gencode arch=compute_86,code=sm_86` | `hipcc`, `.hip`, auto-detected offload arch | optional `HIP_ARCH=gfx1100` to pin |
+| `nvcc`, `.cu`, `-gencode arch=compute_<N>,code=sm_<N>` | `hipcc`, `.hip`, auto-detected offload arch | optional `CUDA_ARCH` (default `sm_86`) / `HIP_ARCH=gfx1100` |
 | `-l:libcublas.so.13` | none | no library symbols are emitted |
 
 The CUDA `grid_expr` 65535-block cap is retained. AMD grid-x is much larger,
