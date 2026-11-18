@@ -26,6 +26,16 @@ impl JobClient {
     }
 
     fn call(&self, typ: &str, fields: Json, payload: &[u8]) -> Result<Json, (String, String)> {
+        self.call_frame(typ, fields, payload)
+            .map(|(header, _)| header)
+    }
+
+    fn call_frame(
+        &self,
+        typ: &str,
+        fields: Json,
+        payload: &[u8],
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
         let mut stream = TcpStream::connect(&self.endpoint).map_err(|e| {
             (
                 "job-unavailable".to_string(),
@@ -61,7 +71,7 @@ impl JobClient {
         let mut full = Vec::with_capacity(4 + n);
         full.extend_from_slice(&hdr);
         full.extend_from_slice(&body);
-        let (header, _) =
+        let (header, response) =
             decode_frame(&full).map_err(|e| ("job-invalid".to_string(), e.to_string()))?;
         if header.get("ok").and_then(|x| x.as_bool()) != Some(true) {
             let err = header.get("error").cloned().unwrap_or(json!({}));
@@ -76,11 +86,19 @@ impl JobClient {
                     .to_string(),
             ));
         }
-        Ok(header)
+        Ok((header, response.to_vec()))
     }
 
     pub fn submit(&self, args: &Json) -> Result<Json, (String, String)> {
         self.call("submit", args.clone(), &[])
+    }
+
+    pub fn submit_frame(
+        &self,
+        args: &Json,
+        payload: &[u8],
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.call_frame("submit", args.clone(), payload)
     }
 
     pub fn status(&self, job_id: &str) -> Result<Json, (String, String)> {
@@ -89,6 +107,10 @@ impl JobClient {
 
     pub fn cancel(&self, job_id: &str) -> Result<Json, (String, String)> {
         self.call("job-cancel", json!({"job_id": job_id}), &[])
+    }
+
+    pub fn result(&self, job_id: &str) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.call_frame("job-result", json!({"job_id": job_id}), &[])
     }
 
     pub fn list(&self) -> Result<Json, (String, String)> {

@@ -18,11 +18,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
 
+use jotnar_node_tools::executor::{Executor, RemoteExecutor};
+
 #[path = "../sched.rs"]
 mod sched;
 
 use sched::{
-    batch_ledger_path, discover, discover_capabilities, health, run_batch, BatchSpec, NodeSpec,
+    batch_ledger_path, discover, discover_capabilities, discover_gpu, health, run_batch, BatchSpec,
+    NodeSpec,
 };
 
 fn usage() -> &'static str {
@@ -38,12 +41,16 @@ fn usage() -> &'static str {
          [--max-attempts N] [--batch-id ID] [--receipts FILE]\n\
        jotnar-net [--token T] [--discover] [--discover-timeout-ms N] discover\n\
        jotnar-net [--discover-timeout-ms N] capabilities\n\
+       jotnar-net [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] \\\n\
+         --payload FILE --outputs a,b [--frames N] [--count N]\n\
      \n\
      --node may be repeated; --nodes reads one 'addr [token]' per line.\n\
      --ledger defaults to artifacts/batches. --discover browses\n\
      _jotnar-node._tcp and adds discovered ads; tokens are trusted-LAN secrets.\n\
      capabilities merges _jotnar-node and _jotnar-gpu ads into one capability\n\
-     list; it is discovery only and never bypasses a node token check.\n"
+     list; it is discovery only and never bypasses a node token check.\n\
+     gpu routes one stage to a GPU runner through the common executor\n\
+     contract (submit/job-status/job-result).\n"
 }
 
 struct Config {
@@ -192,6 +199,187 @@ struct RunArgs {
     receipts: Option<PathBuf>,
 }
 
+struct GpuArgs {
+    listing: PathBuf,
+    addr: Option<String>,
+    target: Option<String>,
+    payload: PathBuf,
+    outputs: Vec<String>,
+    frames: usize,
+    count: usize,
+}
+
+fn parse_gpu(args: Vec<String>) -> Result<GpuArgs, String> {
+    let mut it = args.into_iter();
+    let listing = PathBuf::from(it.next().ok_or("gpu needs <listing.asm>")?);
+    let mut addr = None;
+    let mut target = None;
+    let mut payload = None;
+    let mut outputs = None;
+    let mut frames = 1usize;
+    let mut count = 1usize;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--addr" => addr = Some(it.next().ok_or("--addr needs an address")?),
+            "--target" => target = Some(it.next().ok_or("--target needs hip or cuda")?),
+            "--payload" => {
+                payload = Some(PathBuf::from(it.next().ok_or("--payload needs a file")?))
+            }
+            "--outputs" => {
+                outputs = Some(
+                    it.next()
+                        .ok_or("--outputs needs a comma list")?
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            "--frames" => {
+                frames = it
+                    .next()
+                    .ok_or("--frames needs a number")?
+                    .parse()
+                    .map_err(|_| "--frames must be an integer")?
+            }
+            "--count" => {
+                count = it
+                    .next()
+                    .ok_or("--count needs a number")?
+                    .parse()
+                    .map_err(|_| "--count must be an integer")?
+            }
+            other => return Err(format!("unknown gpu argument '{other}'")),
+        }
+    }
+    if let Some(target) = &target {
+        if !matches!(target.as_str(), "hip" | "cuda") {
+            return Err("--target must be hip or cuda".to_string());
+        }
+    }
+    Ok(GpuArgs {
+        listing,
+        addr,
+        target,
+        payload: payload.ok_or("gpu needs --payload FILE")?,
+        outputs: outputs.ok_or("gpu needs --outputs a,b")?,
+        frames: frames.max(1),
+        count: count.max(1),
+    })
+}
+
+fn run_gpu(cfg: &Config, args: Vec<String>) -> Result<Json, String> {
+    let args = parse_gpu(args)?;
+    let listing = std::fs::read_to_string(&args.listing)
+        .map_err(|e| format!("read {}: {e}", args.listing.display()))?;
+    let payload_text = std::fs::read_to_string(&args.payload)
+        .map_err(|e| format!("read {}: {e}", args.payload.display()))?;
+    let payload: Json = serde_json::from_str(&payload_text).map_err(|e| e.to_string())?;
+    let (addr, capability) = match args.addr.clone() {
+        Some(addr) => (
+            addr.clone(),
+            json!({"kind": "gpu", "addr": addr, "target": args.target}),
+        ),
+        None => {
+            let caps = discover_gpu(Duration::from_millis(cfg.discover_timeout_ms.max(1)))?;
+            let cap = caps
+                .iter()
+                .find(|cap| {
+                    args.target
+                        .as_deref()
+                        .map(|t| cap.get("target").and_then(|x| x.as_str()) == Some(t))
+                        .unwrap_or(true)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no GPU runner for target {}",
+                        args.target.as_deref().unwrap_or("any")
+                    )
+                })?
+                .clone();
+            let addrs = cap
+                .get("addrs")
+                .and_then(|x| x.as_array())
+                .ok_or("GPU capability has no addrs")?;
+            let chosen = addrs
+                .iter()
+                .filter_map(|a| a.as_str())
+                .find(|a| !a.starts_with("127."))
+                .or_else(|| addrs.iter().filter_map(|a| a.as_str()).next())
+                .ok_or("GPU capability has no usable address")?
+                .to_string();
+            (chosen, cap)
+        }
+    };
+    let executor = RemoteExecutor::new(capability, addr.clone(), cfg.token.clone());
+    let body = json!({"listing": listing, "payload": payload});
+    let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+    let mut jobs = Vec::new();
+    for _ in 0..args.count {
+        let spec = json!({
+            "type": "submit",
+            "outputs": args.outputs,
+            "frames": args.frames,
+            "output_format": "binary",
+        });
+        let submitted = executor
+            .submit(&spec, &body)
+            .map_err(|(code, msg)| format!("submit {code}: {msg}"))?;
+        let job_id = submitted
+            .get("job_id")
+            .and_then(|x| x.as_str())
+            .ok_or("submit returned no job_id")?
+            .to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        let state = loop {
+            let status = executor
+                .status(&job_id)
+                .map_err(|(code, msg)| format!("job-status {code}: {msg}"))?;
+            let state = status
+                .get("job")
+                .and_then(|j| j.get("state"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            if matches!(state.as_str(), "done" | "failed" | "canceled") {
+                break state;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("job {job_id} timed out in state {state}"));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        if state == "failed" {
+            let status = executor
+                .status(&job_id)
+                .map_err(|(code, msg)| format!("job-status {code}: {msg}"))?;
+            return Err(format!("job {job_id} failed: {status}"));
+        }
+        if state == "canceled" {
+            jobs.push(json!({"job_id": job_id, "state": state}));
+            continue;
+        }
+        let (header, bytes) = executor
+            .result(&job_id)
+            .map_err(|(code, msg)| format!("job-result {code}: {msg}"))?;
+        jobs.push(json!({
+            "job_id": job_id,
+            "state": state,
+            "bytes": bytes.len(),
+            "output_format": header.get("output_format").cloned().unwrap_or(Json::Null),
+            "outputs": header.get("outputs").cloned().unwrap_or(Json::Null),
+        }));
+    }
+    Ok(json!({
+        "addr": addr,
+        "target": args.target,
+        "frames": args.frames,
+        "count": args.count,
+        "done": jobs.iter().filter(|j| j.get("state").and_then(|x| x.as_str()) == Some("done")).count(),
+        "jobs": jobs,
+    }))
+}
+
 fn parse_run(handle: String, args: Vec<String>) -> Result<RunArgs, String> {
     let mut payload = None;
     let mut outputs = None;
@@ -295,10 +483,15 @@ fn parse_run(handle: String, args: Vec<String>) -> Result<RunArgs, String> {
 
 fn real_main() -> Result<(), String> {
     let (cfg, cmd, args) = parse_global()?;
+    if cmd == "gpu" {
+        let out = run_gpu(&cfg, args)?;
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return Ok(());
+    }
     let mut nodes = cfg.nodes;
     let heartbeat_ms = cfg.heartbeat_ms;
     let down_after = cfg.down_after;
-    let ledger_dir = cfg.ledger;
+    let ledger_dir = cfg.ledger.clone();
     if cfg.discover && cmd != "discover" {
         match discover(std::time::Duration::from_millis(
             cfg.discover_timeout_ms.max(1),

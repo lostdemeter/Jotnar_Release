@@ -1,6 +1,7 @@
 //! Shared pieces for the JotnarOS node daemon and payload supervisor.
 
 pub mod capability;
+pub mod executor;
 pub mod job;
 
 use std::collections::VecDeque;
