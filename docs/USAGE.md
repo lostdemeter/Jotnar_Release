@@ -178,8 +178,8 @@ TCP parity only for single-job, small-output T2.
 The HIP/CUDA GPU runner and scheduler live in `crates/jotnar-gpu-runner`:
 `jotnar-gpu-runner` compiles and runs listings on a local GPU host and
 `jotnar-gpu-net` discovers runners, places batches, retries failures, and keeps
-a resumable ledger. Warm-frame workers are opt-in with `CONFIG warm_frame 1`;
-see [`crates/jotnar-gpu-runner/README.md`](../crates/jotnar-gpu-runner/README.md).
+a resumable ledger. See
+[`crates/jotnar-gpu-runner/README.md`](../crates/jotnar-gpu-runner/README.md).
 
 The Rust SDL player has intermittent frame-time spikes not seen in the
 original Python/C player. This is recorded as future work; add a frame-time

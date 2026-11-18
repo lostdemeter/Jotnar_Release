@@ -220,7 +220,7 @@ The front door is deliberately short. The actual parts are here:
 - node OS: async jobs, supervisor, emitted system modules, scheduler, image:
   [`crates/jotnar-node/`](crates/jotnar-node/),
   [`showcase/node-os/`](showcase/node-os/)
-- GPU runner and scheduler (HIP/CUDA over framed TCP, opt-in warm frames):
+- GPU runner and scheduler (HIP/CUDA over framed TCP):
   [`crates/jotnar-gpu-runner/`](crates/jotnar-gpu-runner/)
 - per-op profile and exact-output harness: [`src/profile.rs`](src/profile.rs),
   [`src/bin/jotnar-det.rs`](src/bin/jotnar-det.rs)
