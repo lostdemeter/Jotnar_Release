@@ -96,8 +96,12 @@ def main() -> int:
         print(f"missing {CONTROLLER}; run without --no-build")
         return 2
 
-    items = max(1, args.items)
-    out = Path(args.out)
+    if args.items <= 0:
+        print("--items must be >= 1")
+        return 2
+    items = args.items
+    out = Path(args.out).absolute()
+    listing = Path(args.listing).absolute()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -108,7 +112,7 @@ def main() -> int:
             str(CONTROLLER),
             "bundle-gpu",
             "--listing",
-            str(Path(args.listing)),
+            str(listing),
             "--generate",
             args.size,
             "--items",

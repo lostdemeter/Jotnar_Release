@@ -29,29 +29,29 @@ use jotnar_node_tools::workload::{
 mod sched;
 
 fn usage() -> &'static str {
-    "jotnar-workload — model-aware stage controller above the executors\n\
-     \n\
-     usage:\n\
-       jotnar-workload [--token T] [--discover-timeout-ms N] bundle-doom \\\n\
-         --image FILE --wad FILE --out DIR [--frames N] [--name NAME]\n\
-       jotnar-workload bundle-gpu --listing FILE --out DIR \\\n\
-         (--input PAYLOAD.json | --generate HxWxC) \\\n\
-         [--items N] [--name NAME] [--timeout-ms N]\n\
-       jotnar-workload [--token T] plan --bundle PATH [--place STAGE=ADDR]...\n\
-       jotnar-workload [--token T] [--discover-timeout-ms N] run \\\n\
-         --bundle PATH --ledger DIR [--program FILE] \\\n\
-         [--executor ADDR]... [--gpu-executor TARGET=ADDR]... \\\n\
-         [--place STAGE=ADDR]... [--discover-native] [--discover-gpu] \\\n\
-         [--force] [--timeout-ms N] [--compare STAGE:OUTPUT=FILE]...\n\
-       jotnar-workload status --ledger DIR\n\
-     \n\
-     A DOOM run moves frame1's checkpoint to frame2's executor; the second\n\
-     stage uses --resume and an absolute --frames target.\n\
-     A GPU run sends listing + JSON payload to a target-aware runner; a stage\n\
-     output can feed the next stage's payload without a JSON round trip in the\n\
-     bundle.\n\
-     --executor is a native executor. --gpu-executor takes cuda=ADDR or\n\
-     hip=ADDR."
+    r#"jotnar-workload — model-aware stage controller above the executors
+
+usage:
+  jotnar-workload [--token T] [--discover-timeout-ms N] bundle-doom \
+    --image FILE --wad FILE --out DIR [--frames N] [--name NAME]
+  jotnar-workload bundle-gpu --listing FILE --out DIR \
+    (--input PAYLOAD.json | --generate HxWxC) \
+    [--items N] [--name NAME] [--timeout-ms N]
+  jotnar-workload [--token T] plan --bundle PATH [--place STAGE=ADDR]...
+  jotnar-workload [--token T] [--discover-timeout-ms N] run \
+    --bundle PATH --ledger DIR [--program FILE] \
+    [--executor ADDR]... [--gpu-executor TARGET=ADDR]... \
+    [--place STAGE=ADDR]... [--discover-native] [--discover-gpu] \
+    [--force] [--timeout-ms N] [--compare STAGE:OUTPUT=FILE]...
+  jotnar-workload status --ledger DIR
+
+A DOOM run moves frame1's checkpoint to frame2's executor; the second
+stage uses --resume and an absolute --frames target.
+A GPU run sends listing + JSON payload to a target-aware runner; a stage
+output can feed the next stage's payload without a JSON round trip in the
+bundle.
+--executor is a native executor. --gpu-executor takes cuda=ADDR or
+hip=ADDR."#
 }
 
 struct Global {
@@ -217,7 +217,7 @@ fn bundle_gpu(args: Vec<String>) -> Result<Json, String> {
         "sha256": loaded.sha256,
         "name": loaded.bundle.name,
         "version": loaded.bundle.version,
-        "items": items.max(1),
+        "items": items,
         "stages": loaded.bundle.stages.iter().map(|s| &s.name).collect::<Vec<_>>(),
         "artifacts": loaded.bundle.artifacts,
     }))
@@ -309,6 +309,9 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
             "--program" => program = Some(take_value(&mut it, "--program")?),
             "--executor" => {
                 let addr = take_value(&mut it, "--executor")?;
+                if addr.is_empty() {
+                    return Err("--executor needs a non-empty ADDR".to_string());
+                }
                 executors.push(ExecutorEndpoint {
                     capability: json!({"kind": "native", "target": "process", "addr": addr}),
                     addr,
@@ -322,6 +325,11 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
                 if !matches!(target, "cuda" | "hip") {
                     return Err(format!(
                         "--gpu-executor target must be cuda or hip, got {target:?}"
+                    ));
+                }
+                if addr.is_empty() {
+                    return Err(format!(
+                        "--gpu-executor needs a non-empty ADDR, got {value:?}"
                     ));
                 }
                 executors.push(ExecutorEndpoint {

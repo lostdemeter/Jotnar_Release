@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jotnar::protocol::decode_frame;
 use jotnar_node_tools::workload::{
-    build_gpu_bundle, generated_payload, run_bundle, ExecutorEndpoint, GpuBundleSpec, RunConfig,
+    build_gpu_bundle, generated_payload, run_bundle, ExecutorEndpoint, GpuBundleSpec, Ledger,
+    RunConfig,
 };
 use serde_json::{json, Value as Json};
 
@@ -391,5 +392,41 @@ fn gpu_chain_hands_an_intermediate_binary_result_to_the_next_stage() {
     assert_eq!(cuda.jobs(), 6);
     assert_eq!(hip.jobs(), 2);
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn failed_submit_is_recorded_in_the_ledger() {
+    let root = temp_root();
+    let listing = root.join("double.asm");
+    std::fs::write(&listing, "IN X\nOUT = ADD(X, X)\n").unwrap();
+    let loaded = build_gpu_bundle(&GpuBundleSpec {
+        listing,
+        input: None,
+        generate: Some((2, 2, 1)),
+        items: 1,
+        out_dir: root.join("bundle"),
+        name: "fail-test".to_string(),
+        timeout_ms: 2_000,
+    })
+    .unwrap();
+    let addr = format!("127.0.0.1:{}", free_port());
+    let cfg = RunConfig {
+        program: None,
+        executors: vec![endpoint(&addr, "cuda")],
+        placement: BTreeMap::new(),
+        token: None,
+        force: false,
+        timeout_ms: Some(2_000),
+        compare: Vec::new(),
+    };
+    let err = run_bundle(&loaded, &root.join("ledger"), &cfg).unwrap_err();
+    assert!(err.contains("submit"), "{err}");
+    let ledger = Ledger::read(&root.join("ledger")).unwrap();
+    assert_eq!(ledger.stages["gpu-a-00"].state, "submit-failed");
+    assert_eq!(
+        ledger.stages["gpu-a-00"].executor.as_deref(),
+        Some(addr.as_str())
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

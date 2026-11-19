@@ -266,14 +266,30 @@ job ids, and comparison hashes.
 
 ### Batch GPU pipeline
 
-Build a deterministic batch: eight items, each a CUDA stage feeding a HIP stage.
+Build a one-item bundle (the gates use more items):
 
 ```sh
 ./target/release/jotnar-workload bundle-gpu \
   --listing demos/gpu-batch/double.asm \
-  --generate 64x64x3 --items 8 \
+  --generate 64x64x3 --items 1 \
   --out /tmp/opencode/gpu_batch --name gpu-batch
+```
 
+Run the single-node CUDA reference:
+
+```sh
+./target/release/jotnar-workload --token test run \
+  --bundle /tmp/opencode/gpu_batch \
+  --ledger /tmp/opencode/gpu_ref \
+  --gpu-executor cuda=192.168.1.116:9997 \
+  --gpu-executor hip=192.168.1.195:9997 \
+  --place gpu-a-00=192.168.1.116:9997 \
+  --place gpu-b-00=192.168.1.116:9997
+```
+
+Run the CUDA → HIP chain and compare with the reference:
+
+```sh
 ./target/release/jotnar-workload --token test run \
   --bundle /tmp/opencode/gpu_batch \
   --ledger /tmp/opencode/gpu_batch_run \
@@ -287,7 +303,9 @@ Build a deterministic batch: eight items, each a CUDA stage feeding a HIP stage.
 `--input FILE` uses an existing JSON payload artifact instead of `--generate`.
 `--generate` makes a distinct deterministic payload per item. Stage `gpu-b-NN`
 reads `gpu-a-NN`'s binary `OUT` as payload stream `X`; no DOOM binary or
-DOOM-specific coordinator is involved.
+DOOM-specific coordinator is involved. `bundle-gpu` currently emits a
+CUDA-first chain; the stage schema also accepts `hip` for a hand-built or future
+builder.
 
 The gates:
 
@@ -322,13 +340,16 @@ its budget even when p95 looks healthy.
 - The trusted-LAN token gates executor requests; there is no TLS.
 - The native runner refuses a program unless it was passed with `--allow`.
 - Inputs and outputs must be relative paths with no `..` or absolute prefix.
+  Stage names must be a single safe path component and must not contain `:` or
+  `=`, because the ledger uses them as directory names and the CLI uses those
+  separators.
 - The controller copies full checkpoint files through its own process. The
   64 MB RV32IM memory image is within the frame limits, but this is not a
   chunked or range-fetch transport yet.
 - The controller does not retry failed stages yet; the ledger records the
   failure and the run can be resumed after the cause is fixed.
-- GPU stages support native and GPU executor kinds. CPU (`jotnar-noded`) stages
-  are not wired into the bundle schema yet.
+- The bundle layer supports the native and GPU executor kinds. CPU
+  (`jotnar-noded`) stages are not wired into the bundle schema yet.
 - GPU `frames` and `count` are 1 in v1. Multi-frame results need an output
   naming rule before the ledger can store them.
 - GPU payloads cross the controller-to-runner hop as JSON. A large intermediate

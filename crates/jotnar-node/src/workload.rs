@@ -52,6 +52,18 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(root.join(rel))
 }
 
+/// Stage names become ledger directory names, so they must be one normal path
+/// component. They also appear in the `STAGE=ADDR` and `STAGE:OUTPUT` CLI
+/// forms, so the separators are rejected. Input/output paths may use
+/// subdirectories; stage names may not.
+pub fn is_safe_name(name: &str) -> bool {
+    is_safe_relative(name)
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(':')
+        && !name.contains('=')
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -223,6 +235,12 @@ fn validate_payload_ref(
                     stage.name
                 ));
             }
+            if payload.stream.as_deref() == Some("") {
+                return Err(format!(
+                    "gpu stage {:?} payload {index} has an empty stream name",
+                    stage.name
+                ));
+            }
             if src == &stage.name {
                 return Err(format!(
                     "gpu stage {:?} payload {index} reads itself",
@@ -284,6 +302,9 @@ impl Bundle {
             if stage.name.trim().is_empty() {
                 return Err("stage needs a name".to_string());
             }
+            if !is_safe_name(&stage.name) {
+                return Err(format!("stage name {:?} is unsafe", stage.name));
+            }
             if !names.insert(stage.name.clone()) {
                 return Err(format!("duplicate stage {:?}", stage.name));
             }
@@ -299,6 +320,12 @@ impl Bundle {
                     if stage.gpu.is_some() {
                         return Err(format!(
                             "native stage {:?} must not carry a gpu payload",
+                            stage.name
+                        ));
+                    }
+                    if stage.executor.target.is_some() {
+                        return Err(format!(
+                            "native stage {:?} must not set executor.target",
                             stage.name
                         ));
                     }
@@ -741,26 +768,45 @@ pub fn build_gpu_bundle(spec: &GpuBundleSpec) -> Result<LoadedBundle, String> {
     if spec.input.is_some() == spec.generate.is_some() {
         return Err("gpu bundle needs exactly one of input or generate".to_string());
     }
-    let items = spec.items.max(1);
+    if spec.items == 0 {
+        return Err("gpu bundle needs at least one item".to_string());
+    }
+    let items = spec.items;
     fs::create_dir_all(&spec.out_dir)
         .map_err(|e| format!("create {}: {e}", spec.out_dir.display()))?;
-    let listing_ref = copy_artifact(&spec.listing, &spec.out_dir)?;
+    let listing_text = fs::read_to_string(&spec.listing)
+        .map_err(|e| format!("read listing {}: {e}", spec.listing.display()))?;
+    let listing_ref = write_artifact_bytes(&spec.out_dir, listing_text.as_bytes())?;
+    let fixed_input = if let Some(path) = &spec.input {
+        let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let value: Json = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("payload {} is not JSON: {e}", path.display()))?;
+        if value.get("streams").and_then(|x| x.as_object()).is_none() {
+            return Err(format!(
+                "payload {} needs a top-level streams object",
+                path.display()
+            ));
+        }
+        Some(write_artifact_bytes(&spec.out_dir, &bytes)?)
+    } else {
+        None
+    };
+    if let Some((h, w, c)) = spec.generate {
+        let elements = h
+            .checked_mul(w)
+            .and_then(|x| x.checked_mul(c))
+            .ok_or("generated payload size overflows")?;
+        if elements == 0 || elements > 16 * 1024 * 1024 {
+            return Err("generated payload must be 1..=16777216 elements".to_string());
+        }
+    }
     let mut artifacts = BTreeMap::new();
     artifacts.insert("listing".to_string(), listing_ref);
     let mut stages = Vec::new();
     for item in 0..items {
         let input_name = format!("input-{item:02}");
-        let input_ref = if let Some(path) = &spec.input {
-            let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-            let value: Json = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("payload {} is not JSON: {e}", path.display()))?;
-            if value.get("streams").and_then(|x| x.as_object()).is_none() {
-                return Err(format!(
-                    "payload {} needs a top-level streams object",
-                    path.display()
-                ));
-            }
-            write_artifact_bytes(&spec.out_dir, &bytes)?
+        let input_ref = if let Some(input_ref) = &fixed_input {
+            input_ref.clone()
         } else {
             let (h, w, c) = spec.generate.unwrap();
             let payload = generated_payload(h, w, c, item as u64);
@@ -1179,6 +1225,9 @@ fn poll_job(executor: &RemoteExecutor, job_id: &str, deadline_ms: u64) -> Result
             return Ok(job);
         }
         if now_ms().saturating_sub(start) >= deadline_ms {
+            // Best effort: the GPU runner may reject cancellation of a running
+            // job, but a queued job should not outlive the controller's stage.
+            let _ = executor.cancel(job_id);
             return Err(format!("job {job_id} timed out in state {state}"));
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
@@ -1514,11 +1563,41 @@ fn select_executor<'a>(
     Ok(candidates[index % candidates.len()])
 }
 
+#[allow(clippy::too_many_arguments)]
+fn record_stage_error(
+    ledger: &mut Ledger,
+    ledger_dir: &Path,
+    name: &str,
+    prior: &StageRecord,
+    state: &str,
+    addr: &str,
+    job_id: Option<&str>,
+    command: &[String],
+    inputs: &BTreeMap<String, FileInfo>,
+    message: &str,
+) -> Result<(), String> {
+    let mut record = prior.clone();
+    record.state = state.to_string();
+    record.attempts += 1;
+    record.executor = Some(addr.to_string());
+    record.job_id = job_id.map(str::to_string);
+    record.command = command.to_vec();
+    record.inputs = inputs.clone();
+    record.stderr = message.to_string();
+    record.finished_ms = now_ms();
+    ledger.stages.insert(name.to_string(), record);
+    ledger.save(ledger_dir)
+}
+
 pub fn run_bundle(
     loaded: &LoadedBundle,
     ledger_dir: &Path,
     cfg: &RunConfig,
 ) -> Result<Json, String> {
+    // LoadedBundle::load already validates, but run_bundle is public and
+    // accepts a caller-built bundle. Re-check the stage names and refs before
+    // any of them become ledger directory names.
+    loaded.bundle.validate()?;
     if cfg.executors.is_empty() && cfg.placement.is_empty() {
         return Err("run needs at least one --executor or --place stage=addr".to_string());
     }
@@ -1587,43 +1666,140 @@ pub fn run_bundle(
         if let Some(t) = &cfg.token {
             spec["auth"] = json!(t);
         }
-        let submitted = executor
-            .submit(&spec, &plan.body)
-            .map_err(|(code, msg)| format!("submit {addr}: {code}: {msg}"))?;
-        let job_id = submitted
-            .get("job_id")
-            .and_then(|x| x.as_str())
-            .ok_or("submit returned no job_id")?
-            .to_string();
-        let job = poll_job(&executor, &job_id, plan.timeout_ms.saturating_add(60_000))?;
+        let submitted = match executor.submit(&spec, &plan.body) {
+            Ok(submitted) => submitted,
+            Err((code, msg)) => {
+                let err = format!("submit {addr}: {code}: {msg}");
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "submit-failed",
+                    &addr,
+                    None,
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                return Err(err);
+            }
+        };
+        let job_id = match submitted.get("job_id").and_then(|x| x.as_str()) {
+            Some(job_id) => job_id.to_string(),
+            None => {
+                let err = format!("submit {addr} returned no job_id: {submitted}");
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "submit-failed",
+                    &addr,
+                    None,
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                return Err(err);
+            }
+        };
+        let job = match poll_job(&executor, &job_id, plan.timeout_ms.saturating_add(60_000)) {
+            Ok(job) => job,
+            Err(e) => {
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "poll-failed",
+                    &addr,
+                    Some(&job_id),
+                    &plan.command,
+                    &plan.inputs,
+                    &e,
+                )?;
+                return Err(e);
+            }
+        };
         let state = job
             .get("state")
             .and_then(|x| x.as_str())
             .unwrap_or("unknown");
         if state != "done" {
-            let mut record = prior.clone();
-            record.state = state.to_string();
-            record.attempts += 1;
-            record.executor = Some(addr);
-            record.job_id = Some(job_id);
-            record.command = plan.command;
-            record.inputs = plan.inputs;
-            record.finished_ms = now_ms();
-            ledger.stages.insert(name.clone(), record);
-            ledger.save(ledger_dir)?;
-            return Err(format!("stage {name:?} ended in state {state}: {job}"));
+            let err = format!("stage {name:?} ended in state {state}: {job}");
+            record_stage_error(
+                &mut ledger,
+                ledger_dir,
+                name,
+                &prior,
+                state,
+                &addr,
+                Some(&job_id),
+                &plan.command,
+                &plan.inputs,
+                &err,
+            )?;
+            return Err(err);
         }
-        let (header, result_body) = executor
-            .result(&job_id)
-            .map_err(|(code, msg)| format!("job-result {addr}: {code}: {msg}"))?;
+        let (header, result_body) = match executor.result(&job_id) {
+            Ok(result) => result,
+            Err((code, msg)) => {
+                let err = format!("job-result {addr}: {code}: {msg}");
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "result-failed",
+                    &addr,
+                    Some(&job_id),
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                return Err(err);
+            }
+        };
         if matches!(
             header.get("output_format").and_then(|x| x.as_str()),
             Some("binary") | Some("files")
         ) {
-            validate_binary_result(&header, &result_body)
-                .map_err(|e| format!("invalid result from {addr}: {e}"))?;
+            if let Err(e) = validate_binary_result(&header, &result_body) {
+                let err = format!("invalid result from {addr}: {e}");
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "invalid-result",
+                    &addr,
+                    Some(&job_id),
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                return Err(err);
+            }
         }
-        let outputs = split_result(stage, &header, &result_body, ledger_dir)?;
+        let outputs = match split_result(stage, &header, &result_body, ledger_dir) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "invalid-result",
+                    &addr,
+                    Some(&job_id),
+                    &plan.command,
+                    &plan.inputs,
+                    &e,
+                )?;
+                return Err(e);
+            }
+        };
         let record = StageRecord {
             state: "done".to_string(),
             attempts: prior.attempts + 1,
@@ -1768,6 +1944,14 @@ mod tests {
         assert!(!is_safe_relative("../x"));
         assert!(!is_safe_relative("/tmp/x"));
         assert!(!is_safe_relative("./x"));
+        assert!(is_safe_name("frame1"));
+        assert!(!is_safe_name("a/b"));
+        assert!(!is_safe_name(".."));
+        assert!(!is_safe_name("a\\b"));
+        assert!(!is_safe_name("a:b"));
+        assert!(!is_safe_name("a=b"));
+        let unsafe_name = bundle_with(vec![stage("../escape", &[], &["out"])]);
+        assert!(unsafe_name.validate().is_err());
     }
 
     #[test]
@@ -1925,6 +2109,13 @@ mod tests {
     }
 
     #[test]
+    fn native_stage_rejects_a_gpu_target() {
+        let mut native = stage("a", &[], &["out"]);
+        native.executor.target = Some("cuda".to_string());
+        assert!(bundle_with(vec![native]).validate().is_err());
+    }
+
+    #[test]
     fn gpu_stage_rejects_a_command_and_inputs() {
         let mut bundle = Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
@@ -1981,6 +2172,11 @@ mod tests {
             compare: Vec::new(),
         };
         assert!(select_executor(&cfg, &stage, 0).is_err());
+        let missing = RunConfig {
+            placement: BTreeMap::from([("a".to_string(), "missing:1".to_string())]),
+            ..cfg.clone()
+        };
+        assert!(select_executor(&missing, &stage, 0).is_err());
         let auto = RunConfig {
             placement: BTreeMap::new(),
             ..cfg
@@ -2063,6 +2259,35 @@ mod tests {
             Some("X")
         );
         assert_eq!(loaded.bundle.artifacts.len(), 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gpu_bundle_rejects_zero_items_and_oversized_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "jotnar-gpu-bundle-reject-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let listing = root.join("double.asm");
+        fs::write(&listing, "IN X\nOUT = ADD(X, X)\n").unwrap();
+        let spec = GpuBundleSpec {
+            listing,
+            input: None,
+            generate: Some((2, 2, 1)),
+            items: 0,
+            out_dir: root.join("bundle"),
+            name: "gpu-test".to_string(),
+            timeout_ms: 60_000,
+        };
+        assert!(build_gpu_bundle(&spec).is_err());
+        let oversized = GpuBundleSpec {
+            items: 1,
+            generate: Some((100_000, 100_000, 3)),
+            ..spec
+        };
+        assert!(build_gpu_bundle(&oversized).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -176,9 +176,13 @@ def main() -> int:
             print(f"missing {path}; run without --no-build")
             return 2
 
-    items = max(1, args.items)
-    clients = max(1, args.clients)
-    out = Path(args.out)
+    if args.items <= 0 or args.clients <= 0:
+        print("--items and --clients must be >= 1")
+        return 2
+    items = args.items
+    clients = args.clients
+    out = Path(args.out).absolute()
+    listing = Path(args.listing).absolute()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -188,7 +192,7 @@ def main() -> int:
             str(CONTROLLER),
             "bundle-gpu",
             "--listing",
-            str(Path(args.listing)),
+            str(listing),
             "--generate",
             args.size,
             "--items",
@@ -279,45 +283,56 @@ def main() -> int:
     ]
     print("coordinator:", " ".join(doom_cmd))
     proc = subprocess.Popen(doom_cmd, cwd=ROOT, stdout=doom_log, stderr=doom_log)
+    contended_receipts = []
+    contended_s = 0.0
     try:
         wait_for_frame_loop(proc, doom_out / "frames.jsonl", timeout=120)
         time.sleep(0.2)
         clients_procs = []
-        for client in range(clients):
-            cmd = pipeline_command(
-                str(CONTROLLER),
-                args.token,
-                bundle,
-                out / f"contended-{client:02}",
-                args.cuda,
-                args.hip,
-                items,
-                out / "reference",
-            )
-            clients_procs.append(
-                (
-                    client,
-                    subprocess.Popen(
-                        cmd,
-                        cwd=ROOT,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                    ),
+        try:
+            for client in range(clients):
+                cmd = pipeline_command(
+                    str(CONTROLLER),
+                    args.token,
+                    bundle,
+                    out / f"contended-{client:02}",
+                    args.cuda,
+                    args.hip,
+                    items,
+                    out / "reference",
                 )
-            )
-        t0 = time.time()
-        contended_receipts = []
-        for client, client_proc in clients_procs:
-            stdout, stderr = client_proc.communicate()
-            if client_proc.returncode != 0:
-                print(f"pipeline client {client} failed")
-                print(stdout)
-                print(stderr)
-                raise SystemExit(client_proc.returncode)
-            contended_receipts.append(json.loads(stdout))
-        contended_s = time.time() - t0
-        proc.wait(timeout=300)
+                clients_procs.append(
+                    (
+                        client,
+                        subprocess.Popen(
+                            cmd,
+                            cwd=ROOT,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                        ),
+                    )
+                )
+            t0 = time.time()
+            for client, client_proc in clients_procs:
+                stdout, stderr = client_proc.communicate()
+                if client_proc.returncode != 0:
+                    print(f"pipeline client {client} failed")
+                    print(stdout)
+                    print(stderr)
+                    raise SystemExit(client_proc.returncode)
+                contended_receipts.append(json.loads(stdout))
+            contended_s = time.time() - t0
+        finally:
+            for _, client_proc in clients_procs:
+                if client_proc.poll() is None:
+                    client_proc.kill()
+                    client_proc.wait()
+        try:
+            proc.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            print("DOOM coordinator did not finish within 300s")
+            return 1
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -363,7 +378,7 @@ def main() -> int:
         },
         "pipeline": {
             "reference_seconds": round(reference_s, 3),
-            "reference_note": "cold CUDA reference; correctness only",
+            "reference_note": "single-node CUDA reference; correctness only",
             "baseline_seconds": round(baseline_s, 3),
             "baseline_note": "one warm CUDA+HIP pipeline alone",
             "clients": clients,
