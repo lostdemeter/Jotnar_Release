@@ -91,6 +91,7 @@ fn two_node_stage_handoff_uses_the_network_and_a_ledger() {
                 inputs: BTreeMap::new(),
                 outputs: vec!["out1".to_string()],
                 timeout_ms: Some(30_000),
+                gpu: None,
             },
             StageSpec {
                 name: "stage2".to_string(),
@@ -104,6 +105,7 @@ fn two_node_stage_handoff_uses_the_network_and_a_ledger() {
                 inputs,
                 outputs: vec!["out2".to_string()],
                 timeout_ms: Some(30_000),
+                gpu: None,
             },
         ],
     };
@@ -130,7 +132,7 @@ fn two_node_stage_handoff_uses_the_network_and_a_ledger() {
     placement.insert("stage1".to_string(), addr_a.clone());
     placement.insert("stage2".to_string(), addr_b.clone());
     let cfg = RunConfig {
-        program: "/bin/sh".to_string(),
+        program: Some("/bin/sh".to_string()),
         executors: vec![
             ExecutorEndpoint {
                 addr: addr_a,

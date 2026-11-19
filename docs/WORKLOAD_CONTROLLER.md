@@ -1,7 +1,7 @@
 # Workload controller
 
-**Status:** first native workload runs; DOOM frame 1 → frame 2 checkpoint
-handoff is the acceptance test
+**Status:** native and GPU stages run; DOOM checkpoint handoff and a CUDA → HIP
+batch chain are the acceptance tests
 **Scope:** model-aware planning above the CPU, GPU, and native executors
 
 ## Boundary decision
@@ -86,6 +86,76 @@ resume would re-emit frame 1.
 does not need that file locally; each native runner checks it against its own
 `--allow` list.
 
+### GPU stages
+
+A GPU stage uses `executor.kind: "gpu"`, a target constraint, and a `gpu`
+payload. It carries no argv. The executor contract is unchanged: the controller
+sends the same `submit` header and body bytes to a target-aware GPU runner.
+
+```json
+{
+  "name": "gpu-a-00",
+  "depends_on": [],
+  "executor": {"kind": "gpu", "target": "cuda"},
+  "outputs": ["OUT"],
+  "timeout_ms": 600000,
+  "gpu": {
+    "listing": {"artifact": "listing"},
+    "payloads": [{"artifact": "input-00"}],
+    "frames": 1,
+    "count": 1
+  }
+}
+```
+
+A later stage can consume the previous stage's binary result as a payload
+stream:
+
+```json
+{
+  "name": "gpu-b-00",
+  "depends_on": ["gpu-a-00"],
+  "executor": {"kind": "gpu", "target": "any"},
+  "outputs": ["OUT"],
+  "timeout_ms": 600000,
+  "gpu": {
+    "listing": {"artifact": "listing"},
+    "payloads": [
+      {"stage": "gpu-a-00", "output": "OUT", "stream": "X"}
+    ],
+    "frames": 1,
+    "count": 1
+  }
+}
+```
+
+Schema decisions for this slice:
+
+- **Listing is an artifact.** It is content-addressed, hashed in the ledger,
+  and read by the controller as UTF-8. There is no inline listing field.
+- **Payload is either an artifact or a stage output.** An artifact's bytes are
+  the exact `{"streams": {...}}` JSON object the runner accepts. A stage output
+  is decoded by the controller from the result descriptor's `kind`, `shape`,
+  and `frame`.
+- **Intermediate GPU output stays binary in the ledger.** The controller writes
+  the result body unchanged to `stages/<stage>/<output>`, then converts it to a
+  JSON payload only when a later stage consumes it. This keeps the executor
+  contract and the content-addressed ledger unchanged; the cost is JSON
+  expansion on the controller-to-runner hop.
+- **Target is `cuda`, `hip`, or `any`.** The controller matches it against the
+  executor capability and rejects a mismatched explicit `--place`.
+- **`frames` and `count` are 1 in v1.** The current result splitter keys
+  outputs by name, so multi-frame output naming needs its own decision.
+- **Timeout is the controller polling deadline.** A stage that ends in
+  `failed`/`canceled` stops the run; there is no retry yet.
+- The ledger's `command` field for a GPU stage is a plan descriptor, not argv:
+  `gpu`, target, listing hash, and each payload source hash. Reuse compares that
+  descriptor plus the input hashes and output files.
+
+The binary-to-payload conversion supports `F32`, `F64`, `I64`, `U8`, and
+`Bool`. Non-finite `F32`/`F64` values are rejected rather than serialized as
+JSON `null`.
+
 ### Stage graph and ledger
 
 The graph is validated for unknown dependencies and cycles. The order is
@@ -104,11 +174,14 @@ bundle manifest hash, so changing the manifest requires a new run or `--force`.
 
 ### Placement
 
-`--executor ADDR` adds an executor to the default pool. `--place STAGE=ADDR`
-pins a stage. Without a pin, stages are assigned across the pool in stage
-order. `--discover-native` browses `_jotnar-native._tcp.local.` and adds the
-advertised native runners. `jotnar-net capabilities` now includes native
-records beside CPU and GPU records.
+`--executor ADDR` adds a native executor to the default pool.
+`--gpu-executor cuda=ADDR` and `--gpu-executor hip=ADDR` add GPU runners with
+their target. `--place STAGE=ADDR` pins a stage and is checked against the
+stage's kind and target. Without a pin, stages are assigned across matching
+executors in stage order. `--discover-native` browses
+`_jotnar-native._tcp.local.`; `--discover-gpu` browses
+`_jotnar-gpu._tcp.local.`. `jotnar-net capabilities` includes all three record
+kinds.
 
 The controller checks capabilities only as inventory; it never compiles or
 interprets a program itself.
@@ -191,6 +264,59 @@ title screen; the memory hash still changes.
 receipt includes the bundle hash, stage inputs/outputs, executor addresses,
 job ids, and comparison hashes.
 
+### Batch GPU pipeline
+
+Build a deterministic batch: eight items, each a CUDA stage feeding a HIP stage.
+
+```sh
+./target/release/jotnar-workload bundle-gpu \
+  --listing demos/gpu-batch/double.asm \
+  --generate 64x64x3 --items 8 \
+  --out /tmp/opencode/gpu_batch --name gpu-batch
+
+./target/release/jotnar-workload --token test run \
+  --bundle /tmp/opencode/gpu_batch \
+  --ledger /tmp/opencode/gpu_batch_run \
+  --gpu-executor cuda=192.168.1.116:9997 \
+  --gpu-executor hip=192.168.1.195:9997 \
+  --place gpu-a-00=192.168.1.116:9997 \
+  --place gpu-b-00=192.168.1.195:9997 \
+  --compare gpu-b-00:OUT=/tmp/opencode/gpu_ref/stages/gpu-b-00/OUT
+```
+
+`--input FILE` uses an existing JSON payload artifact instead of `--generate`.
+`--generate` makes a distinct deterministic payload per item. Stage `gpu-b-NN`
+reads `gpu-a-NN`'s binary `OUT` as payload stream `X`; no DOOM binary or
+DOOM-specific coordinator is involved.
+
+The gates:
+
+```sh
+python3 scripts/gpu_batch_gate.py --items 8 --size 64x64x3
+python3 scripts/doom_gpu_contention_gate.py --items 16 --size 128x128x3 --clients 4
+```
+
+`gpu_batch_gate.py` runs a single-node CUDA reference, then the CUDA -> HIP
+chain, and compares every item. `doom_gpu_contention_gate.py` warms both
+runners, measures the pipeline alone, then runs DOOM on the same CUDA and HIP
+runners while one or more pipeline clients run concurrently.
+
+Measured on the live fleet at `192.168.1.116` / `192.168.1.195`:
+
+```text
+batch gate, 8 items, 16 stages:  16/16 byte-identical
+contention, 4 clients x 16 items: pipeline 64/64 byte-identical
+  DOOM p50 39 ms, p95 46 ms, max 239 ms, budget 66 ms
+  parallel efficiency 3.94 (4 clients overlapped well)
+  verdict: pipeline healthy, DOOM tail unhealthy
+```
+
+The single-client run at 64 items stayed inside the DOOM budget
+(`max 52 ms`), so the current controller can coexist with DOOM at that scale.
+The 4-client run exposes the missing controller layer: batch work is admitted
+without priority or leases, so a DOOM frame can wait behind GPU jobs and miss
+its budget even when p95 looks healthy.
+
 ## Limits
 
 - The trusted-LAN token gates executor requests; there is no TLS.
@@ -201,8 +327,16 @@ job ids, and comparison hashes.
   chunked or range-fetch transport yet.
 - The controller does not retry failed stages yet; the ledger records the
   failure and the run can be resumed after the cause is fixed.
-- Only the native executor kind is implemented in the first bundle schema.
-  CPU/GPU stages can be added without moving planning into those executors.
+- GPU stages support native and GPU executor kinds. CPU (`jotnar-noded`) stages
+  are not wired into the bundle schema yet.
+- GPU `frames` and `count` are 1 in v1. Multi-frame results need an output
+  naming rule before the ledger can store them.
+- GPU payloads cross the controller-to-runner hop as JSON. A large intermediate
+  can expand significantly; there is no binary payload/stream transport yet.
+- The controller sends every payload inline. It does not yet use the runner's
+  `payload-put`/`payload_id` cache for repeated inputs.
+- There is no live executor telemetry, lease, priority, or admission control.
+  The contention gate measures the gap; it does not fix it.
 
 ## Streaming companion
 

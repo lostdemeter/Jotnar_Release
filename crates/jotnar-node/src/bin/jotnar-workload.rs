@@ -20,7 +20,8 @@ use std::time::Duration;
 use serde_json::{json, Value as Json};
 
 use jotnar_node_tools::workload::{
-    build_doom_bundle, run_bundle, ExecutorEndpoint, Ledger, LoadedBundle, RunConfig,
+    build_doom_bundle, build_gpu_bundle, run_bundle, ExecutorEndpoint, GpuBundleSpec, Ledger,
+    LoadedBundle, RunConfig,
 };
 
 #[allow(dead_code)]
@@ -33,15 +34,24 @@ fn usage() -> &'static str {
      usage:\n\
        jotnar-workload [--token T] [--discover-timeout-ms N] bundle-doom \\\n\
          --image FILE --wad FILE --out DIR [--frames N] [--name NAME]\n\
+       jotnar-workload bundle-gpu --listing FILE --out DIR \\\n\
+         (--input PAYLOAD.json | --generate HxWxC) \\\n\
+         [--items N] [--name NAME] [--timeout-ms N]\n\
        jotnar-workload [--token T] plan --bundle PATH [--place STAGE=ADDR]...\n\
        jotnar-workload [--token T] [--discover-timeout-ms N] run \\\n\
-         --bundle PATH --ledger DIR --program FILE \\\n\
-         [--executor ADDR]... [--place STAGE=ADDR]... [--discover-native] \\\n\
+         --bundle PATH --ledger DIR [--program FILE] \\\n\
+         [--executor ADDR]... [--gpu-executor TARGET=ADDR]... \\\n\
+         [--place STAGE=ADDR]... [--discover-native] [--discover-gpu] \\\n\
          [--force] [--timeout-ms N] [--compare STAGE:OUTPUT=FILE]...\n\
        jotnar-workload status --ledger DIR\n\
      \n\
      A DOOM run moves frame1's checkpoint to frame2's executor; the second\n\
-     stage uses --resume and an absolute --frames target."
+     stage uses --resume and an absolute --frames target.\n\
+     A GPU run sends listing + JSON payload to a target-aware runner; a stage\n\
+     output can feed the next stage's payload without a JSON round trip in the\n\
+     bundle.\n\
+     --executor is a native executor. --gpu-executor takes cuda=ADDR or\n\
+     hip=ADDR."
 }
 
 struct Global {
@@ -143,6 +153,76 @@ fn bundle_doom(args: Vec<String>) -> Result<Json, String> {
     }))
 }
 
+fn parse_size(value: &str) -> Result<(usize, usize, usize), String> {
+    let parts: Vec<&str> = value.split(['x', 'X']).collect();
+    if parts.len() != 3 {
+        return Err("--generate needs HxWxC".to_string());
+    }
+    let parse = |s: &str, what: &str| {
+        s.parse::<usize>()
+            .map_err(|_| format!("--generate needs HxWxC, bad {what}"))
+    };
+    let (h, w, c) = (
+        parse(parts[0], "height")?,
+        parse(parts[1], "width")?,
+        parse(parts[2], "channels")?,
+    );
+    if h == 0 || w == 0 || c == 0 {
+        return Err("--generate needs positive HxWxC".to_string());
+    }
+    Ok((h, w, c))
+}
+
+fn bundle_gpu(args: Vec<String>) -> Result<Json, String> {
+    let mut listing = None;
+    let mut input = None;
+    let mut generate = None;
+    let mut out = None;
+    let mut items = 1usize;
+    let mut name = "gpu-batch".to_string();
+    let mut timeout_ms = 600_000u64;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--listing" => listing = Some(PathBuf::from(take_value(&mut it, "--listing")?)),
+            "--input" => input = Some(PathBuf::from(take_value(&mut it, "--input")?)),
+            "--generate" => generate = Some(parse_size(&take_value(&mut it, "--generate")?)?),
+            "--out" => out = Some(PathBuf::from(take_value(&mut it, "--out")?)),
+            "--items" => {
+                items = take_value(&mut it, "--items")?
+                    .parse()
+                    .map_err(|_| "--items must be an integer")?
+            }
+            "--name" => name = take_value(&mut it, "--name")?,
+            "--timeout-ms" => {
+                timeout_ms = take_value(&mut it, "--timeout-ms")?
+                    .parse()
+                    .map_err(|_| "--timeout-ms must be an integer")?
+            }
+            other => return Err(format!("unknown bundle-gpu argument {other:?}")),
+        }
+    }
+    let loaded = build_gpu_bundle(&GpuBundleSpec {
+        listing: listing.ok_or("bundle-gpu needs --listing FILE")?,
+        input,
+        generate,
+        items,
+        out_dir: out.ok_or("bundle-gpu needs --out DIR")?,
+        name,
+        timeout_ms: timeout_ms.max(1),
+    })?;
+    let path = loaded.dir.join("bundle.json");
+    Ok(json!({
+        "bundle": path.display().to_string(),
+        "sha256": loaded.sha256,
+        "name": loaded.bundle.name,
+        "version": loaded.bundle.version,
+        "items": items.max(1),
+        "stages": loaded.bundle.stages.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        "artifacts": loaded.bundle.artifacts,
+    }))
+}
+
 fn plan(args: Vec<String>) -> Result<Json, String> {
     let mut bundle = None;
     let mut placement = BTreeMap::new();
@@ -171,6 +251,7 @@ fn plan(args: Vec<String>) -> Result<Json, String> {
                 "inputs": s.inputs,
                 "outputs": s.outputs,
                 "executor": s.executor,
+                "gpu": s.gpu,
                 "placement": placement.get(&s.name),
             })
         })
@@ -185,6 +266,30 @@ fn plan(args: Vec<String>) -> Result<Json, String> {
     }))
 }
 
+fn add_discovered(caps: Vec<Json>, executors: &mut Vec<ExecutorEndpoint>) {
+    for cap in caps {
+        let addrs = cap
+            .get("addrs")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let chosen = addrs
+            .iter()
+            .filter_map(|a| a.as_str())
+            .find(|a| !a.starts_with("127."))
+            .or_else(|| addrs.iter().filter_map(|a| a.as_str()).next())
+            .map(|s| s.to_string());
+        if let Some(addr) = chosen {
+            if !executors.iter().any(|e| e.addr == addr) {
+                executors.push(ExecutorEndpoint {
+                    addr,
+                    capability: cap,
+                });
+            }
+        }
+    }
+}
+
 fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
     let mut bundle = None;
     let mut ledger = None;
@@ -192,6 +297,7 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
     let mut executors = Vec::new();
     let mut placement = BTreeMap::new();
     let mut discover_native = false;
+    let mut discover_gpu = false;
     let mut force = false;
     let mut timeout_ms = None;
     let mut compare = Vec::new();
@@ -208,11 +314,27 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
                     addr,
                 });
             }
+            "--gpu-executor" => {
+                let value = take_value(&mut it, "--gpu-executor")?;
+                let (target, addr) = value
+                    .split_once('=')
+                    .ok_or_else(|| format!("--gpu-executor needs TARGET=ADDR, got {value:?}"))?;
+                if !matches!(target, "cuda" | "hip") {
+                    return Err(format!(
+                        "--gpu-executor target must be cuda or hip, got {target:?}"
+                    ));
+                }
+                executors.push(ExecutorEndpoint {
+                    capability: json!({"kind": "gpu", "target": target, "addr": addr}),
+                    addr: addr.to_string(),
+                });
+            }
             "--place" => {
                 let (stage, addr) = parse_place(&take_value(&mut it, "--place")?)?;
                 placement.insert(stage, addr);
             }
             "--discover-native" => discover_native = true,
+            "--discover-gpu" => discover_gpu = true,
             "--force" => force = true,
             "--timeout-ms" => {
                 timeout_ms = Some(
@@ -238,36 +360,23 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
             return Err(format!("--place names unknown stage {stage:?}"));
         }
     }
+    let timeout = Duration::from_millis(global.discover_timeout_ms.max(1));
     if discover_native {
-        let caps =
-            sched::discover_native(Duration::from_millis(global.discover_timeout_ms.max(1)))?;
-        for cap in caps {
-            let addrs = cap
-                .get("addrs")
-                .and_then(|x| x.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let chosen = addrs
-                .iter()
-                .filter_map(|a| a.as_str())
-                .find(|a| !a.starts_with("127."))
-                .or_else(|| addrs.iter().filter_map(|a| a.as_str()).next())
-                .map(|s| s.to_string());
-            if let Some(addr) = chosen {
-                if !executors.iter().any(|e| e.addr == addr) {
-                    executors.push(ExecutorEndpoint {
-                        addr,
-                        capability: cap,
-                    });
-                }
-            }
-        }
-        if executors.is_empty() {
+        let before = executors.len();
+        add_discovered(sched::discover_native(timeout)?, &mut executors);
+        if executors.len() == before {
             return Err("no native executors discovered".to_string());
         }
     }
+    if discover_gpu {
+        let before = executors.len();
+        add_discovered(sched::discover_gpu(timeout)?, &mut executors);
+        if executors.len() == before {
+            return Err("no GPU executors discovered".to_string());
+        }
+    }
     let cfg = RunConfig {
-        program: program.ok_or("run needs --program FILE")?,
+        program,
         executors,
         placement,
         token: global.token.clone(),
@@ -305,6 +414,7 @@ fn real_main() -> Result<(), String> {
     let (global, cmd, args) = parse_global()?;
     let out = match cmd.as_str() {
         "bundle-doom" => bundle_doom(args)?,
+        "bundle-gpu" => bundle_gpu(args)?,
         "plan" => plan(args)?,
         "run" => run(&global, args)?,
         "status" => status(args)?,

@@ -205,6 +205,21 @@ python3 scripts/doom_two_node_gate.py
 
 See [`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md).
 
+The same controller also runs GPU stages. A batch chain sends an artifact
+payload to a CUDA stage, decodes its binary result into the next stage's JSON
+payload, runs that on a HIP stage, and compares every output with a single-node
+CUDA reference:
+
+```sh
+python3 scripts/gpu_batch_gate.py --items 8 --size 64x64x3
+python3 scripts/doom_gpu_contention_gate.py --items 16 --size 128x128x3 --clients 4
+```
+
+The first gate covers correctness; the second measures DOOM latency while one
+or more batch clients share the same CUDA and HIP runners. See
+[`docs/WORKLOAD_CONTROLLER.md`](WORKLOAD_CONTROLLER.md) and
+[`demos/gpu-batch/`](../demos/gpu-batch/).
+
 The cooperative streaming demo runs the RV32IM core on one node and splits
 each frame between the CUDA and HIP nodes, each running the Jotnar
 `INTERP` upscale. It calibrates both cards and chooses the split from measured
@@ -287,7 +302,11 @@ jotnar-net  [--discover-timeout-ms N] hardware [--probe]
 jotnar-net  [--token T] gpu <listing.asm> [--addr ADDR] [--target hip|cuda] --payload FILE --outputs a,b
 jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token T] [--mdns]
 jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]
-jotnar-workload run --bundle PATH --ledger DIR --program FILE [--executor ADDR]... [--place STAGE=ADDR]...
+jotnar-workload bundle-gpu --listing FILE --out DIR (--input PAYLOAD.json | --generate HxWxC)
+                            [--items N] [--name NAME] [--timeout-ms N]
+jotnar-workload run --bundle PATH --ledger DIR [--program FILE]
+                    [--executor ADDR]... [--gpu-executor cuda=ADDR]... [--gpu-executor hip=ADDR]...
+                    [--place STAGE=ADDR]... [--compare STAGE:OUTPUT=FILE]...
 jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
 jotnar-doom-coord ... --viewer-listen ADDR
 jotnar-doom-view --addr ADDR
