@@ -314,6 +314,9 @@ jotnar-workload run --bundle PATH --ledger DIR [--program FILE]
 jotnar-stream --descriptor FILE --cuda ADDR --hip ADDR [--token T]
               [--frames N] [--clip DIR] [--out DIR] [--receipt DIR]
               [--reference DIR] [--fleet-dir DIR] [--all-cuda]
+jotnar-doom-stream --image FILE --wad FILE --cuda ADDR --hip ADDR
+                   [--token T] [--frames N] [--start-frame N] [--left-cols N]
+                   [--sink tcp|frames] [--out DIR] [--viewer-listen ADDR] [--viewer]
 jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
                   [--fleet-dir DIR] [--lease-ms N]
 jotnar build FILE --payload FILE --outputs a,b [--stage-out FILE] [--descriptor-only]

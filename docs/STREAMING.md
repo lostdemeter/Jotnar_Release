@@ -143,6 +143,51 @@ path only. C1b is the live RV32 source adapter; until then the coordinator
 remains the source/sink process and the 52 ms figure is a projection, not a
 measured full-frame SLO.
 
+## Live DOOM (C1b)
+
+`jotnar-doom-stream` makes the RV32IM core a live `FrameSource` and the DOOM
+viewer a live `FrameSink`. The generic controller still owns the clock, column
+split, GPU placement, stitch, failover, leases, and receipt. The viewer keys
+are forwarded through a shared queue; the scripted `start_keys`/`game_keys`
+schedule is preserved.
+
+```sh
+./target/release/jotnar-doom-stream \
+  --image "$HOME/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin" \
+  --wad "$HOME/Documents/OpenCode/jotnar-assets/doom1.wad" \
+  --listing demos/doom-two-nodes/upscale-half.asm \
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test \
+  --sink tcp --viewer
+```
+
+Omit `--frames` for an unlimited live run; Ctrl-C stops it. The SDL window is
+the existing `jotnar-doom-view`; keys are forwarded back to the core.
+
+Full-frame gate:
+
+```sh
+python3 scripts/doom_live_gate.py --no-build --frames 20 \
+  --out /tmp/opencode/doom-live-gate
+```
+
+The live `work_ms` includes the core and the GPU path. 72/248 split, 15 fps,
+20 measured frames after 3 warm-up frames:
+
+```text
+live         p50 50, p95 52, p99 65, max 65 ms
+             budget 66, frames over budget 0
+matches      20/20 byte-identical to the coordinator (EVEN reference)
+failover     HIP dead; right tile retried on CUDA; 2/2 exact
+             p50 77, p99 79 ms (survivor carries both halves)
+stage claim  79905e7d… rows/columns overlap 1
+```
+
+The SLO gate uses the frames sink. The TCP viewer sink can add a tail when the
+SDL reader falls behind (a 30-frame viewer run showed two ~250 ms frames); that
+is sink backpressure, not the GPU path. The HUD and the coordinator's
+calibration/rebalance policy are not ported; the viewer title currently shows
+mode/frame only.
+
 ## Receipt
 
 `jotnar-stream` writes `frames.jsonl` (one line per frame: work time, deadline
@@ -201,6 +246,10 @@ cargo build --release -p jotnar-node-tools --bin jotnar-stream
 # DOOM split/stitch equivalence (C1a)
 python3 scripts/doom_stream_gate.py --no-build --frames 20 \
   --out /tmp/opencode/doom-stream-gate
+
+# live DOOM full-frame gate (C1b)
+python3 scripts/doom_live_gate.py --no-build --frames 20 \
+  --out /tmp/opencode/doom-live-gate
 ```
 
 ## Limits
@@ -214,10 +263,13 @@ python3 scripts/doom_stream_gate.py --no-build --frames 20 \
   target on the next frame, so recovery is automatic. A blackholed target that
   accepts and never responds still depends on the client timeout; the gate uses
   a closed port. A mid-run proxy/blackhole gate is future work.
-- C1 is split: C1a proves the generic column split/stitch path byte-identical
-  to DOOM. C1b is the live RV32 source adapter and viewer keys; until it lands,
-  the coordinator still owns the source/sink process and the projected full
-  frame is not a measured SLO.
+- C1a proves the column split/stitch path byte-identical to DOOM. C1b runs the
+  RV32IM source live through the same controller with a full-frame SLO. The
+  legacy coordinator still owns the HUD and calibration/rebalance policy.
+- The live source duplicates the coordinator's scripted key schedule; move it
+  to a shared DOOM adapter module before changing either.
+- The TCP viewer sink has no drop/backpressure policy; a slow SDL reader can
+  add a frame tail. The SLO gate uses the frames sink.
 - No runner-side priority: batch work defers while the wall holds the
   interactive lease. A concurrent export needs the runner priority debt.
 - The source/compositor run on the controller host; the GPU lease does not

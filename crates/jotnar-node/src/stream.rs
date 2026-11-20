@@ -230,6 +230,9 @@ impl StreamDescriptor {
                     return Err("camera source needs device".to_string());
                 }
             }
+            // Supplied by the caller (the DOOM RV32 source adapter); the
+            // built-in source builder rejects it.
+            "doom" => {}
             other => return Err(format!("unknown source kind {other:?}")),
         }
         if self.tiles.rows == 0 || self.tiles.cols == 0 || self.tiles.halo == 0 {
@@ -1115,6 +1118,73 @@ pub fn run_stream(
     endpoints: &[GpuEndpoint],
     cfg: &StreamRunConfig,
 ) -> Result<Json, String> {
+    let (source, sink) = default_adapters(descriptor)?;
+    run_stream_with(descriptor, descriptor_sha256, endpoints, cfg, source, sink)
+}
+
+fn default_adapters(
+    descriptor: &StreamDescriptor,
+) -> Result<(Box<dyn FrameSource>, Box<dyn FrameSink>), String> {
+    let wall_w = descriptor.source.width * 2;
+    let wall_h = descriptor.source.height * 2;
+    let source: Box<dyn FrameSource> = match descriptor.source.kind.as_str() {
+        "frames" => Box::new(FrameDirSource::new(
+            descriptor
+                .source
+                .dir
+                .as_deref()
+                .ok_or("frames source needs dir")?,
+            descriptor.source.width,
+            descriptor.source.height,
+        )?),
+        "camera" => Box::new(CameraSource::new(
+            descriptor
+                .source
+                .device
+                .as_deref()
+                .ok_or("camera source needs device")?,
+            descriptor.source.width,
+            descriptor.source.height,
+            descriptor.clock.fps,
+            descriptor.source.capture_width.unwrap_or(1280),
+            descriptor.source.capture_height.unwrap_or(720),
+            descriptor.source.capture_fps.unwrap_or(30),
+        )?),
+        other => return Err(format!("unknown source kind {other:?}")),
+    };
+    let sink: Box<dyn FrameSink> = match descriptor.sink.kind.as_str() {
+        "frames" => Box::new(FrameDirSink::new(
+            descriptor
+                .sink
+                .dir
+                .as_deref()
+                .ok_or("frames sink needs dir")?,
+            wall_w,
+            wall_h,
+        )?),
+        "tcp" => Box::new(TcpFrameSink::new(
+            descriptor
+                .sink
+                .listen
+                .as_deref()
+                .ok_or("tcp sink needs listen")?,
+            wall_w,
+            wall_h,
+        )?),
+        "null" => Box::new(NullSink),
+        other => return Err(format!("unknown sink kind {other:?}")),
+    };
+    Ok((source, sink))
+}
+
+pub fn run_stream_with(
+    descriptor: &StreamDescriptor,
+    descriptor_sha256: &str,
+    endpoints: &[GpuEndpoint],
+    cfg: &StreamRunConfig,
+    mut source: Box<dyn FrameSource>,
+    mut sink: Box<dyn FrameSink>,
+) -> Result<Json, String> {
     descriptor.validate()?;
     if endpoints.is_empty() {
         return Err("stream needs at least one GPU endpoint".to_string());
@@ -1149,53 +1219,6 @@ pub fn run_stream(
     // in each dimension.
     let wall_w = descriptor.source.width * 2;
     let wall_h = descriptor.source.height * 2;
-    let mut source: Box<dyn FrameSource> = match descriptor.source.kind.as_str() {
-        "frames" => Box::new(FrameDirSource::new(
-            descriptor
-                .source
-                .dir
-                .as_deref()
-                .ok_or("frames source needs dir")?,
-            descriptor.source.width,
-            descriptor.source.height,
-        )?),
-        "camera" => Box::new(CameraSource::new(
-            descriptor
-                .source
-                .device
-                .as_deref()
-                .ok_or("camera source needs device")?,
-            descriptor.source.width,
-            descriptor.source.height,
-            descriptor.clock.fps,
-            descriptor.source.capture_width.unwrap_or(1280),
-            descriptor.source.capture_height.unwrap_or(720),
-            descriptor.source.capture_fps.unwrap_or(30),
-        )?),
-        other => return Err(format!("unknown source kind {other:?}")),
-    };
-    let mut sink: Box<dyn FrameSink> = match descriptor.sink.kind.as_str() {
-        "frames" => Box::new(FrameDirSink::new(
-            descriptor
-                .sink
-                .dir
-                .as_deref()
-                .ok_or("frames sink needs dir")?,
-            wall_w,
-            wall_h,
-        )?),
-        "tcp" => Box::new(TcpFrameSink::new(
-            descriptor
-                .sink
-                .listen
-                .as_deref()
-                .ok_or("tcp sink needs listen")?,
-            wall_w,
-            wall_h,
-        )?),
-        "null" => Box::new(NullSink),
-        other => return Err(format!("unknown sink kind {other:?}")),
-    };
     let receipt_dir = descriptor
         .receipt
         .as_ref()
