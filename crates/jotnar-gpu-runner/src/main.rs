@@ -488,6 +488,7 @@ fn start_mdns(cfg: &Config, port: u16) -> Result<ServiceDaemon, String> {
 }
 
 fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
+    let _ = stream.set_nodelay(true);
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)

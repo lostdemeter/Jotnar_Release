@@ -762,6 +762,9 @@ struct TileResult {
     addr: String,
     job_id: String,
     submit_ms: u64,
+    submit_call_ms: u64,
+    status_ms: u64,
+    result_ms: u64,
     done_ms: u64,
     sha256: String,
     bytes: usize,
@@ -867,15 +870,18 @@ fn run_tile(
     if let Some(token) = &endpoint.token {
         header["auth"] = json!(token);
     }
+    let submit_started = Instant::now();
     let submitted = executor
         .submit(&header, &body)
         .map_err(|(code, msg)| format!("submit {}: {code}: {msg}", endpoint.addr))?;
+    let submit_call_ms = submit_started.elapsed().as_millis() as u64;
     let job_id = submitted
         .get("job_id")
         .and_then(|x| x.as_str())
         .ok_or_else(|| format!("submit returned no job_id: {submitted}"))?
         .to_string();
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let status_started = Instant::now();
     loop {
         let status = executor
             .status(&job_id)
@@ -897,9 +903,12 @@ fn run_tile(
             _ => thread::sleep(Duration::from_millis(1)),
         }
     }
+    let status_ms = status_started.elapsed().as_millis() as u64;
+    let result_started = Instant::now();
     let (header, body) = executor
         .result(&job_id)
         .map_err(|(code, msg)| format!("result {}: {code}: {msg}", endpoint.addr))?;
+    let result_ms = result_started.elapsed().as_millis() as u64;
     validate_binary_result(&header, &body)?;
     let out = header
         .get("outputs")
@@ -927,6 +936,9 @@ fn run_tile(
         addr: endpoint.addr,
         job_id,
         submit_ms,
+        submit_call_ms,
+        status_ms,
+        result_ms,
         done_ms: now_ms(),
         sha256: sha256_hex(&body),
         bytes,
@@ -1366,6 +1378,9 @@ pub fn run_stream_with(
                 "addr": r.addr,
                 "job_id": r.job_id,
                 "submit_ms": r.submit_ms,
+                "submit_call_ms": r.submit_call_ms,
+                "status_ms": r.status_ms,
+                "result_ms": r.result_ms,
                 "done_ms": r.done_ms,
                 "sha256": r.sha256,
                 "bytes": r.bytes,
@@ -1487,6 +1502,9 @@ mod tests {
             addr: "x".to_string(),
             job_id: "j".to_string(),
             submit_ms: 0,
+            submit_call_ms: 0,
+            status_ms: 0,
+            result_ms: 0,
             done_ms: 0,
             sha256: String::new(),
             bytes: data.len(),

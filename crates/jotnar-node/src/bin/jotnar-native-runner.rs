@@ -429,6 +429,7 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
 }
 
 fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
+    let _ = stream.set_nodelay(true);
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
