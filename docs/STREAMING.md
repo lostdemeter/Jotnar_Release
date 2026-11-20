@@ -166,25 +166,33 @@ the existing `jotnar-doom-view`; keys are forwarded back to the core.
 Full-frame gate:
 
 ```sh
-python3 scripts/doom_live_gate.py --no-build --frames 20 \
+python3 scripts/doom_live_gate.py --no-build --frames 100 \
   --out /tmp/opencode/doom-live-gate
 ```
 
 The live `work_ms` includes the core and the GPU path. 72/248 split, 15 fps,
-20 measured frames after 3 warm-up frames:
+100 measured frames after 3 warm-up frames:
 
 ```text
-live         p50 50, p95 52, p99 65, max 65 ms
-             budget 66, frames over budget 0
-matches      20/20 byte-identical to the coordinator (EVEN reference)
+live         p50 44, p95 48, p99 244, max 247 ms
+             budget 66, 2/100 frames over budget
+matches      100/100 byte-identical to the coordinator (EVEN reference)
 failover     HIP dead; right tile retried on CUDA; 2/2 exact
-             p50 77, p99 79 ms (survivor carries both halves)
+             p99 62 ms (survivor carries both halves)
 stage claim  79905e7d… rows/columns overlap 1
 ```
 
-The SLO gate uses the frames sink. The TCP viewer sink can add a tail when the
-SDL reader falls behind (a 30-frame viewer run showed two ~250 ms frames); that
-is sink backpressure, not the GPU path. The HUD and the coordinator's
+A 20-frame smoke run passes (p50 50, p99 65, 20/20 exact), but it does not
+exercise the rare tail. The 100-frame run exposes two **transport stalls**:
+`submit_call_ms` is ~210 ms while the runner's job elapsed is 8–12 ms. The GPU
+is not the cause; the request/ack path to the CUDA runner stalled. This is
+the next transport debt (persistent connections / accept scheduling), not a
+stream-planning error. The p95 and exactness are clean; the strict p99/max SLO
+does not pass until the transport tail is fixed.
+
+The SLO gate uses the frames sink. The TCP viewer sink can add a further tail
+when the SDL reader falls behind (a 30-frame viewer run showed two ~250 ms
+frames); that is sink backpressure. The HUD and the coordinator's
 calibration/rebalance policy are not ported; the viewer title currently shows
 mode/frame only.
 
