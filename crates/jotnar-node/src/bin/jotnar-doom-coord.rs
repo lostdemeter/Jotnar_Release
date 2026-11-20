@@ -52,7 +52,8 @@ fn usage() -> &'static str {
          [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
          [--probe-iters N] [--min-cols N] [--max-cols N] [--job-timeout-ms N] \\\n\
          [--viewer-listen ADDR] [--recover-every N] [--no-record] \\\n\
-         [--failover-timeout-ms N] [--fleet-dir DIR] [--lease-ms N]\n\
+         [--failover-timeout-ms N] [--fleet-dir DIR] [--lease-ms N] \\\n\
+         [--record-source DIR]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
      program on the CUDA and HIP runners. By default the coordinator probes\n\
@@ -84,6 +85,7 @@ struct Config {
     viewer: Option<String>,
     recover_every: u32,
     record: bool,
+    record_source: Option<PathBuf>,
     failover_timeout_ms: u64,
     fleet_dir: Option<PathBuf>,
     lease_ms: u64,
@@ -117,6 +119,7 @@ fn parse_args() -> Result<Config, String> {
     let mut viewer = None;
     let mut recover_every = 20u32;
     let mut record = true;
+    let mut record_source = None;
     let mut failover_timeout_ms = 500u64;
     let mut fleet_dir = None;
     let mut lease_ms = 3_000u64;
@@ -231,6 +234,12 @@ fn parse_args() -> Result<Config, String> {
                     .map_err(|_| "--recover-every must be an integer")?;
             }
             "--no-record" => record = false,
+            "--record-source" => {
+                i += 1;
+                record_source = Some(PathBuf::from(
+                    args.get(i).ok_or("--record-source needs a dir")?,
+                ));
+            }
             "--failover-timeout-ms" => {
                 i += 1;
                 failover_timeout_ms = args
@@ -282,6 +291,7 @@ fn parse_args() -> Result<Config, String> {
         viewer,
         recover_every,
         record,
+        record_source,
         failover_timeout_ms: failover_timeout_ms.max(1),
         fleet_dir,
         lease_ms: lease_ms.max(1),
@@ -888,6 +898,9 @@ fn run() -> Result<(), String> {
     let image_sha = sha256_hex(&image);
     let wad_sha = sha256_hex(&wad);
     fs::create_dir_all(&cfg.out).map_err(|e| format!("create {}: {e}", cfg.out.display()))?;
+    if let Some(dir) = &cfg.record_source {
+        fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
     if cfg.record {
         fs::create_dir_all(cfg.out.join("frames"))
             .map_err(|e| format!("create {}: {e}", cfg.out.display()))?;
@@ -1271,6 +1284,15 @@ fn run() -> Result<(), String> {
             ));
         }
         let fb = cpu.framebuffer();
+        if let Some(dir) = &cfg.record_source {
+            let src = rgb_window(&fb, 0, FB_W)?;
+            let bytes: Vec<u8> = src
+                .iter()
+                .map(|v| v.round().clamp(0.0, 255.0) as u8)
+                .collect();
+            let path = dir.join(format!("frame_{n:06}.rgb"));
+            fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
         let t_frame = Instant::now();
         let mut used = mode;
         let mut cuda_ms = 0u64;

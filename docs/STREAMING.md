@@ -110,6 +110,39 @@ composited frames must still match the reference. A blackholed target (accepts
 but never responds) still depends on the client timeout; tuning that is future
 work.
 
+## DOOM column split (C1a)
+
+The generic controller also runs the DOOM shape: a 320x200 source frame, a
+one-column overlap, two column tiles, and a stitch back to 640x400. The
+descriptor uses:
+
+```json
+"tiles": {"rows": 1, "cols": 2, "halo": 1, "bezel": 0},
+"split": {"left_cols": 72, "right_cols": 248, "overlap": 1},
+"placement": {"cuda": 1, "hip": 1},
+"merge": "columns"
+```
+
+The coordinator was extended with `--record-source DIR` so its RV32IM
+framebuffer (320x200 RGB) and stitched output (640x400 RGB) can be recorded.
+`scripts/doom_stream_gate.py` runs the coordinator with `--no-auto-split`
+(EVEN) and then replays the recorded source through the generic column-split
+path at 72/248. The outputs are byte-identical, which also proves the stitch is
+independent of the split point.
+
+```text
+coordinator    EVEN split, 20 frames, p50 74 / p99 82 ms total
+generic path   72/248, 20 frames, GPU p50 15 / p99 16 ms
+matches        20/20 byte-identical
+failover       HIP dead; right tile retried on CUDA; 2/2 exact
+projected full core_p50 36 + GPU p99 16 = 52 ms (provisional)
+```
+
+The stream path here consumes recorded source frames, so its latency is the GPU
+path only. C1b is the live RV32 source adapter; until then the coordinator
+remains the source/sink process and the 52 ms figure is a projection, not a
+measured full-frame SLO.
+
 ## Receipt
 
 `jotnar-stream` writes `frames.jsonl` (one line per frame: work time, deadline
@@ -164,6 +197,10 @@ cargo build --release -p jotnar-node-tools --bin jotnar-stream
 ./target/release/jotnar-stream --descriptor demos/video-wall/frames-wall.json \
   --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test \
   --clip /tmp/opencode/wall-clip --frames 120
+
+# DOOM split/stitch equivalence (C1a)
+python3 scripts/doom_stream_gate.py --no-build --frames 20 \
+  --out /tmp/opencode/doom-stream-gate
 ```
 
 ## Limits
@@ -177,6 +214,10 @@ cargo build --release -p jotnar-node-tools --bin jotnar-stream
   target on the next frame, so recovery is automatic. A blackholed target that
   accepts and never responds still depends on the client timeout; the gate uses
   a closed port. A mid-run proxy/blackhole gate is future work.
+- C1 is split: C1a proves the generic column split/stitch path byte-identical
+  to DOOM. C1b is the live RV32 source adapter and viewer keys; until it lands,
+  the coordinator still owns the source/sink process and the projected full
+  frame is not a measured SLO.
 - No runner-side priority: batch work defers while the wall holds the
   interactive lease. A concurrent export needs the runner priority debt.
 - The source/compositor run on the controller host; the GPU lease does not

@@ -110,6 +110,14 @@ pub struct TileSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ColumnSplit {
+    pub left_cols: usize,
+    pub right_cols: usize,
+    #[serde(default = "one")]
+    pub overlap: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamSinkSpec {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +149,9 @@ pub struct StreamDescriptor {
     pub source: StreamSourceSpec,
     pub stage: StreamStageSpec,
     pub tiles: TileSpec,
+    /// Optional 1D column split for the DOOM shape. Requires merge="columns".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<ColumnSplit>,
     pub sink: StreamSinkSpec,
     #[serde(default = "tile_grid")]
     pub merge: String,
@@ -232,6 +243,23 @@ impl StreamDescriptor {
         }
         if self.tiles.bezel > 0 && self.merge != "tile-grid" {
             return Err("bezel is only supported for tile-grid".to_string());
+        }
+        if let Some(split) = &self.split {
+            if self.merge != "columns" {
+                return Err("a column split requires merge=columns".to_string());
+            }
+            if split.overlap != 1 {
+                return Err("column split overlap must be 1 in this slice".to_string());
+            }
+            if split.left_cols == 0 || split.right_cols == 0 {
+                return Err("column split needs positive left/right widths".to_string());
+            }
+            if split.left_cols + split.right_cols != self.source.width {
+                return Err(format!(
+                    "column split {} + {} != source width {}",
+                    split.left_cols, split.right_cols, self.source.width
+                ));
+            }
         }
         if self.stage.targets.is_empty() {
             return Err("stream stage needs at least one target".to_string());
@@ -639,6 +667,46 @@ pub fn tile_frame(frame: &Frame, spec: &TileSpec) -> Result<Vec<TileInput>, Stri
     Ok(tiles)
 }
 
+pub fn column_tiles(frame: &Frame, split: &ColumnSplit) -> Result<Vec<TileInput>, String> {
+    let left_w = split.left_cols + split.overlap;
+    let right_w = split.right_cols + split.overlap;
+    if left_w > frame.width || right_w > frame.width {
+        return Err("column windows exceed frame width".to_string());
+    }
+    let mut tiles = Vec::with_capacity(2);
+    for (col, x0, w) in [
+        (0usize, 0usize, left_w),
+        (1usize, frame.width - right_w, right_w),
+    ] {
+        let mut data = Vec::with_capacity(w * frame.height * 3);
+        for y in 0..frame.height {
+            let start = (y * frame.width + x0) * 3;
+            data.extend_from_slice(&frame.data[start..start + w * 3]);
+        }
+        tiles.push(TileInput {
+            row: 0,
+            col,
+            width: w,
+            height: frame.height,
+            data,
+        });
+    }
+    Ok(tiles)
+}
+
+fn stitch_columns(split: &ColumnSplit, results: &[TileResult]) -> Result<Vec<u8>, String> {
+    let left = results
+        .iter()
+        .find(|r| r.col == 0)
+        .ok_or("column stream has no left tile")?;
+    let right = results
+        .iter()
+        .find(|r| r.col == 1)
+        .ok_or("column stream has no right tile")?;
+    let split = crate::doom_pipeline::Split::new(split.left_cols, split.right_cols)?;
+    split.stitch(&left.data, &right.data)
+}
+
 #[derive(Clone, Debug)]
 pub struct GpuEndpoint {
     pub target: String,
@@ -918,6 +986,42 @@ fn validate_partition_claim(claim: &Json, descriptor: &StreamDescriptor) -> Resu
         .get("axes")
         .and_then(|x| x.as_array())
         .ok_or("stage descriptor partitionable needs axes[]")?;
+    if let Some(split) = &descriptor.split {
+        for axis in axes {
+            let name = axis
+                .get("axis")
+                .and_then(|x| x.as_str())
+                .ok_or("partition axis needs a name")?;
+            let min = axis
+                .get("min")
+                .and_then(|x| x.as_u64())
+                .ok_or("partition axis needs min")?;
+            let max = axis
+                .get("max")
+                .and_then(|x| x.as_u64())
+                .ok_or("partition axis needs max")?;
+            let overlap = axis.get("overlap").and_then(|x| x.as_u64()).unwrap_or(0);
+            let values: &[usize] = match name {
+                "rows" => &[descriptor.source.height],
+                "columns" => &[split.left_cols, split.right_cols],
+                _ => continue,
+            };
+            for value in values {
+                if (*value as u64) < min || (*value as u64) > max {
+                    return Err(format!(
+                        "partition {name} size {value} is outside the compiler claim {min}..={max}"
+                    ));
+                }
+            }
+            if (split.overlap as u64) < overlap {
+                return Err(format!(
+                    "partition {name} needs overlap {overlap}, but the split overlap is {}",
+                    split.overlap
+                ));
+            }
+        }
+        return Ok(());
+    }
     for axis in axes {
         let name = axis
             .get("axis")
@@ -1149,7 +1253,11 @@ pub fn run_stream(
             break;
         };
         source_index += 1;
-        let tiles = tile_frame(&frame, &descriptor.tiles)?;
+        let tiles = if let Some(split) = &descriptor.split {
+            column_tiles(&frame, split)?
+        } else {
+            tile_frame(&frame, &descriptor.tiles)?
+        };
         let mut results = Vec::with_capacity(tiles.len());
         let mut tile_meta: BTreeMap<(usize, usize), (u32, Option<String>, Vec<Json>)> =
             BTreeMap::new();
@@ -1178,12 +1286,16 @@ pub fn run_stream(
             }
         }
         results.sort_by_key(|r| (r.row, r.col));
-        let composited = composite(
-            descriptor.source.width,
-            descriptor.source.height,
-            &descriptor.tiles,
-            &results,
-        )?;
+        let composited = if let Some(split) = &descriptor.split {
+            stitch_columns(split, &results)?
+        } else {
+            composite(
+                descriptor.source.width,
+                descriptor.source.height,
+                &descriptor.tiles,
+                &results,
+            )?
+        };
         if source_index <= cfg.warmup_frames {
             continue;
         }
@@ -1395,6 +1507,7 @@ mod tests {
                 halo: 1,
                 bezel: 0,
             },
+            split: None,
             sink: StreamSinkSpec {
                 kind: "null".to_string(),
                 dir: None,
