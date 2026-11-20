@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -28,10 +28,11 @@ use jotnar::payload::feeds_to_json;
 use jotnar::rv32::Rv32;
 use jotnar::value::{array_from_vec, Value};
 use jotnar_node_tools::doom_pipeline::{
-    choose_split, f32_rgb_to_u8, latency_summary, rgb_window, sha256_hex, Split, FB_H, FB_W, OUT_H,
-    OUT_W,
+    choose_split, f32_rgb_to_u8, latency_summary, percentile, rgb_window, sha256_hex, Split, FB_H,
+    FB_W, OUT_H, OUT_W,
 };
 use jotnar_node_tools::executor::{validate_binary_result, Executor, RemoteExecutor};
+use jotnar_node_tools::fleet::{Fleet, LeaseGuard};
 use jotnar_node_tools::hud::{render as render_hud, HudInfo, HUD_BOTTOM, HUD_TOP};
 use jotnar_node_tools::job::JobClient;
 
@@ -51,12 +52,14 @@ fn usage() -> &'static str {
          [--out DIR] [--max-instr N] [--no-warmup] [--no-auto-split] \\\n\
          [--probe-iters N] [--min-cols N] [--max-cols N] [--job-timeout-ms N] \\\n\
          [--viewer-listen ADDR] [--recover-every N] [--no-record] \\\n\
-         [--failover-timeout-ms N]\n\
+         [--failover-timeout-ms N] [--fleet-dir DIR] [--lease-ms N]\n\
      \n\
      Node A runs the RV32IM core here. Nodes B and C run the Jotnar upscale\n\
      program on the CUDA and HIP runners. By default the coordinator probes\n\
      both cards and splits the frame by measured throughput. The output is raw\n\
-     RGB frames plus metadata; scripts/doom_two_gpu_gate.py assembles the GIF."
+     RGB frames plus metadata; scripts/doom_two_gpu_gate.py assembles the GIF.\n\
+     With --fleet-dir the coordinator registers and renews an interactive\n\
+     lease on each GPU target so a batch controller can reserve capacity."
 }
 
 #[derive(Clone)]
@@ -82,6 +85,8 @@ struct Config {
     recover_every: u32,
     record: bool,
     failover_timeout_ms: u64,
+    fleet_dir: Option<PathBuf>,
+    lease_ms: u64,
 }
 
 fn now_ms() -> u64 {
@@ -105,7 +110,7 @@ fn parse_args() -> Result<Config, String> {
     let mut max_instr = 2_000_000_000u64;
     let mut warmup = true;
     let mut auto_split = true;
-    let mut probe_iters = 3u32;
+    let mut probe_iters = 7u32;
     let mut min_cols = 32usize;
     let mut max_cols = 288usize;
     let mut job_timeout_ms = 5000u64;
@@ -113,6 +118,8 @@ fn parse_args() -> Result<Config, String> {
     let mut recover_every = 20u32;
     let mut record = true;
     let mut failover_timeout_ms = 500u64;
+    let mut fleet_dir = None;
+    let mut lease_ms = 3_000u64;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -232,6 +239,20 @@ fn parse_args() -> Result<Config, String> {
                     .parse()
                     .map_err(|_| "--failover-timeout-ms must be an integer")?;
             }
+            "--fleet-dir" => {
+                i += 1;
+                fleet_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--fleet-dir needs a path")?,
+                ));
+            }
+            "--lease-ms" => {
+                i += 1;
+                lease_ms = args
+                    .get(i)
+                    .ok_or("--lease-ms needs a number")?
+                    .parse()
+                    .map_err(|_| "--lease-ms must be an integer")?;
+            }
             "-h" | "--help" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -262,6 +283,8 @@ fn parse_args() -> Result<Config, String> {
         recover_every,
         record,
         failover_timeout_ms: failover_timeout_ms.max(1),
+        fleet_dir,
+        lease_ms: lease_ms.max(1),
     })
 }
 
@@ -1110,6 +1133,32 @@ fn run() -> Result<(), String> {
         return Err("both GPU nodes failed during calibration".to_string());
     }
 
+    // Register the interactive lease before the measured loop. The batch
+    // controller reads this same directory; the contention gate only starts
+    // clients once `frames.jsonl` exists, so the reservation is visible first.
+    let mut lease_guards: Vec<LeaseGuard> = Vec::new();
+    let mut lease_renewals = 0u64;
+    if let Some(dir) = &cfg.fleet_dir {
+        let owner = format!("jotnar-doom-coord:{}", std::process::id());
+        let fleet = Fleet::new(dir, owner, 1, 1, cfg.lease_ms);
+        for target in ["cuda", "hip"] {
+            let guard = fleet.register_lease(
+                "interactive",
+                target,
+                1,
+                cfg.lease_ms,
+                Some("two-node DOOM frame loop"),
+            )?;
+            eprintln!(
+                "fleet: interactive lease {} on {} for {} ms",
+                guard.lease().id,
+                target,
+                cfg.lease_ms
+            );
+            lease_guards.push(guard);
+        }
+    }
+
     let meta_path = cfg.out.join("frames.jsonl");
     let mut meta = if cfg.record {
         Some(BufWriter::new(File::create(&meta_path).map_err(|e| {
@@ -1148,6 +1197,12 @@ fn run() -> Result<(), String> {
 
     for n in 0..cfg.frames {
         let frame = cfg.start_frame + n + 1;
+        for guard in lease_guards.iter_mut() {
+            guard
+                .renew(cfg.lease_ms)
+                .map_err(|e| format!("renew interactive lease: {e}"))?;
+            lease_renewals += 1;
+        }
         if let Some(rx) = recovery_rx.as_ref() {
             match rx.try_recv() {
                 Ok(res) => {
@@ -1456,6 +1511,9 @@ fn run() -> Result<(), String> {
     }
 
     let (p50, p95, max) = latency_summary(&totals);
+    let p99 = percentile(&totals, 99);
+    let frames_over_budget = totals.iter().filter(|v| **v > budget).count();
+    let max_ceiling = budget.saturating_mul(2);
     let (c50, _, _) = latency_summary(&cuda_samples);
     let (h50, _, _) = latency_summary(&hip_samples);
     let (k50, _, _) = latency_summary(&core_samples);
@@ -1494,10 +1552,33 @@ fn run() -> Result<(), String> {
         "latency_ms": {
             "total_p50": p50,
             "total_p95": p95,
+            "total_p99": p99,
             "total_max": max,
+            "frames_over_budget": frames_over_budget,
             "cuda_p50": c50,
             "hip_p50": h50,
             "core_p50": k50,
+        },
+        "interactive_slo": {
+            "scope": "frame-loop",
+            "budget_ms": budget,
+            "p99_ms": p99,
+            "max_ms": max,
+            "max_ceiling_ms": max_ceiling,
+            "p99_ok": p99 <= budget,
+            "max_ok": max <= max_ceiling,
+            "frames": totals.len(),
+            "frames_over_budget": frames_over_budget,
+            "verdict": p99 <= budget && max <= max_ceiling,
+        },
+        "interactive_lease": match &cfg.fleet_dir {
+            Some(dir) => json!({
+                "dir": dir.display().to_string(),
+                "lease_ms": cfg.lease_ms,
+                "renewals": lease_renewals,
+                "leases": lease_guards.iter().map(|g| g.lease()).collect::<Vec<_>>(),
+            }),
+            None => Json::Null,
         },
         "real_time_at_target": p95 <= budget,
         "wall_ms": started.elapsed().as_millis() as u64,

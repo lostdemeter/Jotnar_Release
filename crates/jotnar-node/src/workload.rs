@@ -19,6 +19,7 @@ use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 
 use crate::executor::{validate_binary_result, Executor, RemoteExecutor};
+use crate::fleet::{AdmissionError, Fleet};
 
 pub const BUNDLE_SCHEMA: &str = "jotnar.workload/1";
 pub const LEDGER_SCHEMA: &str = "jotnar.workload.ledger/1";
@@ -135,6 +136,11 @@ pub struct StageRef {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuStage {
     pub listing: StageRef,
+    /// Optional `jotnar.stage/1` descriptor artifact. When present the
+    /// controller validates the listing hash, declared targets, and typed
+    /// streams against the stage before submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<StageRef>,
     #[serde(default)]
     pub payloads: Vec<StageRef>,
     #[serde(default = "one_u32")]
@@ -180,6 +186,30 @@ impl StageSpec {
     pub fn target(&self) -> &str {
         self.executor.target.as_deref().unwrap_or("any")
     }
+}
+
+fn validate_descriptor_ref(
+    stage: &StageSpec,
+    descriptor: &StageRef,
+    artifacts: &BTreeMap<String, ArtifactRef>,
+) -> Result<(), String> {
+    if descriptor.stage.is_some() || descriptor.output.is_some() || descriptor.stream.is_some() {
+        return Err(format!(
+            "gpu stage {:?} descriptor must name an artifact only",
+            stage.name
+        ));
+    }
+    let artifact = descriptor
+        .artifact
+        .as_deref()
+        .ok_or_else(|| format!("gpu stage {:?} descriptor needs an artifact", stage.name))?;
+    if !artifacts.contains_key(artifact) {
+        return Err(format!(
+            "gpu stage {:?} descriptor artifact {artifact:?} is not in the bundle",
+            stage.name
+        ));
+    }
+    Ok(())
 }
 
 fn validate_listing_ref(
@@ -361,6 +391,9 @@ impl Bundle {
                         ));
                     }
                     validate_listing_ref(stage, &gpu.listing, &self.artifacts)?;
+                    if let Some(descriptor) = &gpu.descriptor {
+                        validate_descriptor_ref(stage, descriptor, &self.artifacts)?;
+                    }
                     if gpu.payloads.is_empty() {
                         return Err(format!("gpu stage {:?} has no payloads", stage.name));
                     }
@@ -835,6 +868,7 @@ pub fn build_gpu_bundle(spec: &GpuBundleSpec) -> Result<LoadedBundle, String> {
             timeout_ms: Some(spec.timeout_ms),
             gpu: Some(GpuStage {
                 listing: listing.clone(),
+                descriptor: None,
                 payloads: vec![StageRef {
                     artifact: Some(input_name),
                     stage: None,
@@ -858,6 +892,7 @@ pub fn build_gpu_bundle(spec: &GpuBundleSpec) -> Result<LoadedBundle, String> {
             timeout_ms: Some(spec.timeout_ms),
             gpu: Some(GpuStage {
                 listing,
+                descriptor: None,
                 payloads: vec![StageRef {
                     artifact: None,
                     stage: Some(first),
@@ -874,6 +909,179 @@ pub fn build_gpu_bundle(spec: &GpuBundleSpec) -> Result<LoadedBundle, String> {
         name: spec.name.clone(),
         version: "1".to_string(),
         description: "batch GPU upscale chain with intermediate artifact handoff".to_string(),
+        artifacts,
+        stages,
+    };
+    bundle.validate()?;
+    let bytes = serde_json::to_vec_pretty(&bundle).map_err(|e| e.to_string())?;
+    let path = spec.out_dir.join("bundle.json");
+    write_atomic(&path, &bytes)?;
+    LoadedBundle::load(&path)
+}
+
+#[derive(Clone, Debug)]
+pub struct StageChainSpec {
+    pub listing: PathBuf,
+    /// One descriptor per stage, in execution order.
+    pub descriptors: Vec<PathBuf>,
+    pub input: Option<PathBuf>,
+    pub generate: Option<(usize, usize, usize)>,
+    pub out_dir: PathBuf,
+    pub name: String,
+    pub timeout_ms: u64,
+}
+
+/// Build a short GPU chain whose targets and output names are taken from
+/// compiler-emitted `jotnar.stage/1` descriptors.
+///
+/// ```text
+/// payload -> stage 0 (descriptor target) -> OUT -> stage 1 (next target) -> OUT
+/// ```
+///
+/// Each stage references its descriptor as a content-addressed artifact, so
+/// the controller can verify the listing hash, targets, and typed streams at
+/// run time and record the descriptor hash in the receipt.
+pub fn build_stage_chain(spec: &StageChainSpec) -> Result<LoadedBundle, String> {
+    if spec.input.is_some() == spec.generate.is_some() {
+        return Err("stage chain needs exactly one of input or generate".to_string());
+    }
+    if spec.descriptors.is_empty() || spec.descriptors.len() > 3 {
+        return Err("stage chain needs 1..=3 descriptors".to_string());
+    }
+    fs::create_dir_all(&spec.out_dir)
+        .map_err(|e| format!("create {}: {e}", spec.out_dir.display()))?;
+    let listing_text = fs::read_to_string(&spec.listing)
+        .map_err(|e| format!("read listing {}: {e}", spec.listing.display()))?;
+    let listing_sha = sha256_hex(listing_text.as_bytes());
+    let listing_ref = write_artifact_bytes(&spec.out_dir, listing_text.as_bytes())?;
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert("listing".to_string(), listing_ref);
+
+    let mut parsed = Vec::new();
+    for (index, path) in spec.descriptors.iter().enumerate() {
+        let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let descriptor = parse_stage_descriptor(&bytes, &listing_sha)?;
+        if descriptor.targets.len() != 1 {
+            return Err(format!(
+                "descriptor {} declares targets {:?}; the chain builder needs exactly one",
+                path.display(),
+                descriptor.targets
+            ));
+        }
+        if descriptor.outputs.len() != 1 {
+            return Err(format!(
+                "descriptor {} declares {} outputs; the chain builder needs exactly one",
+                path.display(),
+                descriptor.outputs.len()
+            ));
+        }
+        if descriptor.inputs.is_empty() {
+            return Err(format!("descriptor {} declares no inputs", path.display()));
+        }
+        let key = format!("descriptor-{index:02}");
+        artifacts.insert(key.clone(), write_artifact_bytes(&spec.out_dir, &bytes)?);
+        parsed.push((key, descriptor));
+    }
+
+    let input_name = "input-00".to_string();
+    let input_ref = if let Some(path) = &spec.input {
+        let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let value: Json = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("payload {} is not JSON: {e}", path.display()))?;
+        if value.get("streams").and_then(|x| x.as_object()).is_none() {
+            return Err(format!(
+                "payload {} needs a top-level streams object",
+                path.display()
+            ));
+        }
+        write_artifact_bytes(&spec.out_dir, &bytes)?
+    } else {
+        let (h, w, c) = spec.generate.unwrap();
+        let elements = h
+            .checked_mul(w)
+            .and_then(|x| x.checked_mul(c))
+            .ok_or("generated payload size overflows")?;
+        if elements == 0 || elements > 16 * 1024 * 1024 {
+            return Err("generated payload must be 1..=16777216 elements".to_string());
+        }
+        let payload = generated_payload(h, w, c, 0);
+        let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+        write_artifact_bytes(&spec.out_dir, &bytes)?
+    };
+    artifacts.insert(input_name.clone(), input_ref);
+
+    let listing = StageRef {
+        artifact: Some("listing".to_string()),
+        stage: None,
+        output: None,
+        stream: None,
+    };
+    let mut stages = Vec::new();
+    let mut previous: Option<(String, String)> = None;
+    for (index, (descriptor_key, descriptor)) in parsed.iter().enumerate() {
+        let name = format!("{}-{index:02}", spec.name);
+        let output = descriptor
+            .outputs
+            .keys()
+            .next()
+            .cloned()
+            .ok_or("descriptor has no output")?;
+        let input_stream = descriptor
+            .inputs
+            .keys()
+            .next()
+            .cloned()
+            .ok_or("descriptor has no input")?;
+        let payload = match &previous {
+            None => StageRef {
+                artifact: Some(input_name.clone()),
+                stage: None,
+                output: None,
+                stream: None,
+            },
+            Some((stage, output)) => StageRef {
+                artifact: None,
+                stage: Some(stage.clone()),
+                output: Some(output.clone()),
+                stream: Some(input_stream),
+            },
+        };
+        let depends_on = previous
+            .as_ref()
+            .map(|(stage, _)| vec![stage.clone()])
+            .unwrap_or_default();
+        stages.push(StageSpec {
+            name: name.clone(),
+            depends_on,
+            executor: StageExecutor {
+                kind: "gpu".to_string(),
+                target: Some(descriptor.targets[0].clone()),
+            },
+            command: Vec::new(),
+            inputs: BTreeMap::new(),
+            outputs: vec![output.clone()],
+            timeout_ms: Some(spec.timeout_ms),
+            gpu: Some(GpuStage {
+                listing: listing.clone(),
+                descriptor: Some(StageRef {
+                    artifact: Some(descriptor_key.clone()),
+                    stage: None,
+                    output: None,
+                    stream: None,
+                }),
+                payloads: vec![payload],
+                frames: 1,
+                count: 1,
+            }),
+        });
+        previous = Some((name, output));
+    }
+
+    let bundle = Bundle {
+        schema: BUNDLE_SCHEMA.to_string(),
+        name: spec.name.clone(),
+        version: "1".to_string(),
+        description: "GPU chain derived from jotnar.stage/1 descriptors".to_string(),
         artifacts,
         stages,
     };
@@ -1019,6 +1227,18 @@ pub struct RunConfig {
     pub force: bool,
     pub timeout_ms: Option<u64>,
     pub compare: Vec<(String, PathBuf)>,
+    /// Shared fleet directory. When present, GPU stages take an advisory batch
+    /// admission before submission and record the lease table they saw.
+    pub fleet: Option<FleetConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FleetConfig {
+    pub dir: PathBuf,
+    /// Controller-declared slots per target, including interactive reserves.
+    pub capacity: u32,
+    pub max_wait_ms: u64,
+    pub lease_ms: u64,
 }
 
 fn stage_dir(ledger_dir: &Path, stage: &str) -> PathBuf {
@@ -1234,6 +1454,173 @@ fn poll_job(executor: &RemoteExecutor, job_id: &str, deadline_ms: u64) -> Result
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct DescriptorStream {
+    pub kind: Option<String>,
+    pub shape: Option<Vec<u64>>,
+    pub bytes: Option<u64>,
+}
+
+/// A parsed `jotnar.stage/1` claim. The controller stores the hash and the
+/// fields it used; it never forwards this document to an executor.
+#[derive(Clone, Debug)]
+pub struct StageDescriptor {
+    pub sha256: String,
+    pub name: String,
+    pub targets: Vec<String>,
+    pub kind: Option<String>,
+    pub ops: Vec<String>,
+    pub determinism: String,
+    pub inputs: BTreeMap<String, DescriptorStream>,
+    pub outputs: BTreeMap<String, DescriptorStream>,
+}
+
+fn descriptor_stream(value: &Json, field: &str) -> Result<DescriptorStream, String> {
+    let kind = value
+        .get("kind")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let shape = match value.get("shape") {
+        Some(Json::Array(dims)) => {
+            let mut out = Vec::with_capacity(dims.len());
+            for dim in dims {
+                let dim = dim
+                    .as_u64()
+                    .ok_or_else(|| format!("descriptor {field} shape has a non-integer dim"))?;
+                out.push(dim);
+            }
+            Some(out)
+        }
+        Some(Json::Null) | None => None,
+        Some(_) => return Err(format!("descriptor {field} shape must be an array or null")),
+    };
+    let bytes = value.get("bytes").and_then(|x| x.as_u64());
+    Ok(DescriptorStream { kind, shape, bytes })
+}
+
+fn descriptor_streams(
+    value: Option<&Json>,
+    field: &str,
+) -> Result<BTreeMap<String, DescriptorStream>, String> {
+    let object = value
+        .and_then(|x| x.as_object())
+        .ok_or_else(|| format!("descriptor needs an {field} object"))?;
+    let mut out = BTreeMap::new();
+    for (name, stream) in object {
+        out.insert(name.clone(), descriptor_stream(stream, field)?);
+    }
+    Ok(out)
+}
+
+fn parse_stage_descriptor(bytes: &[u8], listing_sha256: &str) -> Result<StageDescriptor, String> {
+    let value: Json =
+        serde_json::from_slice(bytes).map_err(|e| format!("stage descriptor is not JSON: {e}"))?;
+    if value.get("schema").and_then(|x| x.as_str()) != Some("jotnar.stage/1") {
+        return Err(format!(
+            "stage descriptor schema must be jotnar.stage/1, got {:?}",
+            value.get("schema")
+        ));
+    }
+    let declared_listing = value
+        .get("listing_sha256")
+        .and_then(|x| x.as_str())
+        .ok_or("stage descriptor needs listing_sha256")?;
+    if declared_listing != listing_sha256 {
+        return Err(format!(
+            "stage descriptor was compiled from listing {declared_listing}, but the stage listing is {listing_sha256}"
+        ));
+    }
+    let targets = value
+        .get("targets")
+        .and_then(|x| x.as_array())
+        .ok_or("stage descriptor needs targets[]")?
+        .iter()
+        .map(|t| {
+            t.as_str()
+                .map(str::to_string)
+                .ok_or("stage descriptor targets must be strings")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if targets.is_empty() {
+        return Err("stage descriptor has no targets".to_string());
+    }
+    let ops = value
+        .get("ops")
+        .and_then(|x| x.as_array())
+        .map(|ops| {
+            ops.iter()
+                .filter_map(|op| op.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(StageDescriptor {
+        sha256: sha256_hex(bytes),
+        name: value
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        targets,
+        kind: value
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        ops,
+        determinism: value
+            .get("determinism")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        inputs: descriptor_streams(value.get("inputs"), "inputs")?,
+        outputs: descriptor_streams(value.get("outputs"), "outputs")?,
+    })
+}
+
+fn check_descriptor_inputs(
+    descriptor: &StageDescriptor,
+    streams: &serde_json::Map<String, Json>,
+    stage: &StageSpec,
+) -> Result<(), String> {
+    for (name, declared) in &descriptor.inputs {
+        let supplied = streams.get(name).ok_or_else(|| {
+            format!(
+                "gpu stage {:?} descriptor declares input {name:?}, but the payload does not supply it",
+                stage.name
+            )
+        })?;
+        let kind = declared
+            .kind
+            .as_deref()
+            .ok_or_else(|| format!("descriptor input {name:?} has no kind"))?;
+        if let Some(supplied_kind) = supplied.get("kind").and_then(|x| x.as_str()) {
+            if supplied_kind != kind {
+                return Err(format!(
+                    "gpu stage {:?} input {name:?} is {supplied_kind}, descriptor claims {kind}",
+                    stage.name
+                ));
+            }
+        }
+        if let Some(shape) = &declared.shape {
+            let supplied_shape = supplied
+                .get("shape")
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| format!("payload input {name:?} has no shape"))?;
+            let got = supplied_shape
+                .iter()
+                .map(|d| d.as_u64())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| format!("payload input {name:?} has a non-integer shape"))?;
+            if &got != shape {
+                return Err(format!(
+                    "gpu stage {:?} input {name:?} shape {got:?} does not match descriptor {shape:?}",
+                    stage.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 struct StagePlan {
     /// Resolved argv for native stages; a synthetic plan descriptor for GPU
     /// stages. The ledger records it so a reused stage has a stable identity.
@@ -1242,6 +1629,7 @@ struct StagePlan {
     body: Vec<u8>,
     header: Json,
     timeout_ms: u64,
+    descriptor: Option<StageDescriptor>,
 }
 
 fn plan_native_stage(
@@ -1292,6 +1680,7 @@ fn plan_native_stage(
         body,
         header,
         timeout_ms,
+        descriptor: None,
     })
 }
 
@@ -1477,6 +1866,34 @@ fn plan_gpu_stage(
     if streams.is_empty() {
         return Err(format!("gpu stage {:?} has no payload streams", stage.name));
     }
+    let mut descriptor = None;
+    if let Some(descriptor_ref) = &gpu.descriptor {
+        let artifact = descriptor_ref
+            .artifact
+            .as_deref()
+            .ok_or_else(|| format!("gpu stage {:?} descriptor needs an artifact", stage.name))?;
+        let (bytes, artifact_ref) = loaded.artifact_bytes(artifact)?;
+        let parsed = parse_stage_descriptor(&bytes, &listing_ref.sha256)?;
+        let declared: BTreeSet<&str> = parsed.outputs.keys().map(String::as_str).collect();
+        let actual: BTreeSet<&str> = stage.outputs.iter().map(String::as_str).collect();
+        if declared != actual {
+            return Err(format!(
+                "gpu stage {:?} outputs {:?} do not match descriptor outputs {:?}",
+                stage.name, actual, declared
+            ));
+        }
+        check_descriptor_inputs(&parsed, &streams, stage)?;
+        inputs.insert(
+            "descriptor".to_string(),
+            FileInfo {
+                sha256: artifact_ref.sha256.clone(),
+                bytes: artifact_ref.bytes,
+                ..Default::default()
+            },
+        );
+        plan.push(format!("descriptor:{}", parsed.sha256));
+        descriptor = Some(parsed);
+    }
     let body = serde_json::to_vec(&json!({
         "listing": listing,
         "payload": {"streams": streams},
@@ -1499,7 +1916,66 @@ fn plan_gpu_stage(
         body,
         header,
         timeout_ms,
+        descriptor,
     })
+}
+
+fn check_descriptor_outputs(
+    descriptor: &StageDescriptor,
+    header: &Json,
+    stage: &StageSpec,
+) -> Result<(), String> {
+    let outputs = header
+        .get("outputs")
+        .and_then(|x| x.as_array())
+        .ok_or("binary result has no outputs")?;
+    for (name, declared) in &descriptor.outputs {
+        let got = outputs
+            .iter()
+            .find(|d| d.get("name").and_then(|x| x.as_str()) == Some(name.as_str()))
+            .ok_or_else(|| {
+                format!(
+                    "gpu stage {:?} returned no declared output {name:?}",
+                    stage.name
+                )
+            })?;
+        if let Some(kind) = &declared.kind {
+            let got_kind = got.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+            if got_kind != kind {
+                return Err(format!(
+                    "gpu stage {:?} output {name:?} is {got_kind}, descriptor claims {kind}",
+                    stage.name
+                ));
+            }
+        }
+        if let Some(shape) = &declared.shape {
+            let got_shape = got
+                .get("shape")
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| format!("output {name:?} has no shape"))?;
+            let got_dims = got_shape
+                .iter()
+                .map(|d| d.as_u64())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| format!("output {name:?} has a non-integer shape"))?;
+            if &got_dims != shape {
+                return Err(format!(
+                    "gpu stage {:?} output {name:?} shape {got_dims:?} does not match descriptor {shape:?}",
+                    stage.name
+                ));
+            }
+        }
+        if let Some(bytes) = declared.bytes {
+            let got_bytes = got.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+            if got_bytes != bytes {
+                return Err(format!(
+                    "gpu stage {:?} output {name:?} is {got_bytes} bytes, descriptor claims {bytes}",
+                    stage.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn executor_matches(capability: &Json, stage: &StageSpec) -> bool {
@@ -1589,6 +2065,85 @@ fn record_stage_error(
     ledger.save(ledger_dir)
 }
 
+fn effective_target(capability: &Json, stage: &StageSpec) -> String {
+    capability
+        .get("target")
+        .and_then(|x| x.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(stage.target())
+        .to_string()
+}
+
+fn telemetry_snapshot(executor: &RemoteExecutor, addr: &str, target: &str) -> Json {
+    let queried_ms = now_ms();
+    match executor.telemetry() {
+        Ok(health) => {
+            let reply_ts = health.get("ts_ms").and_then(|x| x.as_u64());
+            json!({
+                "addr": addr,
+                "target": target,
+                "queried_ms": queried_ms,
+                "ok": true,
+                "reply_ts_ms": reply_ts,
+                "age_ms": reply_ts.map(|ts| queried_ms.saturating_sub(ts)),
+                "health": health,
+            })
+        }
+        Err((code, msg)) => json!({
+            "addr": addr,
+            "target": target,
+            "queried_ms": queried_ms,
+            "ok": false,
+            "error": {"code": code, "msg": msg},
+        }),
+    }
+}
+
+fn fleet_receipt_block(cfg: &RunConfig, owner: &str, stages: &BTreeMap<String, Json>) -> Json {
+    match &cfg.fleet {
+        Some(fc) => json!({
+            "enabled": true,
+            "advisory": true,
+            "dir": fc.dir.display().to_string(),
+            "owner": owner,
+            "capacity_per_target": fc.capacity,
+            "max_wait_ms": fc.max_wait_ms,
+            "stages": stages,
+        }),
+        None => json!({"enabled": false, "stages": stages}),
+    }
+}
+
+fn write_failure_receipt(
+    loaded: &LoadedBundle,
+    ledger_dir: &Path,
+    cfg: &RunConfig,
+    owner: &str,
+    fleet_stages: &BTreeMap<String, Json>,
+    ledger: &Ledger,
+    error: &str,
+) -> Result<(), String> {
+    let receipt = json!({
+        "schema": RECEIPT_SCHEMA,
+        "ok": false,
+        "error": error,
+        "bundle": {
+            "name": loaded.bundle.name,
+            "version": loaded.bundle.version,
+            "sha256": loaded.sha256,
+        },
+        "ledger": ledger_dir.display().to_string(),
+        "stages": &ledger.stages,
+        "comparisons": [],
+        "executors": cfg.executors.iter().map(|e| &e.addr).collect::<Vec<_>>(),
+        "placement": &cfg.placement,
+        "fleet": fleet_receipt_block(cfg, owner, fleet_stages),
+        "finished_ms": now_ms(),
+    });
+    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
+    write_atomic(&ledger_dir.join("receipt.json"), &bytes)
+}
+
 pub fn run_bundle(
     loaded: &LoadedBundle,
     ledger_dir: &Path,
@@ -1618,6 +2173,9 @@ pub fn run_bundle(
         .iter()
         .map(|s| (s.name.as_str(), s))
         .collect();
+    let fleet_owner = format!("jotnar-workload:{}:{}", std::process::id(), now_ms());
+    let mut fleet_stages: BTreeMap<String, Json> = BTreeMap::new();
+    let mut descriptor_receipts: BTreeMap<String, Json> = BTreeMap::new();
     let mut comparisons = Vec::new();
     let mut comparison_ok = true;
 
@@ -1662,6 +2220,125 @@ pub fn run_bundle(
         let addr = endpoint.addr.clone();
         let executor =
             RemoteExecutor::new(endpoint.capability.clone(), addr.clone(), cfg.token.clone());
+        let effective = effective_target(&endpoint.capability, stage);
+        if let Some(desc) = &plan.descriptor {
+            if !desc.targets.iter().any(|t| t == &effective) {
+                let err = format!(
+                    "stage {name:?} descriptor {} allows targets {:?}, but {addr} is {effective}",
+                    desc.sha256, desc.targets
+                );
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "descriptor-target-rejected",
+                    &addr,
+                    None,
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                let _ = write_failure_receipt(
+                    loaded,
+                    ledger_dir,
+                    cfg,
+                    &fleet_owner,
+                    &fleet_stages,
+                    &ledger,
+                    &err,
+                );
+                return Err(err);
+            }
+            descriptor_receipts.insert(
+                name.clone(),
+                json!({
+                    "sha256": desc.sha256,
+                    "name": desc.name,
+                    "targets": desc.targets,
+                    "kind": desc.kind,
+                    "ops": desc.ops,
+                    "determinism": desc.determinism,
+                    "target": effective,
+                    "executor": addr,
+                    "accepted": true,
+                }),
+            );
+        }
+        let mut _admission = None;
+        if let Some(fc) = &cfg.fleet {
+            let target = effective.clone();
+            let telemetry = telemetry_snapshot(&executor, &addr, &target);
+            let mut entry = json!({"telemetry": telemetry});
+            if stage.is_gpu() {
+                let hold_ms = plan.timeout_ms.saturating_add(60_000).max(fc.lease_ms);
+                let fleet = Fleet::new(&fc.dir, &fleet_owner, fc.capacity, fc.max_wait_ms, hold_ms);
+                match fleet.acquire_batch(&target, &stage.name) {
+                    Ok(guard) => {
+                        entry["admission"] = guard.record().json();
+                        _admission = Some(guard);
+                    }
+                    Err(AdmissionError::Rejected(record)) => {
+                        entry["admission"] = record.json();
+                        fleet_stages.insert(name.clone(), entry);
+                        let err = format!(
+                            "stage {name:?} rejected by fleet admission on {target}: {}",
+                            record.reason
+                        );
+                        record_stage_error(
+                            &mut ledger,
+                            ledger_dir,
+                            name,
+                            &prior,
+                            "admission-rejected",
+                            &addr,
+                            None,
+                            &plan.command,
+                            &plan.inputs,
+                            &err,
+                        )?;
+                        let _ = write_failure_receipt(
+                            loaded,
+                            ledger_dir,
+                            cfg,
+                            &fleet_owner,
+                            &fleet_stages,
+                            &ledger,
+                            &err,
+                        );
+                        return Err(err);
+                    }
+                    Err(AdmissionError::Io(e)) => {
+                        entry["admission_error"] = json!(e);
+                        fleet_stages.insert(name.clone(), entry);
+                        let err = format!("stage {name:?} fleet admission failed: {e}");
+                        record_stage_error(
+                            &mut ledger,
+                            ledger_dir,
+                            name,
+                            &prior,
+                            "admission-failed",
+                            &addr,
+                            None,
+                            &plan.command,
+                            &plan.inputs,
+                            &err,
+                        )?;
+                        let _ = write_failure_receipt(
+                            loaded,
+                            ledger_dir,
+                            cfg,
+                            &fleet_owner,
+                            &fleet_stages,
+                            &ledger,
+                            &err,
+                        );
+                        return Err(err);
+                    }
+                }
+            }
+            fleet_stages.insert(name.clone(), entry);
+        }
         let mut spec = plan.header.clone();
         if let Some(t) = &cfg.token {
             spec["auth"] = json!(t);
@@ -1704,6 +2381,9 @@ pub fn run_bundle(
                 return Err(err);
             }
         };
+        if let Some(entry) = descriptor_receipts.get_mut(name) {
+            entry["job_id"] = json!(job_id);
+        }
         let job = match poll_job(&executor, &job_id, plan.timeout_ms.saturating_add(60_000)) {
             Ok(job) => job,
             Err(e) => {
@@ -1782,6 +2462,33 @@ pub fn run_bundle(
                 return Err(err);
             }
         }
+        if let Some(descriptor) = &plan.descriptor {
+            if let Err(e) = check_descriptor_outputs(descriptor, &header, stage) {
+                let err = format!("invalid descriptor output from {addr}: {e}");
+                record_stage_error(
+                    &mut ledger,
+                    ledger_dir,
+                    name,
+                    &prior,
+                    "descriptor-output-rejected",
+                    &addr,
+                    Some(&job_id),
+                    &plan.command,
+                    &plan.inputs,
+                    &err,
+                )?;
+                let _ = write_failure_receipt(
+                    loaded,
+                    ledger_dir,
+                    cfg,
+                    &fleet_owner,
+                    &fleet_stages,
+                    &ledger,
+                    &err,
+                );
+                return Err(err);
+            }
+        }
         let outputs = match split_result(stage, &header, &result_body, ledger_dir) {
             Ok(outputs) => outputs,
             Err(e) => {
@@ -1855,6 +2562,40 @@ pub fn run_bundle(
         }));
     }
 
+    let mut exactness: BTreeMap<String, Json> = BTreeMap::new();
+    for (stage_name, entry) in &descriptor_receipts {
+        let relevant: Vec<&Json> = comparisons
+            .iter()
+            .filter(|c| c.get("stage").and_then(|x| x.as_str()) == Some(stage_name.as_str()))
+            .collect();
+        let verdict = if relevant.is_empty() {
+            "not-compared"
+        } else if relevant
+            .iter()
+            .all(|c| c.get("match").and_then(|x| x.as_bool()) == Some(true))
+        {
+            "exact"
+        } else {
+            "mismatch"
+        };
+        exactness.insert(
+            stage_name.clone(),
+            json!({
+                "declared_determinism": entry.get("determinism"),
+                "verdict": verdict,
+                "outputs": relevant
+                    .iter()
+                    .map(|c| json!({
+                        "output": c.get("output"),
+                        "sha256": c.get("sha256"),
+                        "reference_sha256": c.get("reference_sha256"),
+                        "match": c.get("match"),
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+
     let receipt = json!({
         "schema": RECEIPT_SCHEMA,
         "ok": comparison_ok,
@@ -1868,6 +2609,9 @@ pub fn run_bundle(
         "comparisons": comparisons,
         "executors": cfg.executors.iter().map(|e| &e.addr).collect::<Vec<_>>(),
         "placement": cfg.placement,
+        "fleet": fleet_receipt_block(cfg, &fleet_owner, &fleet_stages),
+        "descriptors": descriptor_receipts,
+        "exactness": exactness,
         "finished_ms": now_ms(),
     });
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
@@ -2009,6 +2753,7 @@ mod tests {
                     output: None,
                     stream: None,
                 },
+                descriptor: None,
                 payloads,
                 frames: 1,
                 count: 1,
@@ -2170,6 +2915,7 @@ mod tests {
             force: false,
             timeout_ms: None,
             compare: Vec::new(),
+            fleet: None,
         };
         assert!(select_executor(&cfg, &stage, 0).is_err());
         let missing = RunConfig {

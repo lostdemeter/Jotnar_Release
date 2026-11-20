@@ -304,10 +304,16 @@ jotnar-native-runner --allow PROGRAM [--allow PROGRAM]... [--bind ADDR] [--token
 jotnar-workload bundle-doom --image FILE --wad FILE --out DIR [--frames N]
 jotnar-workload bundle-gpu --listing FILE --out DIR (--input PAYLOAD.json | --generate HxWxC)
                             [--items N] [--name NAME] [--timeout-ms N]
+jotnar-workload bundle-stage-chain --listing FILE --descriptor FILE [--descriptor FILE]...
+                            --out DIR (--input PAYLOAD.json | --generate HxWxC)
+                            [--name NAME] [--timeout-ms N]
 jotnar-workload run --bundle PATH --ledger DIR [--program FILE]
                     [--executor ADDR]... [--gpu-executor cuda=ADDR]... [--gpu-executor hip=ADDR]...
                     [--place STAGE=ADDR]... [--compare STAGE:OUTPUT=FILE]...
+                    [--fleet-dir DIR] [--fleet-slots N] [--fleet-max-wait-ms N]
 jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
+                  [--fleet-dir DIR] [--lease-ms N]
+jotnar build FILE --payload FILE --outputs a,b [--stage-out FILE] [--descriptor-only]
 jotnar-doom-coord ... --viewer-listen ADDR
 jotnar-doom-view --addr ADDR
 jotnar-ctl  [--addr ADDR] [--token SECRET] ping | list

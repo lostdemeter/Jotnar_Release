@@ -3,6 +3,7 @@
 pub mod capability;
 pub mod doom_pipeline;
 pub mod executor;
+pub mod fleet;
 pub mod hardware;
 pub mod hud;
 pub mod job;

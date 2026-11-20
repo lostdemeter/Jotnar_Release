@@ -134,4 +134,13 @@ impl JobClient {
     pub fn ping(&self) -> Result<Json, (String, String)> {
         self.call("ping", json!({}), &[])
     }
+
+    /// Live executor view: queue, running jobs, warm workers, recent jobs.
+    ///
+    /// `health` is a request that reports; it carries no placement policy and
+    /// is not part of discovery. Executors that do not implement it return an
+    /// error, which the controller records and treats as unknown.
+    pub fn health(&self) -> Result<Json, (String, String)> {
+        self.call("health", json!({}), &[])
+    }
 }

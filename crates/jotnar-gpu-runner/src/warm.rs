@@ -92,6 +92,15 @@ impl WarmCache {
         self.order.retain(|k| k != key);
     }
 
+    /// Number of live warm workers (one per compiled artifact key).
+    pub fn len(&self) -> usize {
+        self.workers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
+
     /// Remove workers idle for at least `idle` and not currently used.
     ///
     /// Returns the dropped workers so the caller can release them outside the

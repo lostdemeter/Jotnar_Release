@@ -14,7 +14,7 @@ fn usage() -> &'static str {
        jotnar run    <file.asm> --payload FILE [--out FILE] [--outputs a,b] [--threads N] [--stdlib DIR]\n\
        jotnar emit-c <file.asm> --payload FILE --outputs a,b [--out FILE.c] [--stdlib DIR]\n\
        jotnar emit-rust <file.asm> --payload FILE --outputs a,b [--out FILE.rs] [--stdlib DIR] (needs rustc)\n\
-       jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR] [--shape-only]\n\
+       jotnar build  <file.asm> --payload FILE --outputs a,b [--workdir DIR] [--name NAME] [--stdlib DIR] [--shape-only] [--stage-out FILE] [--descriptor-only]\n\
        jotnar repeat <file.asm> --payload FILE [--grow a,b] [--out FILE] [--stdlib DIR]\n\
        jotnar fusion <file.asm> --plan FILE --out FILE [--provenance FILE] [--stdlib DIR]\n\
        jotnar ops\n"
@@ -37,6 +37,8 @@ struct Args {
     provenance: Option<PathBuf>,
     threads: usize,
     shape_only: bool,
+    stage_out: Option<PathBuf>,
+    descriptor_only: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -66,6 +68,8 @@ fn parse_args() -> Result<Args, String> {
             provenance: None,
             threads: 1,
             shape_only: false,
+            stage_out: None,
+            descriptor_only: false,
         });
     }
     let file = if args.is_empty() {
@@ -90,6 +94,8 @@ fn parse_args() -> Result<Args, String> {
         provenance: None,
         threads: 1,
         shape_only: false,
+        stage_out: None,
+        descriptor_only: false,
     };
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -115,6 +121,10 @@ fn parse_args() -> Result<Args, String> {
             "--target" => a.target = it.next().ok_or("--target needs a value")?,
             "--fp16" => a.fp16 = true,
             "--shape-only" => a.shape_only = true,
+            "--stage-out" => {
+                a.stage_out = Some(PathBuf::from(it.next().ok_or("--stage-out needs a file")?))
+            }
+            "--descriptor-only" => a.descriptor_only = true,
             "--threads" => {
                 let s = it.next().ok_or("--threads needs a count")?;
                 a.threads = s
@@ -128,13 +138,9 @@ fn parse_args() -> Result<Args, String> {
                 let s = it.next().ok_or("--grow needs a comma list")?;
                 a.grow = Some(s.split(',').map(|x| x.trim().to_string()).collect());
             }
-            "--plan" => {
-                a.plan = Some(PathBuf::from(it.next().ok_or("--plan needs a file")?))
-            }
+            "--plan" => a.plan = Some(PathBuf::from(it.next().ok_or("--plan needs a file")?)),
             "--provenance" => {
-                a.provenance = Some(PathBuf::from(
-                    it.next().ok_or("--provenance needs a file")?,
-                ))
+                a.provenance = Some(PathBuf::from(it.next().ok_or("--provenance needs a file")?))
             }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
@@ -192,19 +198,20 @@ fn real_main() -> Result<(), String> {
         let out = args.out.as_ref().ok_or("fusion: --out is required")?;
         let plan_text = std::fs::read_to_string(plan_path)
             .map_err(|e| format!("cannot read {}: {e}", plan_path.display()))?;
-        let plan: serde_json::Value = serde_json::from_str(&plan_text)
-            .map_err(|e| format!("bad fusion plan JSON: {e}"))?;
-        let (fused, provenance) = jotnar::fusion::apply(&text, &plan)
-            .map_err(|e| e.to_string())?;
+        let plan: serde_json::Value =
+            serde_json::from_str(&plan_text).map_err(|e| format!("bad fusion plan JSON: {e}"))?;
+        let (fused, provenance) = jotnar::fusion::apply(&text, &plan).map_err(|e| e.to_string())?;
         // The fused listing must still assemble and bind before we write it.
         asm::assemble(&fused, &opts).map_err(|e| e.to_string())?;
-        std::fs::write(out, fused)
-            .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        std::fs::write(out, fused).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
         if let Some(p) = args.provenance.as_ref() {
             std::fs::write(p, serde_json::to_string_pretty(&provenance).unwrap())
                 .map_err(|e| format!("cannot write {}: {e}", p.display()))?;
         }
-        let n = provenance["groups"].as_array().map(|a| a.len()).unwrap_or(0);
+        let n = provenance["groups"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
         println!(
             "fusion: {n} group(s), pass {:?}, wrote {}",
             provenance["pass_version"].as_str().unwrap_or("?"),
@@ -337,6 +344,9 @@ fn real_main() -> Result<(), String> {
             }
             .map_err(|e| e.to_string())?;
             let target = Target::parse(&args.target).map_err(|e| e.to_string())?;
+            let asm_opts = opts.clone();
+            let program = asm::parse(&text, &asm_opts).map_err(|e| e.to_string())?;
+            let sample = payload.clone();
             let opts = CompileOptions {
                 target,
                 outputs,
@@ -346,8 +356,17 @@ fn real_main() -> Result<(), String> {
             let art = codegen::compile_program(&text, &opts, payload).map_err(|e| e.to_string())?;
             let workdir = args.workdir.unwrap_or_else(|| PathBuf::from("."));
             let name = args.name.unwrap_or_else(|| "prog".to_string());
-            let exe = codegen::build(&art.source, &workdir, &name, opts.target)
-                .map_err(|e| e.to_string())?;
+            if args.descriptor_only && args.stage_out.is_none() {
+                return Err("build: --descriptor-only needs --stage-out FILE".to_string());
+            }
+            let exe = if args.descriptor_only {
+                None
+            } else {
+                Some(
+                    codegen::build(&art.source, &workdir, &name, opts.target)
+                        .map_err(|e| e.to_string())?,
+                )
+            };
             let mut shapes = serde_json::Map::new();
             for (src, san) in art.source_inputs.iter().zip(art.inputs.iter()) {
                 if let Some(s) = art.streams.get(san) {
@@ -367,7 +386,7 @@ fn real_main() -> Result<(), String> {
                 "shapes": shapes,
                 "argv": art.n_argv,
                 "warm_frame": art.warm_frame,
-                "executable": exe.file_name()
+                "executable": exe.as_ref().and_then(|p| p.file_name())
                     .map(|x| x.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 "serve": {
@@ -381,7 +400,29 @@ fn real_main() -> Result<(), String> {
             let mpath = workdir.join(format!("{name}.manifest.json"));
             std::fs::write(&mpath, serde_json::to_string_pretty(&manifest).unwrap())
                 .map_err(|e| format!("cannot write {}: {e}", mpath.display()))?;
-            println!("{}", exe.display());
+            if let Some(path) = &args.stage_out {
+                let descriptor = jotnar::stage::build(&jotnar::stage::StageContext {
+                    name: &name,
+                    listing: &text,
+                    target: opts.target,
+                    artifact: &art,
+                    program: &program,
+                    sample: &sample,
+                    compiler_version: env!("CARGO_PKG_VERSION"),
+                    compiler_runtime: jotnar::protocol::RUNTIME_VERSION,
+                })
+                .map_err(|e| format!("stage descriptor: {e}"))?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+                }
+                std::fs::write(path, serde_json::to_string_pretty(&descriptor).unwrap())
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                eprintln!("stage: {}", path.display());
+            }
+            if let Some(exe) = &exe {
+                println!("{}", exe.display());
+            }
             Ok(())
         }
         "repeat" => {

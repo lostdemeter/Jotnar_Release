@@ -156,6 +156,36 @@ The binary-to-payload conversion supports `F32`, `F64`, `I64`, `U8`, and
 `Bool`. Non-finite `F32`/`F64` values are rejected rather than serialized as
 JSON `null`.
 
+### Stage descriptors
+
+A GPU stage may carry a compiler-emitted `jotnar.stage/1` artifact:
+
+```json
+"gpu": {
+  "listing": {"artifact": "listing"},
+  "descriptor": {"artifact": "descriptor-00"},
+  "payloads": [{"artifact": "input-00"}],
+  "frames": 1,
+  "count": 1
+}
+```
+
+The controller loads and hashes the descriptor, checks the listing hash, typed
+inputs against the actual payload, and exact output names against the stage.
+At placement time it rejects a target that is not in the descriptor's
+`targets` **before submission**. The receipt records the descriptor hash,
+declared targets/ops/determinism, executor, job id, output hashes, and the
+exactness verdict. The ledger's plan descriptor includes `descriptor:<sha256>`.
+
+`jotnar build --stage-out FILE [--descriptor-only]` emits the descriptor from
+the same artifact and parsed program that produce the manifest. Unknown shapes
+are reported as `null` rather than invented; `partitionable` is declarative
+and not used for splitting yet.
+
+`jotnar-workload bundle-stage-chain` builds a 1–3 stage GPU chain whose targets
+and output names come from descriptors, with an intermediate artifact handoff
+between stages.
+
 ### Stage graph and ledger
 
 The graph is validated for unknown dependencies and cycles. The order is
@@ -185,6 +215,23 @@ kinds.
 
 The controller checks capabilities only as inventory; it never compiles or
 interprets a program itself.
+
+### Fleet admission
+
+`--fleet-dir DIR` turns the controller into a fleet controller for batch work:
+before submitting a GPU stage it snapshots executor `health`, reads the shared
+lease table, and admits or defers the stage against the target's declared
+capacity. DOOM registers an interactive lease in the same directory.
+
+```sh
+jotnar-workload --token test run ... \
+  --fleet-dir /tmp/opencode/fleet --fleet-slots 1 \
+  --fleet-max-wait-ms 60000
+```
+
+The receipt (`fleet` block) records executor telemetry, per-stage admission
+decisions, waits, deferral reasons, the leases seen, and whether enforcement
+was advisory. See [`FLEET_ADMISSION.md`](FLEET_ADMISSION.md).
 
 ## Commands
 
@@ -348,6 +395,10 @@ its budget even when p95 looks healthy.
   chunked or range-fetch transport yet.
 - The controller does not retry failed stages yet; the ledger records the
   failure and the run can be resumed after the cause is fixed.
+- Fleet leases are advisory and GPU-only. A runner still accepts work from a
+  client that ignores the shared directory; CPU stages are not admitted.
+- There is no preemption of a running GPU job. Batch work is deferred while an
+  interactive lease holds the declared slot.
 - The bundle layer supports the native and GPU executor kinds. CPU
   (`jotnar-noded`) stages are not wired into the bundle schema yet.
 - GPU `frames` and `count` are 1 in v1. Multi-frame results need an output

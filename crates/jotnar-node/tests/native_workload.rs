@@ -148,6 +148,7 @@ fn two_node_stage_handoff_uses_the_network_and_a_ledger() {
         force: false,
         timeout_ms: Some(30_000),
         compare: vec![("stage2.out2".to_string(), reference)],
+        fleet: None,
     };
     let result = run_bundle(&loaded, &root.join("ledger"), &cfg);
     let result = match result {

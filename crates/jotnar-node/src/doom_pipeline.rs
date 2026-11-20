@@ -205,6 +205,18 @@ pub fn latency_summary(samples: &[u64]) -> (u64, u64, u64) {
     (p50, p95, max)
 }
 
+/// Nearest-rank percentile. `p` is clamped to 1..=100; an empty set is 0.
+pub fn percentile(samples: &[u64], p: u32) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut s = samples.to_vec();
+    s.sort_unstable();
+    let p = p.clamp(1, 100) as usize;
+    let rank = (s.len() * p + 99) / 100;
+    s[rank.max(1) - 1]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +342,15 @@ mod tests {
     fn latency_summary_is_ordered() {
         assert_eq!(latency_summary(&[]), (0, 0, 0));
         assert_eq!(latency_summary(&[5, 1, 3, 9, 7]), (5, 9, 9));
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        assert_eq!(percentile(&[], 99), 0);
+        assert_eq!(percentile(&[5, 1, 3, 9, 7], 50), 5);
+        assert_eq!(percentile(&[5, 1, 3, 9, 7], 99), 9);
+        let hundred: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile(&hundred, 99), 99);
+        assert_eq!(percentile(&hundred, 100), 100);
     }
 }

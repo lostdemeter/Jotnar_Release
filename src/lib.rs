@@ -39,6 +39,7 @@ pub mod protocol;
 pub mod runtime;
 pub mod rv32;
 pub mod showcase;
+pub mod stage;
 pub mod stream_arena;
 pub mod value;
 pub mod verilog;

@@ -20,8 +20,8 @@ use std::time::Duration;
 use serde_json::{json, Value as Json};
 
 use jotnar_node_tools::workload::{
-    build_doom_bundle, build_gpu_bundle, run_bundle, ExecutorEndpoint, GpuBundleSpec, Ledger,
-    LoadedBundle, RunConfig,
+    build_doom_bundle, build_gpu_bundle, build_stage_chain, run_bundle, ExecutorEndpoint,
+    FleetConfig, GpuBundleSpec, Ledger, LoadedBundle, RunConfig, StageChainSpec,
 };
 
 #[allow(dead_code)]
@@ -37,12 +37,17 @@ usage:
   jotnar-workload bundle-gpu --listing FILE --out DIR \
     (--input PAYLOAD.json | --generate HxWxC) \
     [--items N] [--name NAME] [--timeout-ms N]
+  jotnar-workload bundle-stage-chain --listing FILE --descriptor FILE \
+    [--descriptor FILE]... --out DIR \
+    (--input PAYLOAD.json | --generate HxWxC) [--name NAME] [--timeout-ms N]
   jotnar-workload [--token T] plan --bundle PATH [--place STAGE=ADDR]...
   jotnar-workload [--token T] [--discover-timeout-ms N] run \
     --bundle PATH --ledger DIR [--program FILE] \
     [--executor ADDR]... [--gpu-executor TARGET=ADDR]... \
     [--place STAGE=ADDR]... [--discover-native] [--discover-gpu] \
-    [--force] [--timeout-ms N] [--compare STAGE:OUTPUT=FILE]...
+    [--force] [--timeout-ms N] [--compare STAGE:OUTPUT=FILE]... \
+    [--fleet-dir DIR] [--fleet-slots N] [--fleet-max-wait-ms N] \
+    [--fleet-lease-ms N]
   jotnar-workload status --ledger DIR
 
 A DOOM run moves frame1's checkpoint to frame2's executor; the second
@@ -51,7 +56,9 @@ A GPU run sends listing + JSON payload to a target-aware runner; a stage
 output can feed the next stage's payload without a JSON round trip in the
 bundle.
 --executor is a native executor. --gpu-executor takes cuda=ADDR or
-hip=ADDR."#
+hip=ADDR.
+--fleet-dir enables advisory batch admission against live interactive
+leases in a shared directory; without it, behavior is best effort."#
 }
 
 struct Global {
@@ -223,6 +230,57 @@ fn bundle_gpu(args: Vec<String>) -> Result<Json, String> {
     }))
 }
 
+fn bundle_stage_chain(args: Vec<String>) -> Result<Json, String> {
+    let mut listing = None;
+    let mut descriptors = Vec::new();
+    let mut input = None;
+    let mut generate = None;
+    let mut out = None;
+    let mut name = "stage-chain".to_string();
+    let mut timeout_ms = 600_000u64;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--listing" => listing = Some(PathBuf::from(take_value(&mut it, "--listing")?)),
+            "--descriptor" => descriptors.push(PathBuf::from(take_value(&mut it, "--descriptor")?)),
+            "--input" => input = Some(PathBuf::from(take_value(&mut it, "--input")?)),
+            "--generate" => generate = Some(parse_size(&take_value(&mut it, "--generate")?)?),
+            "--out" => out = Some(PathBuf::from(take_value(&mut it, "--out")?)),
+            "--name" => name = take_value(&mut it, "--name")?,
+            "--timeout-ms" => {
+                timeout_ms = take_value(&mut it, "--timeout-ms")?
+                    .parse()
+                    .map_err(|_| "--timeout-ms must be an integer")?
+            }
+            other => return Err(format!("unknown bundle-stage-chain argument {other:?}")),
+        }
+    }
+    let loaded = build_stage_chain(&StageChainSpec {
+        listing: listing.ok_or("bundle-stage-chain needs --listing FILE")?,
+        descriptors,
+        input,
+        generate,
+        out_dir: out.ok_or("bundle-stage-chain needs --out DIR")?,
+        name,
+        timeout_ms: timeout_ms.max(1),
+    })?;
+    let path = loaded.dir.join("bundle.json");
+    Ok(json!({
+        "bundle": path.display().to_string(),
+        "sha256": loaded.sha256,
+        "name": loaded.bundle.name,
+        "version": loaded.bundle.version,
+        "stages": loaded.bundle.stages.iter().map(|s| json!({
+            "name": s.name,
+            "target": s.target(),
+            "outputs": s.outputs,
+            "descriptor": s.gpu.as_ref().and_then(|g| g.descriptor.as_ref())
+                .and_then(|d| d.artifact.clone()),
+        })).collect::<Vec<_>>(),
+        "artifacts": loaded.bundle.artifacts,
+    }))
+}
+
 fn plan(args: Vec<String>) -> Result<Json, String> {
     let mut bundle = None;
     let mut placement = BTreeMap::new();
@@ -301,6 +359,10 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
     let mut force = false;
     let mut timeout_ms = None;
     let mut compare = Vec::new();
+    let mut fleet_dir = None;
+    let mut fleet_slots = 1u32;
+    let mut fleet_max_wait_ms = 30_000u64;
+    let mut fleet_lease_ms = 120_000u64;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -358,6 +420,22 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
                     .ok_or_else(|| format!("--compare needs STAGE:OUTPUT=FILE, got {value:?}"))?;
                 compare.push((key.to_string(), PathBuf::from(path)));
             }
+            "--fleet-dir" => fleet_dir = Some(PathBuf::from(take_value(&mut it, "--fleet-dir")?)),
+            "--fleet-slots" => {
+                fleet_slots = take_value(&mut it, "--fleet-slots")?
+                    .parse()
+                    .map_err(|_| "--fleet-slots must be an integer")?
+            }
+            "--fleet-max-wait-ms" => {
+                fleet_max_wait_ms = take_value(&mut it, "--fleet-max-wait-ms")?
+                    .parse()
+                    .map_err(|_| "--fleet-max-wait-ms must be an integer")?
+            }
+            "--fleet-lease-ms" => {
+                fleet_lease_ms = take_value(&mut it, "--fleet-lease-ms")?
+                    .parse()
+                    .map_err(|_| "--fleet-lease-ms must be an integer")?
+            }
             other => return Err(format!("unknown run argument {other:?}")),
         }
     }
@@ -391,6 +469,12 @@ fn run(global: &Global, args: Vec<String>) -> Result<Json, String> {
         force,
         timeout_ms,
         compare,
+        fleet: fleet_dir.map(|dir| FleetConfig {
+            dir,
+            capacity: fleet_slots.max(1),
+            max_wait_ms: fleet_max_wait_ms.max(1),
+            lease_ms: fleet_lease_ms.max(1),
+        }),
     };
     run_bundle(&loaded, &ledger.ok_or("run needs --ledger DIR")?, &cfg)
 }
@@ -423,6 +507,7 @@ fn real_main() -> Result<(), String> {
     let out = match cmd.as_str() {
         "bundle-doom" => bundle_doom(args)?,
         "bundle-gpu" => bundle_gpu(args)?,
+        "bundle-stage-chain" => bundle_stage_chain(args)?,
         "plan" => plan(args)?,
         "run" => run(&global, args)?,
         "status" => status(args)?,

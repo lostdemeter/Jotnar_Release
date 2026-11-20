@@ -58,6 +58,7 @@ struct Config {
     artifact_cache: Arc<Mutex<ArtifactCache>>,
     jobs: Arc<Mutex<JobStore>>,
     self_addr: String,
+    started_ms: u64,
 }
 
 struct CachedPayload {
@@ -368,6 +369,7 @@ fn real_main() -> Result<(), String> {
         artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(artifact_cache_entries))),
         jobs: Arc::new(Mutex::new(JobStore::new(RETAIN_JOBS))),
         self_addr: String::new(),
+        started_ms: now_ms() as u64,
     };
     if cfg.warm {
         if let Some(idle) = cfg.warm_idle {
@@ -541,6 +543,12 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
                 &[],
             )
         }
+        "health" => {
+            if let Err(e) = send_health(&mut stream, cfg, &id) {
+                send_error(&mut stream, &id, "health-failed", &e)?;
+            }
+            Ok(())
+        }
         "payload-put" => {
             let pid = format!("{:016x}", hash_bytes(payload));
             let cached = {
@@ -636,6 +644,83 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             &format!("no such message {other:?}"),
         ),
     }
+}
+
+fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), String> {
+    let now = now_ms();
+    let (queued, running, retained, jobs) = {
+        let store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = Vec::new();
+        for job_id in store.order.iter().rev().take(32) {
+            let Some(job) = store.jobs.get(job_id) else {
+                continue;
+            };
+            let elapsed_ms = match (job.started_ms, job.finished_ms) {
+                (Some(started), Some(finished)) => Some(finished.saturating_sub(started)),
+                (Some(started), None) => Some(now.saturating_sub(started)),
+                _ => None,
+            };
+            jobs.push(json!({
+                "id": job.id,
+                "state": job.state,
+                "created_ms": job.created_ms as u64,
+                "started_ms": job.started_ms.map(|v| v as u64),
+                "finished_ms": job.finished_ms.map(|v| v as u64),
+                "elapsed_ms": elapsed_ms.map(|v| v as u64),
+            }));
+        }
+        jobs.reverse();
+        let queued = store.jobs.values().filter(|j| j.state == "queued").count();
+        let running = store.jobs.values().filter(|j| j.state == "running").count();
+        (queued, running, store.jobs.len(), jobs)
+    };
+    let warm_workers = cfg
+        .warm_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len();
+    let arch = if cfg.target == Target::Hip {
+        std::env::var("HIP_ARCH").unwrap_or_default()
+    } else {
+        std::env::var("CUDA_ARCH").unwrap_or_default()
+    };
+    let toolchain = if cfg.target == Target::Hip {
+        "hipcc"
+    } else {
+        "nvcc"
+    };
+    send(
+        stream,
+        &json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "health-ok",
+            "ok": true,
+            "schema": "jotnar.executor.health/1",
+            "kind": "gpu",
+            "node_id": format!("Jotnar GPU {} {}", cfg.target.as_str(), std::process::id()),
+            "target": cfg.target.as_str(),
+            "arch": arch,
+            "toolchain": toolchain,
+            "runtime_version": RUNTIME_VERSION,
+            "ts_ms": now as u64,
+            "uptime_ms": (now as u64).saturating_sub(cfg.started_ms),
+            "limits": {
+                "workers": Json::Null,
+                "queue": Json::Null,
+                "max_frame": cfg.max_frame,
+            },
+            "activity": {
+                "queued": queued,
+                "running": running,
+                "retained": retained,
+                "warm_workers": warm_workers,
+                "warm_artifacts": warm_workers,
+            },
+            "jobs": jobs,
+        }),
+        &[],
+    )
 }
 
 fn submit_job(
@@ -1830,6 +1915,7 @@ mod async_job_tests {
             artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(2))),
             jobs: Arc::new(Mutex::new(JobStore::new(4))),
             self_addr: "127.0.0.1:0".to_string(),
+            started_ms: now_ms() as u64,
         }
     }
 

@@ -27,6 +27,15 @@ pub trait Executor {
 
     /// Cancel a queued job; running jobs may reject cancellation.
     fn cancel(&self, job_id: &str) -> Result<Json, (String, String)>;
+
+    /// Live executor view. Reporting only: the controller plans, the executor
+    /// answers. Executors without a live view return an error.
+    fn telemetry(&self) -> Result<Json, (String, String)> {
+        Err((
+            "unsupported".to_string(),
+            "executor has no telemetry".to_string(),
+        ))
+    }
 }
 
 /// A controller-side handle for one advertised CPU or GPU executor.
@@ -69,6 +78,10 @@ impl Executor for RemoteExecutor {
 
     fn cancel(&self, job_id: &str) -> Result<Json, (String, String)> {
         self.client.cancel(job_id)
+    }
+
+    fn telemetry(&self) -> Result<Json, (String, String)> {
+        self.client.health()
     }
 }
 

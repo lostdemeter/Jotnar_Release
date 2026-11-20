@@ -49,6 +49,7 @@ struct Config {
     keep_work: bool,
     mdns: bool,
     jobs: Arc<Mutex<JobStore>>,
+    started_ms: u64,
 }
 
 struct AsyncJob {
@@ -249,6 +250,7 @@ fn real_main() -> Result<(), String> {
         keep_work,
         mdns,
         jobs: Arc::new(Mutex::new(JobStore::new(RETAIN_JOBS))),
+        started_ms: now_ms() as u64,
     };
     let listener = TcpListener::bind(&cfg.bind).map_err(|e| format!("bind {}: {e}", cfg.bind))?;
     let port = listener
@@ -362,6 +364,70 @@ fn send_error(stream: &mut TcpStream, id: &Json, code: &str, msg: &str) -> Resul
     )
 }
 
+fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), String> {
+    let now = now_ms();
+    let (queued, running, retained, jobs) = {
+        let store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = Vec::new();
+        for job_id in store.order.iter().rev().take(32) {
+            let Some(job) = store.jobs.get(job_id) else {
+                continue;
+            };
+            let elapsed_ms = match (job.started_ms, job.finished_ms) {
+                (Some(started), Some(finished)) => Some(finished.saturating_sub(started)),
+                (Some(started), None) => Some(now.saturating_sub(started)),
+                _ => None,
+            };
+            jobs.push(json!({
+                "id": job.id,
+                "state": job.state,
+                "created_ms": job.created_ms as u64,
+                "started_ms": job.started_ms.map(|v| v as u64),
+                "finished_ms": job.finished_ms.map(|v| v as u64),
+                "elapsed_ms": elapsed_ms.map(|v| v as u64),
+            }));
+        }
+        jobs.reverse();
+        let queued = store.jobs.values().filter(|j| j.state == "queued").count();
+        let running = store.jobs.values().filter(|j| j.state == "running").count();
+        (queued, running, store.jobs.len(), jobs)
+    };
+    send(
+        stream,
+        &json!({
+            "v": PROTO_V,
+            "id": id,
+            "type": "health-ok",
+            "ok": true,
+            "schema": "jotnar.executor.health/1",
+            "kind": "native",
+            "node_id": format!("Jotnar Native {}", std::process::id()),
+            "target": "process",
+            "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            "programs": cfg.allow.iter()
+                .filter_map(|p| p.file_name().and_then(|x| x.to_str()))
+                .collect::<Vec<_>>(),
+            "runtime_version": RUNTIME_VERSION,
+            "ts_ms": now as u64,
+            "uptime_ms": (now as u64).saturating_sub(cfg.started_ms),
+            "limits": {
+                "workers": Json::Null,
+                "queue": Json::Null,
+                "max_frame": cfg.max_frame,
+            },
+            "activity": {
+                "queued": queued,
+                "running": running,
+                "retained": retained,
+                "warm_workers": 0,
+                "warm_artifacts": 0,
+            },
+            "jobs": jobs,
+        }),
+        &[],
+    )
+}
+
 fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
     let mut len = [0u8; 4];
     stream
@@ -408,6 +474,12 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             }),
             &[],
         ),
+        "health" => {
+            if let Err(e) = send_health(&mut stream, cfg, &id) {
+                send_error(&mut stream, &id, "health-failed", &e)?;
+            }
+            Ok(())
+        }
         "submit" => {
             if let Err(e) = submit_job(&mut stream, cfg, &id, &header, payload) {
                 send_error(&mut stream, &id, "submit-failed", &e)?;
@@ -1049,6 +1121,7 @@ mod tests {
             keep_work: false,
             mdns: false,
             jobs: Arc::new(Mutex::new(JobStore::new(8))),
+            started_ms: now_ms() as u64,
         };
         fs::create_dir_all(&cfg.work_root).unwrap();
         let input = mk("in.txt", "native runner");

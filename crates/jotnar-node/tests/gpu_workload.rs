@@ -323,6 +323,7 @@ fn gpu_chain_hands_an_intermediate_binary_result_to_the_next_stage() {
             force: false,
             timeout_ms: Some(30_000),
             compare: Vec::new(),
+            fleet: None,
         },
     )
     .unwrap();
@@ -348,6 +349,7 @@ fn gpu_chain_hands_an_intermediate_binary_result_to_the_next_stage() {
         force: false,
         timeout_ms: Some(30_000),
         compare,
+        fleet: None,
     };
     let receipt = run_bundle(&loaded, &root.join("distributed"), &cfg).unwrap();
 
@@ -396,6 +398,179 @@ fn gpu_chain_hands_an_intermediate_binary_result_to_the_next_stage() {
 }
 
 #[test]
+fn descriptor_is_consumed_and_recorded() {
+    let root = temp_root();
+    let listing = root.join("double.asm");
+    std::fs::write(&listing, "IN X\nOUT = ADD(X, X)\n").unwrap();
+    let mut loaded = build_gpu_bundle(&GpuBundleSpec {
+        listing,
+        input: None,
+        generate: Some((2, 2, 1)),
+        items: 1,
+        out_dir: root.join("bundle"),
+        name: "descriptor-test".to_string(),
+        timeout_ms: 5_000,
+    })
+    .unwrap();
+    let listing_ref = loaded.bundle.artifacts["listing"].clone();
+    let descriptor = json!({
+        "schema": "jotnar.stage/1",
+        "name": "double",
+        "listing_sha256": listing_ref.sha256,
+        "targets": ["cuda", "hip"],
+        "kind": "F32",
+        "ops": ["ADD"],
+        "inputs": {"X": {"kind": "F32", "shape": [2, 2, 1], "bytes": 16}},
+        "outputs": {"OUT": {"kind": "F32", "shape": [2, 2, 1], "bytes": 16}},
+        "bytes_in": 16,
+        "bytes_out": 16,
+        "state_bytes": 0,
+        "role_hint": "data-parallel",
+        "parallelism": "elementwise",
+        "determinism": "float-agreement",
+        "partitionable": null,
+        "warm_frame": true,
+    });
+    let bytes = serde_json::to_vec_pretty(&descriptor).unwrap();
+    let sha = sha256_hex(&bytes);
+    let rel = format!("blobs/{sha}");
+    std::fs::write(root.join("bundle").join(&rel), &bytes).unwrap();
+    loaded.bundle.artifacts.insert(
+        "descriptor".to_string(),
+        jotnar_node_tools::workload::ArtifactRef {
+            sha256: sha.clone(),
+            bytes: bytes.len() as u64,
+            path: rel,
+        },
+    );
+    for stage in &mut loaded.bundle.stages {
+        let gpu = stage.gpu.as_mut().unwrap();
+        gpu.descriptor = Some(jotnar_node_tools::workload::StageRef {
+            artifact: Some("descriptor".to_string()),
+            stage: None,
+            output: None,
+            stream: None,
+        });
+    }
+    std::fs::write(
+        root.join("bundle/bundle.json"),
+        serde_json::to_vec_pretty(&loaded.bundle).unwrap(),
+    )
+    .unwrap();
+    let loaded =
+        jotnar_node_tools::workload::LoadedBundle::load(&root.join("bundle/bundle.json")).unwrap();
+
+    let cuda = FakeGpu::start("cuda");
+    let hip = FakeGpu::start("hip");
+    let cfg = RunConfig {
+        program: None,
+        executors: vec![endpoint(&cuda.addr, "cuda"), endpoint(&hip.addr, "hip")],
+        placement: BTreeMap::from([
+            ("gpu-a-00".to_string(), cuda.addr.clone()),
+            ("gpu-b-00".to_string(), hip.addr.clone()),
+        ]),
+        token: None,
+        force: false,
+        timeout_ms: Some(5_000),
+        compare: Vec::new(),
+        fleet: None,
+    };
+    let receipt = run_bundle(&loaded, &root.join("ledger"), &cfg).unwrap();
+    assert_eq!(receipt["descriptors"]["gpu-a-00"]["sha256"], sha);
+    assert_eq!(receipt["descriptors"]["gpu-b-00"]["sha256"], sha);
+    assert_eq!(receipt["descriptors"]["gpu-a-00"]["target"], "cuda");
+    assert_eq!(receipt["descriptors"]["gpu-b-00"]["target"], "hip");
+    assert_eq!(receipt["exactness"]["gpu-a-00"]["verdict"], "not-compared");
+    assert_eq!(cuda.jobs(), 1);
+    assert_eq!(hip.jobs(), 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn descriptor_target_mismatch_is_rejected_before_submit() {
+    let root = temp_root();
+    let listing = root.join("double.asm");
+    std::fs::write(&listing, "IN X\nOUT = ADD(X, X)\n").unwrap();
+    let mut loaded = build_gpu_bundle(&GpuBundleSpec {
+        listing,
+        input: None,
+        generate: Some((2, 2, 1)),
+        items: 1,
+        out_dir: root.join("bundle"),
+        name: "descriptor-reject".to_string(),
+        timeout_ms: 5_000,
+    })
+    .unwrap();
+    let listing_ref = loaded.bundle.artifacts["listing"].clone();
+    let descriptor = json!({
+        "schema": "jotnar.stage/1",
+        "name": "double",
+        "listing_sha256": listing_ref.sha256,
+        "targets": ["hip"],
+        "kind": "F32",
+        "ops": ["ADD"],
+        "inputs": {"X": {"kind": "F32", "shape": [2, 2, 1], "bytes": 16}},
+        "outputs": {"OUT": {"kind": "F32", "shape": [2, 2, 1], "bytes": 16}},
+        "determinism": "float-agreement",
+    });
+    let bytes = serde_json::to_vec_pretty(&descriptor).unwrap();
+    let sha = sha256_hex(&bytes);
+    let rel = format!("blobs/{sha}");
+    std::fs::write(root.join("bundle").join(&rel), &bytes).unwrap();
+    loaded.bundle.artifacts.insert(
+        "descriptor".to_string(),
+        jotnar_node_tools::workload::ArtifactRef {
+            sha256: sha.clone(),
+            bytes: bytes.len() as u64,
+            path: rel,
+        },
+    );
+    let stage = loaded
+        .bundle
+        .stages
+        .iter_mut()
+        .find(|s| s.name == "gpu-a-00")
+        .unwrap();
+    stage.executor.target = Some("any".to_string());
+    stage.gpu.as_mut().unwrap().descriptor = Some(jotnar_node_tools::workload::StageRef {
+        artifact: Some("descriptor".to_string()),
+        stage: None,
+        output: None,
+        stream: None,
+    });
+    std::fs::write(
+        root.join("bundle/bundle.json"),
+        serde_json::to_vec_pretty(&loaded.bundle).unwrap(),
+    )
+    .unwrap();
+    let loaded =
+        jotnar_node_tools::workload::LoadedBundle::load(&root.join("bundle/bundle.json")).unwrap();
+
+    let cuda = FakeGpu::start("cuda");
+    let cfg = RunConfig {
+        program: None,
+        executors: vec![endpoint(&cuda.addr, "cuda")],
+        placement: BTreeMap::from([("gpu-a-00".to_string(), cuda.addr.clone())]),
+        token: None,
+        force: false,
+        timeout_ms: Some(5_000),
+        compare: Vec::new(),
+        fleet: None,
+    };
+    let err = run_bundle(&loaded, &root.join("ledger"), &cfg).unwrap_err();
+    assert!(err.contains("allows targets"), "{err}");
+    assert_eq!(cuda.jobs(), 0, "no job may be submitted");
+    let receipt: Json =
+        serde_json::from_slice(&std::fs::read(root.join("ledger/receipt.json")).unwrap()).unwrap();
+    assert_eq!(receipt["ok"], false);
+    assert_eq!(
+        receipt["stages"]["gpu-a-00"]["state"],
+        "descriptor-target-rejected"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn failed_submit_is_recorded_in_the_ledger() {
     let root = temp_root();
     let listing = root.join("double.asm");
@@ -419,6 +594,7 @@ fn failed_submit_is_recorded_in_the_ledger() {
         force: false,
         timeout_ms: Some(2_000),
         compare: Vec::new(),
+        fleet: None,
     };
     let err = run_bundle(&loaded, &root.join("ledger"), &cfg).unwrap_err();
     assert!(err.contains("submit"), "{err}");

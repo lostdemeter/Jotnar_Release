@@ -13,11 +13,18 @@ submit      -> submit-ok      { job_id, state }
 job-status  -> job-status-ok  { job }
 job-result  -> job-result-ok  { job_id, outputs, ... } + result payload
 job-cancel  -> job-cancel-ok  { job_id, accepted, previous, state }
+ping        -> pong           static capability probe
+health      -> health-ok      { schema, limits, activity, jobs[] }
 ```
 
 A `submit` header carries the executor-specific job spec. The result envelope
 is executor-independent: `job-result-ok` preserves the target's output
 descriptors and may carry a binary payload.
+
+`health` is the live view used by the fleet controller: queue depth, running
+jobs, warm workers, bounded recent-job timing, and a timestamp. It is reporting
+only; the executor never places work. `ping` stays static and cheap, and live
+telemetry is never put in mDNS adverts.
 
 The controller-side trait is
 `jotnar_node_tools::executor::Executor`:
@@ -28,6 +35,7 @@ fn submit(&self, spec: &Json, payload: &[u8]) -> Result<Json, (String, String)>;
 fn status(&self, job_id: &str) -> Result<Json, (String, String)>;
 fn result(&self, job_id: &str) -> Result<(Json, Vec<u8>), (String, String)>;
 fn cancel(&self, job_id: &str) -> Result<Json, (String, String)>;
+fn telemetry(&self) -> Result<Json, (String, String)>;
 ```
 
 `RemoteExecutor` pairs a discovery capability record with a `JobClient`.

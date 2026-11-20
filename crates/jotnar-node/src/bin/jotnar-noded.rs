@@ -590,6 +590,46 @@ fn handle_job_frame(
                 Err(e) => error_frame(id, &e.code, e.msg),
             }
         }
+        "health" => {
+            let stats = engine.stats();
+            let caps = engine.capabilities();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let mut jobs: Vec<Json> = engine
+                .list()
+                .iter()
+                .rev()
+                .take(32)
+                .map(|s| s.to_json())
+                .collect();
+            jobs.reverse();
+            reply(
+                id,
+                "health-ok",
+                json!({
+                    "schema": "jotnar.executor.health/1",
+                    "kind": "cpu",
+                    "target": "cpu",
+                    "runtime_version": jotnar::protocol::RUNTIME_VERSION,
+                    "ts_ms": now,
+                    "limits": {
+                        "workers": caps.get("workers").cloned().unwrap_or(Json::Null),
+                        "queue": caps.get("queue_capacity").cloned().unwrap_or(Json::Null),
+                        "max_frame": Json::Null,
+                    },
+                    "activity": {
+                        "queued": stats.queued,
+                        "running": stats.running,
+                        "retained": stats.retained,
+                        "warm_workers": 0,
+                        "warm_artifacts": 0,
+                    },
+                    "jobs": jobs,
+                }),
+            )
+        }
         "job-list" => {
             let jobs: Vec<Json> = engine.list().iter().map(|s| s.to_json()).collect();
             let stats = engine.stats();
@@ -667,6 +707,7 @@ fn handle_frame(
             | "job-result"
             | "job-cancel"
             | "job-list"
+            | "health"
             | "result-read"
             | "result-drop"
     ) {
