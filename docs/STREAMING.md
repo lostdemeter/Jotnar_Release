@@ -68,6 +68,22 @@ tile carries a one-pixel halo, is upscaled 2x (`INTERP`), and the 2x halo is
 cropped before compositing into 1280x720. The halo keeps interior tile edges
 continuous. Source edges are edge-replicated.
 
+The compiler now emits a partition claim for `INTERP` and elementwise stages:
+
+```json
+"partitionable": {
+  "axes": [
+    {"axis": "rows", "index": 0, "min": 16, "max": 360, "overlap": 1},
+    {"axis": "columns", "index": 1, "min": 16, "max": 640, "overlap": 1}
+  ]
+}
+```
+
+The stream controller loads the referenced `jotnar.stage/1` document, checks the
+listing hash and target subset, and validates that the tile size is within
+`min..=max` and the halo is at least the claimed overlap. It does not yet
+derive the grid from the claim; the 2x2 grid is still a descriptor decision.
+
 The same tiled plan runs on one CUDA node as the reference. The distributed run
 places one tile on CUDA and three on HIP. Because both runs use the same tiler,
 the comparison proves placement/vendor agreement, not agreement between
@@ -81,14 +97,28 @@ U8 tile output is ~0.7 MB; the four-tile wall is ~2.8 MB/frame at 15 fps. The
 JSON path would expand the input by roughly 10x and does not fit the wall's
 frame budget. See [`EXECUTOR_CONTRACT.md`](EXECUTOR_CONTRACT.md).
 
+## Failover
+
+Each tile is attempted on its planned target and then on the other targets in
+order. The receipt records `attempts`, `failover_from`, and the errors for every
+tile. A dead target therefore costs a failed connect, not a dropped frame; the
+planned target is retried on the next frame, so recovery is automatic.
+
+The wall gate includes a failover leg: the HIP endpoint is pointed at a closed
+port (`127.0.0.1:1`), the three HIP tiles must retry on CUDA, and the two
+composited frames must still match the reference. A blackholed target (accepts
+but never responds) still depends on the client timeout; tuning that is future
+work.
+
 ## Receipt
 
 `jotnar-stream` writes `frames.jsonl` (one line per frame: work time, deadline
 verdict, wall hash/bytes, optional reference match, and per-tile row/col,
-target, executor, job id, timestamps, hash, and bytes) and `summary.json`
-(descriptor hash, listing hash, source/sink, clock, geometry, percentiles,
-exactness counts, leases). A stream registers/interactive lease per target when
-`--fleet-dir` is supplied.
+target, executor, job id, timestamps, hash, attempts, failover origin, and
+bytes) and `summary.json` (descriptor and stage-descriptor hashes, listing hash,
+source/sink, clock, geometry, percentiles, failover count, exactness counts,
+leases, and the controller/source/state owner). A stream registers an
+interactive lease per target when `--fleet-dir` is supplied.
 
 ## Wall measurements
 
@@ -103,14 +133,18 @@ Result on the live CUDA/HIP fleet (640x360 source, 1280x720 wall, 15 fps,
 1 CUDA + 3 HIP tiles):
 
 ```text
-reference (all CUDA)  p50 65, p95 74, p99 75, max 75 ms (correctness only)
-distributed           p50 50, p95 65, p99 66, max 66 ms
+reference (all CUDA)  p50 61, p95 68, p99 262, max 262 ms (correctness only)
+distributed           p50 49, p95 53, p99 54, max 54 ms
                       budget 66, frames over budget 0
 exactness             30/30 wall frames byte-identical
-tiles                 4 per frame, both targets, job ids recorded
+stage descriptor      ab0715db…  partitionable rows/columns overlap 1
+failover leg          HIP dead, 6 tiles retried on CUDA, 2/2 exact
+                      p50 63, p99 64, max 64 ms
 ```
 
-The reference is slower because all four tiles serialize on one GPU; it is a
+Three frames are processed through the full tile path as warm-up
+(`--warmup-frames 3`) and excluded from the sink, receipt, and SLO. The
+reference is slower because all four tiles serialize on one GPU; it is a
 correctness reference, not the SLO target.
 
 ## Commands
@@ -134,16 +168,22 @@ cargo build --release -p jotnar-node-tools --bin jotnar-stream
 
 ## Limits
 
-- The tiler is currently a uniform tile grid; the compiler's
-  `partitionable` claim is not consumed yet. 2D partitionability is the next
-  C/debt slice.
-- No failover/recovery in the stream controller yet; a failed tile aborts the
-  run. DOOM still owns its failover path until C1.
+- The tiler is a uniform tile grid. The compiler's `partitionable` claim is
+  loaded and validated (size range and overlap), but the grid is still a
+  descriptor decision rather than derived from the claim.
+- Failover retries a failed tile on the other targets and retries the planned
+  target on the next frame, so recovery is automatic. A blackholed target that
+  accepts and never responds still depends on the client timeout; the gate uses
+  a closed port. A mid-run proxy/blackhole gate is future work.
 - No runner-side priority: batch work defers while the wall holds the
   interactive lease. A concurrent export needs the runner priority debt.
 - The source/compositor run on the controller host; the GPU lease does not
-  cover that CPU/state owner. The receipt records the controller owner.
+  cover that CPU/state owner. The receipt records the controller/source/state
+  owner, but a full CPU lease is future work.
 - The camera is local to the controller host (`/dev/video0`, MJPEG 720p30).
   The frames-dir source is the deterministic gate path.
 - The SDL viewer is the existing `jotnar-doom-view`; the stream speaks its frame
   protocol. A wall-specific viewer/HUD is productization work.
+- Three warm-up frames are processed before the measured run; they are excluded
+  from the sink, receipt, and SLO. A long-running live stream has no such
+  boundary, so its first frame still pays worker startup.

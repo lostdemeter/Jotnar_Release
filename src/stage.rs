@@ -117,6 +117,53 @@ fn ops_of(program: &Program) -> Vec<String> {
     ops
 }
 
+fn partitionable(ops: &[String], inputs: &BTreeMap<String, Json>) -> Json {
+    let overlap = if ops.iter().any(|op| op == "INTERP") {
+        1usize
+    } else {
+        let elementwise = ["ADD", "SUB", "MUL", "DIV", "SQUARE", "CLIP", "RESCALE"];
+        if ops.is_empty() || !ops.iter().all(|op| elementwise.contains(&op.as_str())) {
+            return Json::Null;
+        }
+        0
+    };
+    let Some(shape) = inputs
+        .values()
+        .find_map(|stream| stream.get("shape").and_then(|x| x.as_array()))
+    else {
+        return Json::Null;
+    };
+    if shape.len() < 2 {
+        return Json::Null;
+    }
+    let dims = shape
+        .iter()
+        .take(2)
+        .map(|d| d.as_u64())
+        .collect::<Option<Vec<_>>>();
+    let Some(dims) = dims else {
+        return Json::Null;
+    };
+    json!({
+        "axes": [
+            {
+                "axis": "rows",
+                "index": 0,
+                "min": 16u64.min(dims[0]).max(1),
+                "max": dims[0],
+                "overlap": overlap,
+            },
+            {
+                "axis": "columns",
+                "index": 1,
+                "min": 16u64.min(dims[1]).max(1),
+                "max": dims[1],
+                "overlap": overlap,
+            }
+        ]
+    })
+}
+
 /// Build a `jotnar.stage/1` document for one compiled listing.
 pub fn build(ctx: &StageContext<'_>) -> Result<Json, String> {
     let listing_sha256 = sha256_hex(ctx.listing.as_bytes());
@@ -211,7 +258,7 @@ pub fn build(ctx: &StageContext<'_>) -> Result<Json, String> {
         "role_hint": role_hint,
         "parallelism": parallelism,
         "determinism": determinism,
-        "partitionable": Json::Null,
+        "partitionable": partitionable(&ops_of(ctx.program), &inputs),
         "warm_frame": ctx.artifact.warm_frame,
         "argv": ctx.artifact.n_argv,
     }))
@@ -264,6 +311,23 @@ mod tests {
         assert_eq!(stage["determinism"], "float-agreement");
         assert_eq!(stage["role_hint"], "data-parallel");
         assert_eq!(stage["warm_frame"], true);
+    }
+
+    #[test]
+    fn interp_claims_two_axis_partitioning() {
+        let stage = descriptor(
+            "CONFIG warm_frame 1\nIN X\nOUT = INTERP(X, 2.0, 2.0)\n",
+            Target::Cuda,
+        );
+        let axes = stage["partitionable"]["axes"].as_array().unwrap();
+        assert_eq!(axes.len(), 2);
+        assert_eq!(axes[0]["axis"], "rows");
+        assert_eq!(axes[1]["axis"], "columns");
+        assert_eq!(axes[0]["overlap"], 1);
+        assert_eq!(axes[1]["overlap"], 1);
+        assert_eq!(axes[1]["max"], 8);
+        let add = descriptor("IN X\nOUT = ADD(X, X)\n", Target::Cuda);
+        assert_eq!(add["partitionable"]["axes"][0]["overlap"], 0);
     }
 
     #[test]

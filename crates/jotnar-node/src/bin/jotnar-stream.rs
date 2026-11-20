@@ -15,7 +15,7 @@ fn usage() -> &'static str {
      \n\
      usage:\n\
        jotnar-stream --descriptor FILE --cuda ADDR --hip ADDR [--token T]\n\
-                     [--frames N] [--fleet-dir DIR] [--lease-ms N]\n\
+                     [--frames N] [--warmup-frames N] [--fleet-dir DIR] [--lease-ms N]\n\
                      [--reference DIR] [--clip DIR] [--out DIR] [--receipt DIR]\n\
                      [--all-cuda] [--viewer] [--timeout-ms N]\n\
      \n\
@@ -32,6 +32,7 @@ struct Args {
     hip: Option<String>,
     token: Option<String>,
     frames: Option<u64>,
+    warmup_frames: u64,
     fleet_dir: Option<PathBuf>,
     lease_ms: u64,
     reference: Option<PathBuf>,
@@ -51,6 +52,7 @@ fn parse() -> Result<Args, String> {
     let mut hip = None;
     let mut token = None;
     let mut frames = None;
+    let mut warmup_frames = 0u64;
     let mut fleet_dir = None;
     let mut lease_ms = 3_000u64;
     let mut reference = None;
@@ -73,6 +75,11 @@ fn parse() -> Result<Args, String> {
                         .parse()
                         .map_err(|_| "--frames must be an integer")?,
                 )
+            }
+            "--warmup-frames" => {
+                warmup_frames = value("--warmup-frames")?
+                    .parse()
+                    .map_err(|_| "--warmup-frames must be an integer")?
             }
             "--fleet-dir" => fleet_dir = Some(PathBuf::from(value("--fleet-dir")?)),
             "--lease-ms" => {
@@ -101,6 +108,7 @@ fn parse() -> Result<Args, String> {
         hip,
         token,
         frames,
+        warmup_frames,
         fleet_dir,
         lease_ms: lease_ms.max(1),
         reference,
@@ -165,6 +173,7 @@ fn real_main() -> Result<(), String> {
     }
     let cfg = StreamRunConfig {
         frame_limit: args.frames,
+        warmup_frames: args.warmup_frames,
         all_first_target: args.all_cuda,
         reference_dir: args.reference,
         fleet_dir: args.fleet_dir,

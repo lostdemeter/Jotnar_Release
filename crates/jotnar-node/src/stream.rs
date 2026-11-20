@@ -660,6 +660,9 @@ impl GpuEndpoint {
 
 pub struct StreamRunConfig {
     pub frame_limit: Option<u64>,
+    /// Frames processed through the full tile path before the measured run.
+    /// They are not written to the sink, receipt, or latency samples.
+    pub warmup_frames: u64,
     pub all_first_target: bool,
     pub reference_dir: Option<PathBuf>,
     pub fleet_dir: Option<PathBuf>,
@@ -671,6 +674,7 @@ impl Default for StreamRunConfig {
     fn default() -> Self {
         Self {
             frame_limit: None,
+            warmup_frames: 0,
             all_first_target: false,
             reference_dir: None,
             fleet_dir: None,
@@ -691,6 +695,52 @@ struct TileResult {
     sha256: String,
     bytes: usize,
     data: Vec<u8>,
+}
+
+fn run_tile_with_failover(
+    endpoints: Vec<GpuEndpoint>,
+    planned: usize,
+    listing: String,
+    tile: TileInput,
+    timeout_ms: u64,
+) -> Result<(TileResult, u32, Option<String>, Vec<Json>), String> {
+    let mut order = vec![planned];
+    for i in 0..endpoints.len() {
+        if i != planned {
+            order.push(i);
+        }
+    }
+    let mut errors = Vec::new();
+    let mut attempts = 0u32;
+    for idx in order {
+        attempts += 1;
+        match run_tile(
+            endpoints[idx].clone(),
+            listing.clone(),
+            tile.clone(),
+            timeout_ms,
+        ) {
+            Ok(result) => {
+                let failover_from = if idx != planned {
+                    Some(endpoints[planned].target.clone())
+                } else {
+                    None
+                };
+                return Ok((result, attempts, failover_from, errors));
+            }
+            Err(e) => errors.push(json!({
+                "target": endpoints[idx].target,
+                "addr": endpoints[idx].addr,
+                "error": e,
+            })),
+        }
+    }
+    Err(format!(
+        "all targets failed for tile {}:{}: {}",
+        tile.row,
+        tile.col,
+        serde_json::to_string(&errors).unwrap_or_default()
+    ))
 }
 
 fn build_binary_body(listing: &str, tile: &TileInput) -> Result<Vec<u8>, String> {
@@ -860,6 +910,101 @@ pub struct StreamSummary {
     pub mismatches: Option<u64>,
 }
 
+fn validate_partition_claim(claim: &Json, descriptor: &StreamDescriptor) -> Result<(), String> {
+    if claim.is_null() {
+        return Ok(());
+    }
+    let axes = claim
+        .get("axes")
+        .and_then(|x| x.as_array())
+        .ok_or("stage descriptor partitionable needs axes[]")?;
+    for axis in axes {
+        let name = axis
+            .get("axis")
+            .and_then(|x| x.as_str())
+            .ok_or("partition axis needs a name")?;
+        let min = axis
+            .get("min")
+            .and_then(|x| x.as_u64())
+            .ok_or("partition axis needs min")?;
+        let max = axis
+            .get("max")
+            .and_then(|x| x.as_u64())
+            .ok_or("partition axis needs max")?;
+        let overlap = axis.get("overlap").and_then(|x| x.as_u64()).unwrap_or(0);
+        let base = match name {
+            "rows" => descriptor.source.height / descriptor.tiles.rows,
+            "columns" => descriptor.source.width / descriptor.tiles.cols,
+            _ => continue,
+        } as u64;
+        if base < min || base > max {
+            return Err(format!(
+                "partition {name} size {base} is outside the compiler claim {min}..={max}"
+            ));
+        }
+        if (descriptor.tiles.halo as u64) < overlap {
+            return Err(format!(
+                "partition {name} needs overlap {overlap}, but the tile halo is {}",
+                descriptor.tiles.halo
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stage_claim(
+    path: &Path,
+    listing_sha256: &str,
+    descriptor: &StreamDescriptor,
+) -> Result<Json, String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("read stage descriptor {}: {e}", path.display()))?;
+    let value: Json = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse stage descriptor {}: {e}", path.display()))?;
+    if value.get("schema").and_then(|x| x.as_str()) != Some("jotnar.stage/1") {
+        return Err(format!(
+            "stage descriptor {} is not jotnar.stage/1",
+            path.display()
+        ));
+    }
+    let declared = value
+        .get("listing_sha256")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if declared != listing_sha256 {
+        return Err(format!(
+            "stage descriptor was compiled from listing {declared}, stream uses {listing_sha256}"
+        ));
+    }
+    let targets = value
+        .get("targets")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !targets.is_empty()
+        && !targets
+            .iter()
+            .all(|t| descriptor.stage.targets.iter().any(|s| s == t))
+    {
+        return Err(format!(
+            "stage descriptor targets {targets:?} are not a subset of the stream targets {:?}",
+            descriptor.stage.targets
+        ));
+    }
+    let partitionable = value.get("partitionable").cloned().unwrap_or(Json::Null);
+    validate_partition_claim(&partitionable, descriptor)?;
+    Ok(json!({
+        "path": path.display().to_string(),
+        "sha256": sha256_hex(&bytes),
+        "targets": targets,
+        "partitionable": partitionable,
+    }))
+}
+
 pub fn run_stream(
     descriptor: &StreamDescriptor,
     descriptor_sha256: &str,
@@ -892,6 +1037,10 @@ pub fn run_stream(
     let listing = fs::read_to_string(&descriptor.stage.listing)
         .map_err(|e| format!("read listing {}: {e}", descriptor.stage.listing.display()))?;
     let listing_sha256 = sha256_hex(listing.as_bytes());
+    let claim = match &descriptor.stage.descriptor {
+        Some(path) => stage_claim(path, &listing_sha256, descriptor)?,
+        None => Json::Null,
+    };
     // The tiled stage is a 2x upscale per tile, so the wall is 2x the source
     // in each dimension.
     let wall_w = descriptor.source.width * 2;
@@ -986,7 +1135,9 @@ pub fn run_stream(
     let mut work_ms = Vec::new();
     let mut matches = 0u64;
     let mut mismatches = 0u64;
-    let mut index = 0u64;
+    let mut failover_count = 0u64;
+    let mut source_index = 0u64;
+    let mut measured = 0u64;
     let started = Instant::now();
     let mut paused = Duration::ZERO;
     loop {
@@ -994,30 +1145,34 @@ pub fn run_stream(
         for lease in &mut leases {
             lease.renew(cfg.lease_ms)?;
         }
-        let Some(frame) = source.next_frame(index)? else {
+        let Some(frame) = source.next_frame(source_index)? else {
             break;
         };
-        if index >= limit {
-            break;
-        }
+        source_index += 1;
         let tiles = tile_frame(&frame, &descriptor.tiles)?;
         let mut results = Vec::with_capacity(tiles.len());
+        let mut tile_meta: BTreeMap<(usize, usize), (u32, Option<String>, Vec<Json>)> =
+            BTreeMap::new();
         let mut handles = Vec::with_capacity(tiles.len());
         for (i, tile) in tiles.into_iter().enumerate() {
-            let endpoint = if cfg.all_first_target {
-                endpoints[0].clone()
+            let planned = if cfg.all_first_target {
+                0
             } else {
-                endpoints[placement[i % placement.len()]].clone()
+                placement[i % placement.len()]
             };
+            let endpoints_for_tile = endpoints.to_vec();
             let listing = listing.clone();
             let timeout = cfg.timeout_ms;
             handles.push(thread::spawn(move || {
-                run_tile(endpoint, listing, tile, timeout)
+                run_tile_with_failover(endpoints_for_tile, planned, listing, tile, timeout)
             }));
         }
         for handle in handles {
             match handle.join() {
-                Ok(Ok(result)) => results.push(result),
+                Ok(Ok((result, attempts, failover_from, errors))) => {
+                    tile_meta.insert((result.row, result.col), (attempts, failover_from, errors));
+                    results.push(result);
+                }
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err("tile thread panicked".to_string()),
             }
@@ -1029,13 +1184,17 @@ pub fn run_stream(
             &descriptor.tiles,
             &results,
         )?;
-        let wall = Frame::rgb(index, wall_w, wall_h, composited)?;
+        if source_index <= cfg.warmup_frames {
+            continue;
+        }
+        failover_count += tile_meta.values().filter(|m| m.0 > 1).count() as u64;
+        let wall = Frame::rgb(measured, wall_w, wall_h, composited)?;
         sink.write(&wall)?;
 
         let expected_path = cfg
             .reference_dir
             .as_ref()
-            .map(|dir| dir.join(format!("frame_{:06}.rgb", index)));
+            .map(|dir| dir.join(format!("frame_{:06}.rgb", measured)));
         let mut verdict = Json::Null;
         if let Some(path) = expected_path {
             let want =
@@ -1056,7 +1215,7 @@ pub fn run_stream(
         let work = frame_start.elapsed().as_millis() as u64;
         work_ms.push(work);
         let line = json!({
-            "index": index,
+            "index": measured,
             "ts_ms": frame.ts_ms,
             "started_ms": now_ms().saturating_sub(work),
             "work_ms": work,
@@ -1075,11 +1234,17 @@ pub fn run_stream(
                 "done_ms": r.done_ms,
                 "sha256": r.sha256,
                 "bytes": r.bytes,
+                "attempts": tile_meta.get(&(r.row, r.col)).map(|m| m.0).unwrap_or(1),
+                "failover_from": tile_meta.get(&(r.row, r.col)).and_then(|m| m.1.clone()),
+                "errors": tile_meta.get(&(r.row, r.col)).map(|m| m.2.clone()).unwrap_or_default(),
             })).collect::<Vec<_>>(),
         });
         use std::io::Write;
         writeln!(receipt, "{}", line).map_err(|e| format!("write receipt: {e}"))?;
-        index += 1;
+        measured += 1;
+        if measured >= limit {
+            break;
+        }
 
         // Pace to the stream clock. The measured `work_ms` excludes this sleep.
         let elapsed = frame_start.elapsed();
@@ -1104,7 +1269,13 @@ pub fn run_stream(
         "clock": descriptor.clock,
         "tiles": descriptor.tiles,
         "determinism": descriptor.determinism,
-        "frames": index,
+        "stage_descriptor": claim,
+        "controller": {
+            "process": format!("jotnar-stream:{}", std::process::id()),
+            "source_owner": "controller",
+            "state_owner": "controller",
+        },
+        "frames": measured,
         "wall_ms": started.elapsed().as_millis() as u64,
         "paused_ms": paused.as_millis() as u64,
         "latency_ms": {
@@ -1114,6 +1285,7 @@ pub fn run_stream(
             "max": work_ms.iter().copied().max().unwrap_or(0),
             "over_budget": over_budget,
         },
+        "failovers": failover_count,
         "exactness": match cfg.reference_dir {
             Some(_) => json!({"matches": matches, "mismatches": mismatches}),
             None => Json::Null,
