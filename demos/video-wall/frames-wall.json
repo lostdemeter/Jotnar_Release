@@ -1,0 +1,24 @@
+{
+  "schema": "jotnar.stream/1",
+  "name": "frames-wall",
+  "clock": {"fps": 15, "deadline_ms": 66, "max_in_flight": 1},
+  "source": {
+    "kind": "frames",
+    "dir": "/tmp/opencode/wall-clip",
+    "width": 640,
+    "height": 360,
+    "channels": 3,
+    "format": "rgb24"
+  },
+  "stage": {
+    "listing": "demos/doom-two-nodes/upscale-half.asm",
+    "targets": ["cuda", "hip"]
+  },
+  "tiles": {"rows": 2, "cols": 2, "halo": 1, "bezel": 0},
+  "placement": {"cuda": 1, "hip": 3},
+  "sink": {"kind": "tcp", "listen": "127.0.0.1:9990"},
+  "merge": "tile-grid",
+  "backpressure": "drop-oldest",
+  "determinism": "exact",
+  "receipt": {"kind": "every-frame", "dir": "/tmp/opencode/wall-frames-receipt"}
+}

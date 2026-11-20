@@ -30,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use jotnar::asm::AsmOptions;
 use jotnar::codegen::infer::CKind;
 use jotnar::codegen::{build, compile_program, Artifact, CompileOptions, Target};
-use jotnar::payload::{feeds_from_json, value_to_json, Feeds};
+use jotnar::payload::{feeds_from_binary, feeds_from_json, value_to_json, Feeds};
 use jotnar::protocol::{decode_frame, encode_frame, PROTO_V, RUNTIME_VERSION};
 use jotnar::value::{array_from_vec, hash_bytes, Value};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -723,6 +723,18 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
     )
 }
 
+fn body_head(payload: &[u8], binary: bool) -> Result<Json, String> {
+    if binary {
+        let pos = payload
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or("binary body needs a JSON metadata line")?;
+        serde_json::from_slice(&payload[..pos]).map_err(|e| format!("bad metadata line: {e}"))
+    } else {
+        serde_json::from_slice(payload).map_err(|e| format!("bad body: {e}"))
+    }
+}
+
 fn submit_job(
     stream: &mut TcpStream,
     cfg: &Config,
@@ -758,14 +770,13 @@ fn submit_job(
             &format!("submit frames must be 1..={MAX_BATCH_FRAMES}"),
         );
     }
-    let body: Json =
-        serde_json::from_slice(payload).map_err(|e| format!("bad submit body: {e}"))?;
+    let binary_payload = header.get("payload_format").and_then(|x| x.as_str()) == Some("binary");
+    let body = body_head(payload, binary_payload)?;
     let listing = body
         .get("listing")
         .and_then(|x| x.as_str())
         .ok_or("submit body needs listing")?;
     let _ = listing;
-
     let typ = if frames > 1 { "run-batch" } else { "run" };
     let mut inner = json!({
         "v": PROTO_V,
@@ -774,6 +785,9 @@ fn submit_job(
         "target": cfg.target.as_str(),
         "outputs": outputs,
     });
+    if binary_payload {
+        inner["payload_format"] = json!("binary");
+    }
     if frames > 1 {
         inner["frames"] = json!(frames);
     }
@@ -786,6 +800,9 @@ fn submit_job(
     }
     if let Some(fmt) = header.get("output_format").and_then(|x| x.as_str()) {
         inner["output_format"] = json!(fmt);
+    }
+    if let Some(u8_output) = header.get("output_u8").and_then(|x| x.as_bool()) {
+        inner["output_u8"] = json!(u8_output);
     }
     if let Some(token) = &cfg.token {
         inner["auth"] = json!(token);
@@ -1142,7 +1159,12 @@ fn run_impl(
         return send_error(stream, id, "bad-request", "run needs at least one output");
     }
     let binary_output = header.get("output_format").and_then(|x| x.as_str()) == Some("binary");
-    let body: Json = serde_json::from_slice(payload).map_err(|e| format!("bad run body: {e}"))?;
+    let output_u8 = header
+        .get("output_u8")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let binary_payload = header.get("payload_format").and_then(|x| x.as_str()) == Some("binary");
+    let body = body_head(payload, binary_payload)?;
     let listing = body
         .get("listing")
         .and_then(|x| x.as_str())
@@ -1156,6 +1178,15 @@ fn run_impl(
         cache
             .get(pid)
             .ok_or_else(|| format!("unknown-payload {pid}"))?
+    } else if binary_payload {
+        let payload_meta = body
+            .get("payload")
+            .ok_or("binary run body needs payload metadata")?;
+        let pos = payload
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or("binary run body needs a metadata line")?;
+        Arc::new(feeds_from_binary(payload_meta, &payload[pos + 1..]).map_err(|e| e.to_string())?)
     } else {
         let payload_json = body
             .get("payload")
@@ -1303,6 +1334,7 @@ fn run_impl(
                 outputs,
                 timing,
                 binary_output,
+                output_u8,
             );
         }
         return send_run_outputs(
@@ -1313,6 +1345,7 @@ fn run_impl(
             outputs.pop().unwrap(),
             timing,
             binary_output,
+            output_u8,
         );
     }
 
@@ -1377,7 +1410,16 @@ fn run_impl(
         "cache_hit": cache_hit,
     });
     if batch {
-        return send_run_batch_outputs(stream, id, cfg, &artifact, outputs, timing, binary_output);
+        return send_run_batch_outputs(
+            stream,
+            id,
+            cfg,
+            &artifact,
+            outputs,
+            timing,
+            binary_output,
+            output_u8,
+        );
     }
     send_run_outputs(
         stream,
@@ -1387,6 +1429,7 @@ fn run_impl(
         outputs.pop().unwrap(),
         timing,
         binary_output,
+        output_u8,
     )
 }
 
@@ -1464,6 +1507,7 @@ fn send_run_batch_outputs(
     frames: Vec<HashMap<String, Value>>,
     timing: Json,
     binary: bool,
+    u8_output: bool,
 ) -> Result<(), String> {
     let field = |k: &str| timing.get(k).cloned().unwrap_or(Json::Null);
     let static_shapes = artifact.outputs.iter().all(|n| {
@@ -1485,15 +1529,20 @@ fn send_run_batch_outputs(
                     .streams
                     .get(name)
                     .ok_or_else(|| format!("no stream info for output {name:?}"))?;
-                let bytes = encode_value(value, info.kind, cfg.target)?;
+                let (bytes, kind) = if u8_output {
+                    (encode_value_u8(value)?, "U8")
+                } else {
+                    let bytes = encode_value(value, info.kind, cfg.target)?;
+                    let kind = match info.kind {
+                        CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
+                        CKind::F => "F64",
+                        CKind::I => "I64",
+                        CKind::T => "T",
+                    };
+                    (bytes, kind)
+                };
                 let off = body.len();
                 body.extend_from_slice(&bytes);
-                let kind = match info.kind {
-                    CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
-                    CKind::F => "F64",
-                    CKind::I => "I64",
-                    CKind::T => "T",
-                };
                 let shape: Vec<usize> = info.shape.iter().map(|d| d.unwrap()).collect();
                 descriptors.push(json!({
                     "frame": frame,
@@ -1568,6 +1617,7 @@ fn send_run_outputs(
     values: HashMap<String, Value>,
     timing: Json,
     binary: bool,
+    u8_output: bool,
 ) -> Result<(), String> {
     let field = |k: &str| timing.get(k).cloned().unwrap_or(Json::Null);
     let static_shapes = artifact.outputs.iter().all(|n| {
@@ -1588,15 +1638,20 @@ fn send_run_outputs(
                 .streams
                 .get(name)
                 .ok_or_else(|| format!("no stream info for output {name:?}"))?;
-            let bytes = encode_value(value, info.kind, cfg.target)?;
+            let (bytes, kind) = if u8_output {
+                (encode_value_u8(value)?, "U8")
+            } else {
+                let bytes = encode_value(value, info.kind, cfg.target)?;
+                let kind = match info.kind {
+                    CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
+                    CKind::F => "F64",
+                    CKind::I => "I64",
+                    CKind::T => "T",
+                };
+                (bytes, kind)
+            };
             let off = body.len();
             body.extend_from_slice(&bytes);
-            let kind = match info.kind {
-                CKind::F if matches!(cfg.target, Target::Cuda | Target::Hip) => "F32",
-                CKind::F => "F64",
-                CKind::I => "I64",
-                CKind::T => "T",
-            };
             let shape: Vec<usize> = info.shape.iter().map(|d| d.unwrap()).collect();
             descriptors.push(json!({
                 "name": name,
@@ -1679,6 +1734,27 @@ fn encode_value(value: &Value, kind: CKind, target: Target) -> Result<Vec<u8>, S
         }
         CKind::T => return Err("T streams are not supported by the GPU runner".to_string()),
     }
+    Ok(bytes)
+}
+
+fn encode_value_u8(value: &Value) -> Result<Vec<u8>, String> {
+    let bytes = match value {
+        Value::F32(a) => a
+            .iter()
+            .map(|v| v.round().clamp(0.0, 255.0) as u8)
+            .collect::<Vec<_>>(),
+        Value::F64(a) => a
+            .iter()
+            .map(|v| v.round().clamp(0.0, 255.0) as u8)
+            .collect::<Vec<_>>(),
+        Value::I64(a) => a
+            .iter()
+            .map(|v| (*v).clamp(0, 255) as u8)
+            .collect::<Vec<_>>(),
+        Value::U8(a) => a.iter().copied().collect::<Vec<_>>(),
+        Value::Bool(a) => a.iter().map(|v| u8::from(*v)).collect::<Vec<_>>(),
+        _ => return Err("u8 output conversion needs a numeric stream".to_string()),
+    };
     Ok(bytes)
 }
 

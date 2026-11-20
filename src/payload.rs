@@ -176,6 +176,113 @@ pub fn feeds_from_json(v: &Json) -> Result<Feeds> {
     Ok(feeds)
 }
 
+/// Decode a binary payload body.
+///
+/// The metadata is a JSON object with a `streams` map. Each stream declares
+/// `kind`, `shape`, `off`, and `bytes`; the raw values follow as little-endian
+/// bytes in the supplied body. This is the frame path for streaming workloads:
+/// it avoids expanding a 640x360 image into JSON on every frame.
+pub fn feeds_from_binary(meta: &Json, bytes: &[u8]) -> Result<Feeds> {
+    let obj = meta
+        .get("streams")
+        .and_then(|s| s.as_object())
+        .ok_or_else(|| Error::runtime("binary payload needs a 'streams' object"))?;
+    let mut feeds = BTreeMap::new();
+    for (name, sv) in obj {
+        let kind = sv
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| Error::runtime(format!("stream '{name}': missing kind")))?;
+        let shape = shape_of(sv)?;
+        let values: usize = shape.iter().product();
+        let width = match kind {
+            "F32" => 4,
+            "F64" | "I64" => 8,
+            "U8" | "Bool" => 1,
+            other => {
+                return Err(Error::runtime(format!(
+                    "stream '{name}': binary kind '{other}' is not supported"
+                )))
+            }
+        };
+        let len = sv
+            .get("bytes")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| Error::runtime(format!("stream '{name}': missing bytes")))?
+            as usize;
+        let expected = values
+            .checked_mul(width)
+            .ok_or_else(|| Error::runtime(format!("stream '{name}': byte count overflows")))?;
+        if len != expected {
+            return Err(Error::runtime(format!(
+                "stream '{name}': shape {shape:?} needs {expected} bytes, header says {len}"
+            )));
+        }
+        let off = sv.get("off").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| Error::runtime(format!("stream '{name}': range overflows")))?;
+        if end > bytes.len() {
+            return Err(Error::runtime(format!(
+                "stream '{name}': range {off}..{end} exceeds body {}",
+                bytes.len()
+            )));
+        }
+        let slice = &bytes[off..end];
+        let value = match kind {
+            "F32" => {
+                let data = slice
+                    .chunks_exact(4)
+                    .map(|c| {
+                        let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                        if !v.is_finite() {
+                            return Err(Error::runtime(format!(
+                                "stream '{name}' contains NaN or infinity"
+                            )));
+                        }
+                        Ok(v)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Value::F32(crate::value::array_from_vec(&shape, data)?)
+            }
+            "F64" => {
+                let data = slice
+                    .chunks_exact(8)
+                    .map(|c| {
+                        let v =
+                            f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                        if !v.is_finite() {
+                            return Err(Error::runtime(format!(
+                                "stream '{name}' contains NaN or infinity"
+                            )));
+                        }
+                        Ok(v)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Value::F64(crate::value::array_from_vec(&shape, data)?)
+            }
+            "I64" => {
+                let data = slice
+                    .chunks_exact(8)
+                    .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                    .collect::<Vec<_>>();
+                Value::I64(crate::value::array_from_vec(&shape, data)?)
+            }
+            "U8" => Value::U8(crate::value::array_from_vec(&shape, slice.to_vec())?),
+            "Bool" => Value::Bool(crate::value::array_from_vec(
+                &shape,
+                slice.iter().map(|b| *b != 0).collect(),
+            )?),
+            other => {
+                return Err(Error::runtime(format!(
+                    "stream '{name}': binary kind '{other}' is not supported"
+                )))
+            }
+        };
+        feeds.insert(name.clone(), value);
+    }
+    Ok(feeds)
+}
 
 /// Shape-only payload for `jotnar build`/`emit-*`: no data arrays are read,
 /// zero-valued streams are created from the declared shapes.
@@ -327,5 +434,53 @@ pub fn value_from_parts(kind: &str, shape: &[usize], data: &[f64]) -> Result<Val
             data.iter().map(|v| *v as i64).collect(),
         )?)),
         other => Err(Error::runtime(format!("unknown helper kind {other}"))),
+    }
+}
+
+#[cfg(test)]
+mod binary_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn binary_f32_round_trip() {
+        let meta = json!({
+            "streams": {
+                "X": {"kind": "F32", "shape": [2, 2], "off": 0, "bytes": 16}
+            }
+        });
+        let mut bytes = Vec::new();
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let feeds = feeds_from_binary(&meta, &bytes).unwrap();
+        match feeds.get("X").unwrap() {
+            Value::F32(a) => assert_eq!(a.shape(), &[2, 2]),
+            other => panic!("expected F32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binary_rejects_wrong_length_and_bad_floats() {
+        let meta = json!({
+            "streams": {"X": {"kind": "F32", "shape": [2], "bytes": 8}}
+        });
+        assert!(feeds_from_binary(&meta, &[0u8; 4]).is_err());
+        let mut nan = Vec::new();
+        nan.extend_from_slice(&f32::NAN.to_le_bytes());
+        nan.extend_from_slice(&0.0f32.to_le_bytes());
+        assert!(feeds_from_binary(&meta, &nan).is_err());
+    }
+
+    #[test]
+    fn binary_u8_and_offset() {
+        let meta = json!({
+            "streams": {"X": {"kind": "U8", "shape": [3], "off": 2, "bytes": 3}}
+        });
+        let feeds = feeds_from_binary(&meta, &[9, 9, 1, 2, 255]).unwrap();
+        match feeds.get("X").unwrap() {
+            Value::U8(a) => assert_eq!(a.iter().copied().collect::<Vec<_>>(), vec![1, 2, 255]),
+            other => panic!("expected U8, got {other:?}"),
+        }
     }
 }

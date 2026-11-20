@@ -38,6 +38,33 @@ fn cancel(&self, job_id: &str) -> Result<Json, (String, String)>;
 fn telemetry(&self) -> Result<Json, (String, String)>;
 ```
 
+## Binary payloads
+
+A streaming controller can avoid JSON expansion by setting
+`payload_format: "binary"` on a `submit`/`run` header:
+
+```text
+body = {"listing": "...", "payload": {"streams": {
+         "X": {"kind": "F32", "shape": [H, W, C], "off": 0, "bytes": N}
+       }}}
+       \n
+       raw little-endian values (F32/F64/I64/U8/Bool)
+```
+
+The runner decodes the metadata line and the bytes into the same `Feeds` the
+JSON path produces, then compiles and runs the same listing. The JSON payload
+path is unchanged and remains the default. A `payload_id` request still uses
+the JSON cache; binary payloads are inline in this slice.
+
+For streaming image results, `output_u8: true` asks the runner to round and
+clamp F32/F64 output values to `U8` before transport. The result descriptor
+says `kind: "U8"`, with one byte per value. This is a transport encoding, not
+a different program: the listing still computes in F32. It cuts the four-tile
+wall output from ~11 MB/frame to ~2.8 MB/frame.
+
+The executor still receives one listing plus one payload per job. It does not
+learn about streams, tiles, source adapters, or sinks.
+
 `RemoteExecutor` pairs a discovery capability record with a `JobClient`.
 `validate_binary_result` checks descriptor bounds, frame indices, kinds,
 shapes, and byte widths before a controller trusts a binary result.

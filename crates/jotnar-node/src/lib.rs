@@ -7,6 +7,7 @@ pub mod fleet;
 pub mod hardware;
 pub mod hud;
 pub mod job;
+pub mod stream;
 /// Controller-side bundle/stage/ledger logic. `jotnar-noded` does not call it.
 pub mod workload;
 

@@ -311,6 +311,9 @@ jotnar-workload run --bundle PATH --ledger DIR [--program FILE]
                     [--executor ADDR]... [--gpu-executor cuda=ADDR]... [--gpu-executor hip=ADDR]...
                     [--place STAGE=ADDR]... [--compare STAGE:OUTPUT=FILE]...
                     [--fleet-dir DIR] [--fleet-slots N] [--fleet-max-wait-ms N]
+jotnar-stream --descriptor FILE --cuda ADDR --hip ADDR [--token T]
+              [--frames N] [--clip DIR] [--out DIR] [--receipt DIR]
+              [--reference DIR] [--fleet-dir DIR] [--all-cuda]
 jotnar-doom-coord --image FILE --wad FILE --cuda ADDR --hip ADDR [--token T] --out DIR
                   [--fleet-dir DIR] [--lease-ms N]
 jotnar build FILE --payload FILE --outputs a,b [--stage-out FILE] [--descriptor-only]
