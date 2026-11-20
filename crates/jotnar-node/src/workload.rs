@@ -1669,6 +1669,7 @@ fn plan_native_stage(
         .max(1);
     let header = json!({
         "type": "submit",
+        "class": "batch",
         "command": command,
         "outputs": stage.outputs,
         "inputs": descs,
@@ -1906,6 +1907,7 @@ fn plan_gpu_stage(
         .max(1);
     let header = json!({
         "type": "submit",
+        "class": "batch",
         "outputs": stage.outputs,
         "frames": gpu.frames,
         "output_format": "binary",

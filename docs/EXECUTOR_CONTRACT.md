@@ -90,6 +90,34 @@ The GPU job table is bounded and evicts completed jobs first, never queued or
 running jobs. The executor still owns compilation, warm workers, caches, and
 batch frames; the controller does not compile or run listings.
 
+### Runner-side priority (D1b)
+
+`submit` accepts an optional `class`:
+
+```json
+{"type": "submit", "class": "interactive", ...}
+{"type": "submit", "class": "batch", ...}
+```
+
+The runner executes one job at a time. Interactive jobs are served first; batch
+jobs run in the idle window between interactive frames. `--batch-quantum N`
+(default 8) forces one batch turn after that many interactive jobs if the stream
+never idles, so an export cannot starve. `--queue-limit N` (default 64) bounds
+the queue; a full submit returns error code `queue-full`. `health` reports
+`workers: 1`, `limits.queue`, `queued_interactive`, `queued_batch`,
+`served_interactive`, `batch_quantum`, and each job's `class`/`priority`.
+
+This is execution enforcement only. The controller still owns admission and
+placement; the runner does not learn about streams, leases, or tiles.
+
+### Bounded requests (D1c)
+
+`JobClient` can set per-request deadlines for `submit`, `job-status`, and
+`job-result`. Interactive streams use a short bound (`--request-timeout-ms`,
+default 1000; the blackhole gate uses 500) so a target that accepts and never
+responds fails over instead of holding a frame for the 60 s default. A request
+timeout is not retried; a reset session still gets the one submit retry.
+
 `jotnar-gpu-net` remains the GPU-specific batch controller and benchmark
 driver. The async endpoint is the stable executor face for `jotnar-net` and the
 future workload controller.

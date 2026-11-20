@@ -19,7 +19,7 @@
   },
   "tiles": {"rows": 2, "cols": 2, "halo": 1, "bezel": 0},
   "placement": {"cuda": 1, "hip": 3},
-  "sink": {"kind": "tcp", "listen": "127.0.0.1:9990"},
+  "sink": {"kind": "tcp", "listen": "127.0.0.1:9990", "title": "Jotnar Wall", "hud": true},
   "merge": "tile-grid",
   "backpressure": "drop-oldest",
   "determinism": "exact",

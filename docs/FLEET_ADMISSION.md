@@ -136,6 +136,25 @@ Per-stage receipt record:
 The record keeps the leases seen during deferral even if they expired before
 the grant, so the receipt shows *why* the work waited.
 
+## Runner-side priority (D1b)
+
+Controller admission alone defers all batch work while an interactive lease is
+live. To let an export make progress on the same fleet, the GPU runner now
+enforces its own execution bound:
+
+- one execution lane per runner (`workers: 1`);
+- interactive jobs are served first;
+- batch jobs run in the idle window between interactive frames;
+- `--batch-quantum N` (default 8) forces a batch turn after that many
+  interactive jobs if the stream never idles, so batch cannot starve;
+- `--queue-limit N` (default 64) bounds the queue and reports `queue-full`.
+
+The controller reserves the extra slot with `--fleet-slots 2` (1 interactive +
+1 batch). The admission record shows capacity 2, one interactive slot, and the
+leases seen; the runner health shows the class queue counts and the quantum.
+The interactive SLO still holds because the batch job is small enough to fit
+the inter-frame gap; the export gate uses 64x64x3 chunks for DOOM.
+
 ## Interactive SLO
 
 Budget = `1000 / fps` (66 ms at 15 fps).
@@ -185,8 +204,9 @@ Without `--fleet-dir`, behavior is unchanged (best effort).
 - Capacity is an integer concurrency budget, not GPU memory or bandwidth.
   There is no preemption of a running GPU kernel.
 - A co-resident batch stage on the current CUDA/HIP pair materially degrades
-  the interactive tail; the implemented policy defers it. Finer concurrency
-  needs runner-side priority/preemption or GPU partitioning.
+  the interactive tail; the implemented policy reserves one batch slot and the
+  runner time-slices with interactive priority. GPU partitioning or preemption
+  of a running kernel is not implemented.
 - Rare 200 ms+ executor stalls were present even in the DOOM-alone baseline
   on an idle-clock GPU. On the current CUDA host, persistence mode plus a
   210 MHz clock floor removed them (three consecutive post-fix gates had zero

@@ -19,10 +19,11 @@ use serde_json::{json, Value as Json};
 
 use jotnar::rv32::Rv32;
 use jotnar_node_tools::doom_pipeline::{rgb_window, sha256_hex, FB_H, FB_W};
+use jotnar_node_tools::hud::{render as render_hud, HudInfo, HUD_BOTTOM, HUD_TOP};
 use jotnar_node_tools::stream::{
-    run_stream_with, ColumnSplit, Frame, FrameDirSink, FrameSink, FrameSource, GpuEndpoint,
-    ReceiptSpec, StreamClock, StreamDescriptor, StreamRunConfig, StreamSinkSpec, StreamSourceSpec,
-    StreamStageSpec, TileSpec,
+    run_stream_with, CalibrationSpec, ColumnSplit, Frame, FrameDirSink, FrameMeta, FrameSink,
+    FrameSource, GpuEndpoint, ReceiptSpec, StreamClock, StreamDescriptor, StreamRunConfig,
+    StreamSinkSpec, StreamSourceSpec, StreamStageSpec, TileSpec,
 };
 
 const KEY_ENTER: u8 = 13;
@@ -223,13 +224,95 @@ impl DoomSink {
             Err(e) => Err(format!("accept viewer: {e}")),
         }
     }
+
+    fn send(&mut self, header: &Json, body: &[u8]) -> Result<(), String> {
+        if self.stream.is_none() {
+            self.accept()?;
+        }
+        let header = serde_json::to_vec(header).map_err(|e| e.to_string())?;
+        let ok = self
+            .stream
+            .as_mut()
+            .map(|stream| {
+                stream
+                    .write_all(&(header.len() as u32).to_be_bytes())
+                    .is_ok()
+                    && stream.write_all(&header).is_ok()
+                    && stream.write_all(body).is_ok()
+            })
+            .unwrap_or(false);
+        if !ok {
+            self.stream = None;
+        }
+        Ok(())
+    }
+}
+
+/// Render the DOOM HUD over an RGB frame and return `(width, height, body)`.
+///
+/// The controller passes [`FrameMeta`] with the measured split, per-target
+/// latency, running percentiles, and failover state. The game pixels are copied
+/// through unchanged; the HUD is only the top and bottom bands.
+fn hud_frame(frame: &Frame, meta: &FrameMeta) -> Result<(usize, usize, Vec<u8>), String> {
+    let target_addr = |target: &str| -> String {
+        meta.tiles
+            .iter()
+            .find(|t| t.planned_target == target)
+            .map(|t| t.addr.clone())
+            .or_else(|| {
+                meta.tiles
+                    .iter()
+                    .find(|t| t.target == target)
+                    .map(|t| t.addr.clone())
+            })
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let target_cols = |target: &str| -> usize {
+        meta.tiles
+            .iter()
+            .filter(|t| t.planned_target == target)
+            .map(|t| t.cols)
+            .sum()
+    };
+    let target_ms = |target: &str| -> u64 {
+        meta.tiles
+            .iter()
+            .filter(|t| t.planned_target == target)
+            .map(|t| t.worker_ms.filter(|ms| *ms > 0).unwrap_or(t.latency_ms))
+            .max()
+            .unwrap_or(0)
+    };
+    let info = HudInfo {
+        frame: meta.index as u32,
+        mode: if meta.split.is_some() {
+            "split".to_string()
+        } else {
+            meta.mode.clone()
+        },
+        cuda_addr: target_addr("cuda"),
+        hip_addr: target_addr("hip"),
+        cuda_cols: target_cols("cuda"),
+        hip_cols: target_cols("hip"),
+        cuda_ms: target_ms("cuda"),
+        hip_ms: target_ms("hip"),
+        total_ms: meta.work_ms,
+        budget_ms: meta.budget_ms,
+        p50: meta.p50_ms,
+        p95: meta.p95_ms,
+        cuda_ok: !meta.failed_targets.iter().any(|t| t == "cuda"),
+        hip_ok: !meta.failed_targets.iter().any(|t| t == "hip"),
+        note: meta.note.clone(),
+    };
+    let body = render_hud(&frame.data, frame.width, frame.height, &info)?;
+    Ok((
+        frame.width,
+        frame.height + HUD_TOP + HUD_BOTTOM,
+        body,
+    ))
 }
 
 impl FrameSink for DoomSink {
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
-        if self.stream.is_none() {
-            self.accept()?;
-        }
         self.frame = frame.index;
         let header = json!({
             "v": 1,
@@ -239,26 +322,75 @@ impl FrameSink for DoomSink {
             "total_ms": 0,
             "mode": "split",
         });
-        let header = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
-        let ok = self
-            .stream
-            .as_mut()
-            .map(|stream| {
-                stream
-                    .write_all(&(header.len() as u32).to_be_bytes())
-                    .is_ok()
-                    && stream.write_all(&header).is_ok()
-                    && stream.write_all(&frame.data).is_ok()
-            })
-            .unwrap_or(false);
-        if !ok {
-            self.stream = None;
-        }
-        Ok(())
+        self.send(&header, &frame.data)
+    }
+
+    fn write_meta(&mut self, frame: &Frame, meta: &FrameMeta) -> Result<(), String> {
+        self.frame = frame.index;
+        let (width, height, body) = hud_frame(frame, meta)?;
+        let header = json!({
+            "v": 1,
+            "width": width,
+            "height": height,
+            "frame": frame.index,
+            "total_ms": meta.work_ms,
+            "mode": meta.mode,
+            "split": meta.split,
+            "failovers": meta.failovers,
+            "recoveries": meta.recoveries,
+            "failed_targets": meta.failed_targets,
+            "note": meta.note,
+        });
+        self.send(&header, &body)
     }
 
     fn describe(&self) -> Json {
         json!({"kind": "doom-viewer", "listen": self.addr, "width": self.width, "height": self.height})
+    }
+}
+
+/// Frames sink that writes the HUD-composited viewer frame.
+///
+/// Used by the headless live gate so the HUD can be verified without SDL. The
+/// game region is byte-identical to the plain sink; the bands are the overlay.
+struct HudDirSink {
+    dir: PathBuf,
+    index: u64,
+}
+
+impl HudDirSink {
+    fn new(dir: &PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        Ok(Self {
+            dir: dir.clone(),
+            index: 0,
+        })
+    }
+
+    fn write_body(&mut self, body: &[u8]) -> Result<(), String> {
+        let path = self.dir.join(format!("frame_{:06}.rgb", self.index));
+        self.index += 1;
+        fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
+    }
+}
+
+impl FrameSink for HudDirSink {
+    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+        self.write_body(&frame.data)
+    }
+
+    fn write_meta(&mut self, frame: &Frame, meta: &FrameMeta) -> Result<(), String> {
+        let (_, _, body) = hud_frame(frame, meta)?;
+        self.write_body(&body)
+    }
+
+    fn describe(&self) -> Json {
+        json!({
+            "kind": "frames-hud",
+            "dir": self.dir.display().to_string(),
+            "width": FB_W * 2,
+            "height": FB_H * 2 + HUD_TOP + HUD_BOTTOM,
+        })
     }
 }
 
@@ -282,6 +414,14 @@ struct Args {
     fleet_dir: Option<PathBuf>,
     warmup_frames: u64,
     viewer: bool,
+    calibrate: bool,
+    probe_iters: u32,
+    min_cols: usize,
+    max_cols: usize,
+    hud: bool,
+    request_timeout_ms: u64,
+    quarantine_frames: u64,
+    warm_fallbacks: bool,
 }
 
 fn usage() -> &'static str {
@@ -291,12 +431,17 @@ fn usage() -> &'static str {
        jotnar-doom-stream --image FILE --wad FILE --cuda ADDR --hip ADDR \\\n\
          --listing FILE [--stage-descriptor FILE] [--token T] [--frames N] \\\n\
          [--start-frame N] [--fps N] \\\n\
-         [--left-cols N] [--sink tcp|frames] [--out DIR] [--viewer-listen ADDR] \\\n\
-         [--receipt DIR] [--fleet-dir DIR] [--warmup-frames N] [--viewer]\n\
+         [--left-cols N] [--no-calibrate] [--probe-iters N] \\\n\
+         [--min-cols N] [--max-cols N] \\\n\
+         [--sink tcp|frames] [--out DIR] [--hud] [--viewer-listen ADDR] \\\n\
+         [--receipt DIR] [--fleet-dir DIR] [--warmup-frames N] [--viewer] \\\n\
+         [--request-timeout-ms N] [--quarantine-frames N] [--no-warm-fallbacks]\n\
      \n\
      The RV32IM core is the source; the generic controller owns the column\n\
      split, GPU placement, stitch, failover, leases, and receipt. The sink is\n\
-     the existing SDL viewer protocol or a frames directory."
+     the existing SDL viewer protocol, a frames directory, or a HUD frames\n\
+     directory (--hud) for headless verification. Split calibration is on by\n\
+     default; --no-calibrate keeps the declared --left-cols split."
 }
 
 fn parse() -> Result<Args, String> {
@@ -321,6 +466,14 @@ fn parse() -> Result<Args, String> {
     let mut fleet_dir = None;
     let mut warmup_frames = 0u64;
     let mut viewer = false;
+    let mut calibrate = true;
+    let mut probe_iters = 7u32;
+    let mut min_cols = 32usize;
+    let mut max_cols = 288usize;
+    let mut hud = false;
+    let mut request_timeout_ms = 1_000u64;
+    let mut quarantine_frames = 4u64;
+    let mut warm_fallbacks = true;
     while let Some(arg) = it.next() {
         let mut value = |flag: &str| it.next().ok_or_else(|| format!("{flag} needs a value"));
         match arg.as_str() {
@@ -370,6 +523,34 @@ fn parse() -> Result<Args, String> {
                     .map_err(|_| "--warmup-frames must be an integer")?
             }
             "--viewer" => viewer = true,
+            "--no-calibrate" => calibrate = false,
+            "--probe-iters" => {
+                probe_iters = value("--probe-iters")?
+                    .parse()
+                    .map_err(|_| "--probe-iters must be an integer")?
+            }
+            "--min-cols" => {
+                min_cols = value("--min-cols")?
+                    .parse()
+                    .map_err(|_| "--min-cols must be an integer")?
+            }
+            "--max-cols" => {
+                max_cols = value("--max-cols")?
+                    .parse()
+                    .map_err(|_| "--max-cols must be an integer")?
+            }
+            "--hud" => hud = true,
+            "--request-timeout-ms" => {
+                request_timeout_ms = value("--request-timeout-ms")?
+                    .parse()
+                    .map_err(|_| "--request-timeout-ms must be an integer")?
+            }
+            "--quarantine-frames" => {
+                quarantine_frames = value("--quarantine-frames")?
+                    .parse()
+                    .map_err(|_| "--quarantine-frames must be an integer")?
+            }
+            "--no-warm-fallbacks" => warm_fallbacks = false,
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument {other:?}\n\n{}", usage())),
         }
@@ -394,6 +575,14 @@ fn parse() -> Result<Args, String> {
         fleet_dir,
         warmup_frames,
         viewer,
+        calibrate,
+        probe_iters: probe_iters.max(1),
+        min_cols: min_cols.max(1),
+        max_cols: max_cols.max(1),
+        hud,
+        request_timeout_ms: request_timeout_ms.max(1),
+        quarantine_frames,
+        warm_fallbacks,
     })
 }
 
@@ -422,12 +611,14 @@ fn real_main() -> Result<(), String> {
             dir: None,
             listen: Some(args.listen.clone()),
             title: Some("Jotnar DOOM".to_string()),
+            hud: false,
         },
         "frames" => StreamSinkSpec {
             kind: "frames".to_string(),
             dir: Some(args.out.clone().ok_or("--sink frames needs --out DIR")?),
             listen: None,
             title: None,
+            hud: false,
         },
         _ => unreachable!(),
     };
@@ -455,11 +646,19 @@ fn real_main() -> Result<(), String> {
             }
             Box::new(DoomSink::new(&args.listen, wall_w, wall_h, keys)?)
         }
-        "frames" => Box::new(FrameDirSink::new(
-            args.out.as_deref().ok_or("--out needed")?,
-            wall_w,
-            wall_h,
-        )?),
+        "frames" => {
+            if args.hud {
+                Box::new(HudDirSink::new(
+                    args.out.as_ref().ok_or("--out needed")?,
+                )?)
+            } else {
+                Box::new(FrameDirSink::new(
+                    args.out.as_deref().ok_or("--out needed")?,
+                    wall_w,
+                    wall_h,
+                )?)
+            }
+        }
         _ => unreachable!(),
     };
     let descriptor = StreamDescriptor {
@@ -498,6 +697,12 @@ fn real_main() -> Result<(), String> {
             right_cols: FB_W - args.left_cols,
             overlap: 1,
         }),
+        calibration: args.calibrate.then(|| CalibrationSpec {
+            probe_iters: args.probe_iters,
+            min_cols: args.min_cols,
+            max_cols: args.max_cols,
+            rebalance: true,
+        }),
         sink: sink_spec,
         merge: "columns".to_string(),
         placement: [("cuda".to_string(), 1), ("hip".to_string(), 1)]
@@ -522,6 +727,9 @@ fn real_main() -> Result<(), String> {
         fleet_dir: args.fleet_dir,
         lease_ms: 3_000,
         timeout_ms: 10_000,
+        request_timeout_ms: args.request_timeout_ms,
+        quarantine_frames: args.quarantine_frames,
+        warm_fallbacks: args.warm_fallbacks,
     };
     let result = run_stream_with(&descriptor, "doom-live", &endpoints, &cfg, source, sink);
     if let Some(mut child) = viewer {
@@ -543,5 +751,81 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jotnar_node_tools::stream::{SplitMeta, TileMeta};
+
+    fn meta() -> FrameMeta {
+        let tile = |col: usize, target: &str, cols: usize| TileMeta {
+            row: 0,
+            col,
+            target: target.to_string(),
+            addr: format!("{target}:9997"),
+            planned_target: target.to_string(),
+            cols,
+            latency_ms: 40,
+            worker_ms: Some(35),
+            submit_call_ms: 1,
+            status_ms: 2,
+            result_ms: 1,
+            attempts: 1,
+            failover_from: None,
+            job_id: format!("job-{col}"),
+            ok: true,
+        };
+        FrameMeta {
+            index: 3,
+            work_ms: 45,
+            budget_ms: 66,
+            deadline_ok: true,
+            mode: "columns".to_string(),
+            p50_ms: 44,
+            p95_ms: 50,
+            p99_ms: 52,
+            split: Some(SplitMeta {
+                left_cols: 72,
+                right_cols: 248,
+                left_share: 72.0 / 320.0,
+            }),
+            failovers: 0,
+            recoveries: 0,
+            failed_targets: Vec::new(),
+            recovered_targets: Vec::new(),
+            note: "all targets healthy".to_string(),
+            tiles: vec![tile(0, "cuda", 72), tile(1, "hip", 248)],
+        }
+    }
+
+    #[test]
+    fn hud_frame_overlays_bands_and_keeps_game_pixels() {
+        let w = 64;
+        let h = 32;
+        let frame = Frame::rgb(3, w, h, vec![42u8; w * h * 3]).unwrap();
+        let (ow, oh, body) = hud_frame(&frame, &meta()).unwrap();
+        assert_eq!((ow, oh), (w, h + HUD_TOP + HUD_BOTTOM));
+        let game = HUD_TOP * w * 3;
+        assert_eq!(&body[game..game + w * h * 3], &frame.data[..]);
+        assert!(body[..game].iter().any(|b| *b > 20));
+        let bottom = (HUD_TOP + h) * w * 3;
+        assert!(body[bottom..].iter().any(|b| *b > 20));
+    }
+
+    #[test]
+    fn hud_frame_records_a_down_target() {
+        let w = 64;
+        let h = 32;
+        let frame = Frame::rgb(3, w, h, vec![0u8; w * h * 3]).unwrap();
+        let mut meta = meta();
+        meta.failed_targets = vec!["hip".to_string()];
+        meta.tiles[1].target = "cuda".to_string();
+        meta.tiles[1].failover_from = Some("hip".to_string());
+        meta.tiles[1].attempts = 2;
+        meta.note = "failover hip".to_string();
+        let (_, _, body) = hud_frame(&frame, &meta).unwrap();
+        assert!(body.iter().any(|b| *b > 20));
     }
 }

@@ -18,6 +18,7 @@ fn usage() -> &'static str {
                      [--frames N] [--warmup-frames N] [--fleet-dir DIR] [--lease-ms N]\n\
                      [--reference DIR] [--clip DIR] [--out DIR] [--receipt DIR]\n\
                      [--all-cuda] [--viewer] [--timeout-ms N]\n\
+                     [--request-timeout-ms N] [--quarantine-frames N] [--warm-fallbacks]\n\
      \n\
      The descriptor declares the stream clock, source, tiled GPU stage, sink,\n\
      and receipt policy. `--clip` overrides a frames source; `--out` overrides\n\
@@ -42,6 +43,9 @@ struct Args {
     all_cuda: bool,
     viewer: bool,
     timeout_ms: u64,
+    request_timeout_ms: u64,
+    quarantine_frames: u64,
+    warm_fallbacks: bool,
 }
 
 fn parse() -> Result<Args, String> {
@@ -62,6 +66,9 @@ fn parse() -> Result<Args, String> {
     let mut all_cuda = false;
     let mut viewer = false;
     let mut timeout_ms = 10_000u64;
+    let mut request_timeout_ms = 1_000u64;
+    let mut quarantine_frames = 4u64;
+    let mut warm_fallbacks = false;
     while let Some(arg) = it.next() {
         let mut value = |flag: &str| it.next().ok_or_else(|| format!("{flag} needs a value"));
         match arg.as_str() {
@@ -98,6 +105,17 @@ fn parse() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--timeout-ms must be an integer")?
             }
+            "--request-timeout-ms" => {
+                request_timeout_ms = value("--request-timeout-ms")?
+                    .parse()
+                    .map_err(|_| "--request-timeout-ms must be an integer")?
+            }
+            "--quarantine-frames" => {
+                quarantine_frames = value("--quarantine-frames")?
+                    .parse()
+                    .map_err(|_| "--quarantine-frames must be an integer")?
+            }
+            "--warm-fallbacks" => warm_fallbacks = true,
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument {other:?}\n\n{}", usage())),
         }
@@ -118,6 +136,9 @@ fn parse() -> Result<Args, String> {
         all_cuda,
         viewer,
         timeout_ms: timeout_ms.max(1),
+        request_timeout_ms: request_timeout_ms.max(1),
+        quarantine_frames,
+        warm_fallbacks,
     })
 }
 
@@ -179,6 +200,9 @@ fn real_main() -> Result<(), String> {
         fleet_dir: args.fleet_dir,
         lease_ms: args.lease_ms,
         timeout_ms: args.timeout_ms,
+        request_timeout_ms: args.request_timeout_ms,
+        quarantine_frames: args.quarantine_frames,
+        warm_fallbacks: args.warm_fallbacks,
     };
     let mut viewer = None;
     if descriptor.sink.kind == "tcp" {

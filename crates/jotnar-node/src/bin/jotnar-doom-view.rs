@@ -239,6 +239,9 @@ fn run() -> Result<(), String> {
         if tex.is_null() {
             return Err("could not create SDL texture".into());
         }
+        let mut tex = tex;
+        let mut tex_w = width;
+        let mut tex_h = height;
         (sdl.raise_window)(win);
         present(&sdl, tex, ren, &body, width);
         let mut ev = [0u8; 56];
@@ -278,13 +281,36 @@ fn run() -> Result<(), String> {
                 Ok((h, b)) => {
                     header = h;
                     body = b;
+                    let nw = header
+                        .get("width")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(tex_w as u64) as usize;
+                    let nh = header
+                        .get("height")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(tex_h as u64) as usize;
+                    if nw != tex_w || nh != tex_h {
+                        (sdl.destroy_texture)(tex);
+                        tex = (sdl.create_texture)(
+                            ren,
+                            PIXFMT_RGB24,
+                            TEXTURE_STREAMING,
+                            nw as c_int,
+                            nh as c_int,
+                        );
+                        if tex.is_null() {
+                            return Err("could not resize SDL texture".into());
+                        }
+                        tex_w = nw;
+                        tex_h = nh;
+                    }
                 }
                 Err(e) => {
                     eprintln!("viewer: {e}");
                     break;
                 }
             }
-            present(&sdl, tex, ren, &body, width);
+            present(&sdl, tex, ren, &body, tex_w);
         }
         (sdl.destroy_texture)(tex);
         (sdl.destroy_renderer)(ren);

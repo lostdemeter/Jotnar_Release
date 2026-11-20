@@ -75,17 +75,39 @@ impl JobClient {
         fields: Json,
         payload: &[u8],
     ) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.call_frame_with(
+            typ,
+            fields,
+            payload,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+    }
+
+    /// One request with explicit read/write deadlines.
+    ///
+    /// A persistent session is reused, but the socket timeouts are set before
+    /// every exchange. A blackholed peer therefore fails in `timeout`, not in
+    /// the 60 s default.
+    pub fn call_frame_with(
+        &self,
+        typ: &str,
+        fields: Json,
+        payload: &[u8],
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
         let outcome = {
             let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_none() {
                 let stream = connect_with_timeout(&self.endpoint, Duration::from_secs(5))
                     .map_err(|e| ("job-unavailable".to_string(), e))?;
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
                 *guard = Some(stream);
             }
             let stream = guard.as_mut().expect("session was just established");
+            let _ = stream.set_read_timeout(Some(read_timeout));
+            let _ = stream.set_write_timeout(Some(write_timeout));
             exchange(stream, &self.token, typ, fields, payload)
         };
         if outcome.is_err() {
@@ -119,8 +141,34 @@ impl JobClient {
         self.call_frame("submit", args.clone(), payload)
     }
 
+    /// Submit with a bounded response deadline. Used by interactive streams so
+    /// a blackholed peer cannot hold a frame for the 60 s default.
+    pub fn submit_frame_with_timeout(
+        &self,
+        args: &Json,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.call_frame_with("submit", args.clone(), payload, timeout, timeout)
+    }
+
     pub fn status(&self, job_id: &str) -> Result<Json, (String, String)> {
         self.call_retry("job-status", json!({"job_id": job_id}), &[])
+    }
+
+    pub fn status_with_timeout(
+        &self,
+        job_id: &str,
+        timeout: Duration,
+    ) -> Result<Json, (String, String)> {
+        self.call_frame_with(
+            "job-status",
+            json!({"job_id": job_id}),
+            &[],
+            timeout,
+            timeout,
+        )
+        .map(|(header, _)| header)
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<Json, (String, String)> {
@@ -131,12 +179,31 @@ impl JobClient {
         self.call_frame_retry("job-result", json!({"job_id": job_id}), &[])
     }
 
+    pub fn result_with_timeout(
+        &self,
+        job_id: &str,
+        timeout: Duration,
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.call_frame_with(
+            "job-result",
+            json!({"job_id": job_id}),
+            &[],
+            timeout,
+            timeout,
+        )
+    }
+
     pub fn list(&self) -> Result<Json, (String, String)> {
         self.call_retry("job-list", json!({}), &[])
     }
 
     pub fn ping(&self) -> Result<Json, (String, String)> {
         self.call_retry("ping", json!({}), &[])
+    }
+
+    pub fn ping_with_timeout(&self, timeout: Duration) -> Result<Json, (String, String)> {
+        self.call_frame_with("ping", json!({}), &[], timeout, timeout)
+            .map(|(header, _)| header)
     }
 
     /// Live executor view: queue, running jobs, warm workers, recent jobs.

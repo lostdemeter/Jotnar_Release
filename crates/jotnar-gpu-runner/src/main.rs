@@ -23,7 +23,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -57,8 +57,166 @@ struct Config {
     payload_cache: Arc<Mutex<PayloadCache>>,
     artifact_cache: Arc<Mutex<ArtifactCache>>,
     jobs: Arc<Mutex<JobStore>>,
+    gate: Arc<PriorityGate>,
     self_addr: String,
     started_ms: u64,
+}
+
+/// Bounded, class-aware execution gate.
+///
+/// The GPU runner executes one job at a time. Interactive jobs (stream frames)
+/// are served first; a batch job gets one turn after every `batch_quantum`
+/// interactive jobs so an export cannot be starved. Planning still happens in
+/// the controller; this only enforces the runner's own execution bound.
+struct PriorityGate {
+    state: Mutex<GateState>,
+    cond: Condvar,
+    limit: usize,
+    batch_quantum: u64,
+}
+
+struct GateState {
+    interactive: VecDeque<String>,
+    batch: VecDeque<String>,
+    running: Option<String>,
+    served_interactive: u64,
+    pending: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QueueView {
+    depth: usize,
+    interactive: usize,
+    batch: usize,
+}
+
+fn gate_view(state: &GateState) -> QueueView {
+    QueueView {
+        depth: state.interactive.len() + state.batch.len(),
+        interactive: state.interactive.len(),
+        batch: state.batch.len(),
+    }
+}
+
+impl PriorityGate {
+    fn new(limit: usize, batch_quantum: u64) -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                interactive: VecDeque::new(),
+                batch: VecDeque::new(),
+                running: None,
+                served_interactive: 0,
+                pending: 0,
+            }),
+            cond: Condvar::new(),
+            limit: limit.max(1),
+            batch_quantum: batch_quantum.max(1),
+        }
+    }
+
+    fn try_enqueue(&self, class: &str, job_id: &str) -> Result<QueueView, QueueView> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.pending >= self.limit {
+            return Err(gate_view(&state));
+        }
+        if class == "batch" {
+            state.batch.push_back(job_id.to_string());
+        } else {
+            state.interactive.push_back(job_id.to_string());
+        }
+        state.pending += 1;
+        self.cond.notify_all();
+        Ok(gate_view(&state))
+    }
+
+    /// Block until this job holds the execution lane.
+    fn wait_turn(&self, job_id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if state.running.as_deref() == Some(job_id) {
+                return;
+            }
+            if state.running.is_none() {
+                if pick_next(&mut state, self.batch_quantum).is_some() {
+                    self.cond.notify_all();
+                    continue;
+                }
+            }
+            state = self.cond.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn release(&self, job_id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.running.as_deref() == Some(job_id) {
+            state.running = None;
+        }
+        state.pending = state.pending.saturating_sub(1);
+        self.cond.notify_all();
+    }
+
+    fn view(&self) -> (QueueView, u64) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (gate_view(&state), state.served_interactive)
+    }
+}
+
+/// Pick the next job for the single execution lane.
+///
+/// Batch work runs in the idle window: it is served only when no interactive
+/// job is queued. If interactive work is continuous, the `batch_quantum`
+/// fallback forces one batch turn after that many interactive jobs so the
+/// export cannot starve.
+fn pick_next(state: &mut GateState, batch_quantum: u64) -> Option<String> {
+    if state.running.is_some() {
+        return None;
+    }
+    let batch_ready = !state.batch.is_empty()
+        && (state.interactive.is_empty() || state.served_interactive >= batch_quantum);
+    let pick_interactive = !state.interactive.is_empty() && !batch_ready;
+    let next = if pick_interactive {
+        state.interactive.pop_front()
+    } else if batch_ready {
+        state.batch.pop_front()
+    } else {
+        None
+    };
+    if let Some(id) = next.clone() {
+        state.running = Some(id);
+        if pick_interactive {
+            state.served_interactive += 1;
+        } else {
+            state.served_interactive = 0;
+        }
+    }
+    next
+}
+
+/// Releases the execution lane if the job thread exits, even on a panic.
+struct TurnGuard {
+    gate: Arc<PriorityGate>,
+    job_id: String,
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        self.gate.release(&self.job_id);
+    }
+}
+
+fn normalize_class(raw: Option<&str>) -> &'static str {
+    match raw {
+        Some("batch") | Some("low") | Some("background") => "batch",
+        _ => "interactive",
+    }
+}
+
+fn class_priority(class: &str) -> u8 {
+    if class == "batch" {
+        0
+    } else {
+        1
+    }
 }
 
 struct CachedPayload {
@@ -153,6 +311,7 @@ const RETAIN_JOBS: usize = 1024;
 
 struct AsyncJob {
     id: String,
+    class: String,
     state: String,
     error: Option<String>,
     created_ms: u128,
@@ -226,6 +385,7 @@ fn usage() -> &'static str {
      usage:\n\
        jotnar-gpu-runner --target hip|cuda [--bind ADDR] [--token SECRET]\n\
                          [--max-frame BYTES] [--cache-dir DIR] [--mdns]\n\
+                         [--queue-limit N] [--batch-quantum N]\n\
      \n\
      The runner compiles and runs Jotnar listings on the local GPU host. Set\n\
      HIPCC / HIP_ARCH for HIP, or NVCC / CUDA_ARCH for CUDA."
@@ -269,6 +429,8 @@ fn real_main() -> Result<(), String> {
     let mut warm_idle_ms = 300_000u64;
     let mut payload_cache_bytes = 256 * 1024 * 1024usize;
     let mut artifact_cache_entries = 64usize;
+    let mut queue_limit = 64usize;
+    let mut batch_quantum = 8u64;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -339,6 +501,22 @@ fn real_main() -> Result<(), String> {
                     .parse()
                     .map_err(|e| format!("bad --artifact-cache-entries: {e}"))?;
             }
+            "--queue-limit" => {
+                i += 1;
+                queue_limit = args
+                    .get(i)
+                    .ok_or("--queue-limit needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --queue-limit: {e}"))?;
+            }
+            "--batch-quantum" => {
+                i += 1;
+                batch_quantum = args
+                    .get(i)
+                    .ok_or("--batch-quantum needs a value")?
+                    .parse()
+                    .map_err(|e| format!("bad --batch-quantum: {e}"))?;
+            }
             "-h" | "--help" => return Err(usage().to_string()),
             other => return Err(format!("unknown argument '{other}'\n\n{}", usage())),
         }
@@ -368,6 +546,7 @@ fn real_main() -> Result<(), String> {
         payload_cache: Arc::new(Mutex::new(PayloadCache::new(payload_cache_bytes.max(1)))),
         artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(artifact_cache_entries))),
         jobs: Arc::new(Mutex::new(JobStore::new(RETAIN_JOBS))),
+        gate: Arc::new(PriorityGate::new(queue_limit, batch_quantum)),
         self_addr: String::new(),
         started_ms: now_ms() as u64,
     };
@@ -679,6 +858,8 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
             };
             jobs.push(json!({
                 "id": job.id,
+                "class": job.class,
+                "priority": class_priority(&job.class),
                 "state": job.state,
                 "created_ms": job.created_ms as u64,
                 "started_ms": job.started_ms.map(|v| v as u64),
@@ -696,6 +877,7 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .len();
+    let (queue, served_interactive) = cfg.gate.view();
     let arch = if cfg.target == Target::Hip {
         std::env::var("HIP_ARCH").unwrap_or_default()
     } else {
@@ -723,8 +905,8 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
             "ts_ms": now as u64,
             "uptime_ms": (now as u64).saturating_sub(cfg.started_ms),
             "limits": {
-                "workers": Json::Null,
-                "queue": Json::Null,
+                "workers": 1,
+                "queue": cfg.gate.limit,
                 "max_frame": cfg.max_frame,
             },
             "activity": {
@@ -733,6 +915,10 @@ fn send_health(stream: &mut TcpStream, cfg: &Config, id: &Json) -> Result<(), St
                 "retained": retained,
                 "warm_workers": warm_workers,
                 "warm_artifacts": warm_workers,
+                "queued_interactive": queue.interactive,
+                "queued_batch": queue.batch,
+                "served_interactive": served_interactive,
+                "batch_quantum": cfg.gate.batch_quantum,
             },
             "jobs": jobs,
         }),
@@ -825,12 +1011,31 @@ fn submit_job(
         inner["auth"] = json!(token);
     }
     let inner_body = payload.to_vec();
+    let class = normalize_class(header.get("class").and_then(|x| x.as_str()));
     let job_id = {
         let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let job_id = store.next_id();
-        let cancel = Arc::new(AtomicBool::new(false));
+        store.next_id()
+    };
+    let view = match cfg.gate.try_enqueue(class, &job_id) {
+        Ok(view) => view,
+        Err(view) => {
+            return send_error(
+                stream,
+                id,
+                "queue-full",
+                &format!(
+                    "runner queue is full ({} queued: {} interactive, {} batch); retry",
+                    view.depth, view.interactive, view.batch
+                ),
+            );
+        }
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut store = cfg.jobs.lock().unwrap_or_else(|e| e.into_inner());
         store.insert(AsyncJob {
             id: job_id.clone(),
+            class: class.to_string(),
             state: "queued".to_string(),
             error: None,
             created_ms: now_ms(),
@@ -840,13 +1045,16 @@ fn submit_job(
             result_body: Vec::new(),
             cancel: cancel.clone(),
         });
-        (job_id, cancel)
-    };
-    let (job_id, cancel) = job_id;
+    }
     let thread_cfg = cfg.clone();
     let thread_inner = inner.clone();
     let thread_id = job_id.clone();
     thread::spawn(move || {
+        thread_cfg.gate.wait_turn(&thread_id);
+        let _turn = TurnGuard {
+            gate: Arc::clone(&thread_cfg.gate),
+            job_id: thread_id.clone(),
+        };
         if cancel.load(Ordering::SeqCst) {
             finish_job(&thread_cfg, &thread_id, "canceled", None, None, Vec::new());
             return;
@@ -885,6 +1093,11 @@ fn submit_job(
             "ok": true,
             "job_id": job_id,
             "state": "queued",
+            "class": class,
+            "priority": class_priority(class),
+            "queue_depth": view.depth,
+            "queued_interactive": view.interactive,
+            "queued_batch": view.batch,
         }),
         &[],
     )
@@ -1963,6 +2176,7 @@ mod job_store_tests {
     fn job(id: &str, state: &str) -> AsyncJob {
         AsyncJob {
             id: id.to_string(),
+            class: "interactive".to_string(),
             state: state.to_string(),
             error: None,
             created_ms: 0,
@@ -1983,6 +2197,62 @@ mod job_store_tests {
         assert!(store.jobs.contains_key("run"));
         assert!(!store.jobs.contains_key("done-a"));
         assert!(store.jobs.contains_key("done-b"));
+    }
+
+    #[test]
+    fn priority_gate_serves_interactive_then_a_batch_turn() {
+        let gate = PriorityGate::new(16, 2);
+        for id in ["b1", "b2"] {
+            gate.try_enqueue("batch", id).unwrap();
+        }
+        for id in ["i1", "i2", "i3", "i4"] {
+            gate.try_enqueue("interactive", id).unwrap();
+        }
+        let mut order = Vec::new();
+        loop {
+            let next = {
+                let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+                pick_next(&mut state, 2)
+            };
+            let Some(id) = next else {
+                break;
+            };
+            order.push(id.clone());
+            gate.release(&id);
+        }
+        assert_eq!(order, ["i1", "i2", "b1", "i3", "i4", "b2"]);
+    }
+
+    #[test]
+    fn priority_gate_batch_waits_for_the_idle_window() {
+        let gate = PriorityGate::new(16, 10);
+        gate.try_enqueue("batch", "b1").unwrap();
+        gate.try_enqueue("interactive", "i1").unwrap();
+        gate.try_enqueue("interactive", "i2").unwrap();
+        let mut order = Vec::new();
+        loop {
+            let next = {
+                let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+                pick_next(&mut state, 10)
+            };
+            let Some(id) = next else {
+                break;
+            };
+            order.push(id.clone());
+            gate.release(&id);
+        }
+        assert_eq!(order, ["i1", "i2", "b1"]);
+    }
+
+    #[test]
+    fn priority_gate_bounds_the_queue_and_reports_depth() {
+        let gate = PriorityGate::new(2, 4);
+        let first = gate.try_enqueue("interactive", "i1").unwrap();
+        assert_eq!(first.depth, 1);
+        let second = gate.try_enqueue("batch", "b1").unwrap();
+        assert_eq!((second.depth, second.interactive, second.batch), (2, 1, 1));
+        let rejected = gate.try_enqueue("batch", "b2").unwrap_err();
+        assert_eq!(rejected.depth, 2);
     }
 }
 
@@ -2007,6 +2277,7 @@ mod async_job_tests {
             payload_cache: Arc::new(Mutex::new(PayloadCache::new(1024))),
             artifact_cache: Arc::new(Mutex::new(ArtifactCache::new(2))),
             jobs: Arc::new(Mutex::new(JobStore::new(4))),
+            gate: Arc::new(PriorityGate::new(4, 8)),
             self_addr: "127.0.0.1:0".to_string(),
             started_ms: now_ms() as u64,
         }

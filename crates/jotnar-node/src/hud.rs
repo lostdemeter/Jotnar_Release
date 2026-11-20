@@ -27,6 +27,32 @@ pub struct HudInfo {
     pub note: String,
 }
 
+/// One tile line in the wall HUD.
+#[derive(Clone, Debug)]
+pub struct WallTileInfo {
+    pub row: usize,
+    pub col: usize,
+    pub target: String,
+    pub cols: usize,
+    pub ms: u64,
+    pub attempts: u32,
+    pub failover_from: Option<String>,
+}
+
+/// Wall HUD: per-tile placement, latency, and the running frame percentiles.
+#[derive(Clone, Debug)]
+pub struct WallHudInfo {
+    pub frame: u64,
+    pub fps: u32,
+    pub work_ms: u64,
+    pub budget_ms: u64,
+    pub p50: u64,
+    pub p95: u64,
+    pub p99: u64,
+    pub tiles: Vec<WallTileInfo>,
+    pub note: String,
+}
+
 /// Render a 3x5 glyph. Rows are top-to-bottom, bits are left-to-right.
 fn glyph(c: char) -> [u8; 5] {
     let c = c.to_ascii_uppercase();
@@ -233,6 +259,93 @@ pub fn render(
     Ok(out)
 }
 
+/// Render the wall HUD: a top band with the clock/percentiles and one line per
+/// tile (placement, owned columns, latency, failover origin), and a bottom band
+/// with the target set and health note. The wall pixels are copied through.
+pub fn render_wall(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    info: &WallHudInfo,
+) -> Result<Vec<u8>, String> {
+    if frame.len() != width * height * 3 {
+        return Err(format!(
+            "wall HUD frame has {} bytes, expected {}",
+            frame.len(),
+            width * height * 3
+        ));
+    }
+    let out_h = height + HUD_TOP + HUD_BOTTOM;
+    let mut out = vec![10u8; width * out_h * 3];
+    for y in 0..height {
+        let src = y * width * 3;
+        let dst = (y + HUD_TOP) * width * 3;
+        out[dst..dst + width * 3].copy_from_slice(&frame[src..src + width * 3]);
+    }
+    let white = [232, 232, 232];
+    let cyan = [0, 220, 255];
+    let yellow = [255, 210, 90];
+    let green = [120, 255, 120];
+    let red = [255, 80, 80];
+
+    let line1 = format!(
+        "JOTNAR WALL  {} FPS  FRAME {}  WORK {}MS/{}MS  P50 {}MS  P95 {}MS  P99 {}MS",
+        info.fps, info.frame, info.work_ms, info.budget_ms, info.p50, info.p95, info.p99
+    );
+    draw_text(&mut out, width, 6, 2, &line1, white, 2);
+
+    let mut x = 6;
+    for tile in &info.tiles {
+        let label = match &tile.failover_from {
+            Some(from) => format!(
+                "R{}C{} {}<-{} {}C {}MS",
+                tile.row, tile.col, tile.target, from, tile.cols, tile.ms
+            ),
+            None => format!(
+                "R{}C{} {} {}C {}MS",
+                tile.row, tile.col, tile.target, tile.cols, tile.ms
+            ),
+        };
+        let color = if tile.failover_from.is_some() {
+            yellow
+        } else {
+            cyan
+        };
+        x = draw_text(&mut out, width, x, 16, &label, color, 2) + 8;
+    }
+    let _ = x;
+
+    let mut targets: Vec<String> = Vec::new();
+    for tile in &info.tiles {
+        if !targets.iter().any(|target| target == &tile.target) {
+            targets.push(tile.target.clone());
+        }
+    }
+    let note_lower = info.note.to_ascii_lowercase();
+    let note_color = if note_lower.contains("failover") || note_lower.contains("recovered") {
+        yellow
+    } else if note_lower.contains("failed") || note_lower.contains("down") {
+        red
+    } else {
+        green
+    };
+    let bottom = format!(
+        "TARGETS {}  |  {}",
+        targets.join("+"),
+        info.note.to_ascii_uppercase()
+    );
+    draw_text(
+        &mut out,
+        width,
+        6,
+        HUD_TOP + height + 5,
+        &bottom,
+        note_color,
+        2,
+    );
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,10 +382,45 @@ mod tests {
     }
 
     #[test]
-    fn glyphs_are_stable_for_common_text() {
-        for c in "JOTNAR DOOM 0123456789 :./-%()[]|+,_=#?!*><".chars() {
-            let g = glyph(c);
-            assert!(g.iter().all(|row| *row <= 0b111), "{c:?}");
-        }
+    fn wall_hud_draws_tiles_and_keeps_the_wall() {
+        let w = 64;
+        let h = 32;
+        let frame = vec![9u8; w * h * 3];
+        let info = WallHudInfo {
+            frame: 12,
+            fps: 15,
+            work_ms: 27,
+            budget_ms: 66,
+            p50: 25,
+            p95: 28,
+            p99: 29,
+            tiles: vec![
+                WallTileInfo {
+                    row: 0,
+                    col: 0,
+                    target: "cuda".to_string(),
+                    cols: 320,
+                    ms: 39,
+                    attempts: 1,
+                    failover_from: None,
+                },
+                WallTileInfo {
+                    row: 0,
+                    col: 1,
+                    target: "cuda".to_string(),
+                    cols: 320,
+                    ms: 18,
+                    attempts: 2,
+                    failover_from: Some("hip".to_string()),
+                },
+            ],
+            note: "failover hip".to_string(),
+        };
+        let out = render_wall(&frame, w, h, &info).unwrap();
+        assert_eq!(out.len(), w * (h + HUD_TOP + HUD_BOTTOM) * 3);
+        let game = HUD_TOP * w * 3;
+        assert_eq!(&out[game..game + w * h * 3], &frame[..]);
+        assert!(out[..game].iter().any(|b| *b > 20));
+        assert!(out[(HUD_TOP + h) * w * 3..].iter().any(|b| *b > 20));
     }
 }

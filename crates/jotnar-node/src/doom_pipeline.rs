@@ -116,19 +116,37 @@ impl Split {
     }
 }
 
-/// Pick a split from two measured probe times. A node that takes half as long
-/// for the same probe gets twice the columns, clamped to `min_cols..=max_cols`.
-pub fn choose_split(left_ms: u64, right_ms: u64, min_cols: usize, max_cols: usize) -> Split {
-    let min_cols = min_cols.clamp(1, FB_W / 2);
-    let max_cols = max_cols.clamp(FB_W / 2, FB_W - min_cols);
+/// Pick a left/right column split for an arbitrary frame width from two
+/// measured probe times. A side that takes half as long for the same probe
+/// gets twice the columns, clamped to `min_cols..=max_cols`.
+///
+/// This is the reusable form of [`choose_split`]: the controller can balance a
+/// 320-column DOOM frame or a wider frame with the same policy.
+pub fn choose_columns(
+    width: usize,
+    left_ms: u64,
+    right_ms: u64,
+    min_cols: usize,
+    max_cols: usize,
+) -> (usize, usize) {
+    let width = width.max(2);
+    let half = width / 2;
+    let min_cols = min_cols.clamp(1, half);
+    let max_cols = max_cols.clamp(half, width.saturating_sub(min_cols));
     if left_ms == 0 || right_ms == 0 || left_ms == right_ms {
-        return Split::EVEN;
+        return (half, width - half);
     }
     // throughput is 1/time, so the left share is right_time / total_time.
     let share = right_ms as f64 / (left_ms + right_ms) as f64;
-    let left = (FB_W as f64 * share).round() as usize;
+    let left = (width as f64 * share).round() as usize;
     let left = left.clamp(min_cols, max_cols);
-    Split::from_left(left).unwrap_or(Split::EVEN)
+    (left, width - left)
+}
+
+/// Pick a split for the 320-column DOOM framebuffer.
+pub fn choose_split(left_ms: u64, right_ms: u64, min_cols: usize, max_cols: usize) -> Split {
+    let (left, right) = choose_columns(FB_W, left_ms, right_ms, min_cols, max_cols);
+    Split::new(left, right).unwrap_or(Split::EVEN)
 }
 
 /// Convert a horizontal window of the native BGRA framebuffer to packed RGB
@@ -316,6 +334,17 @@ mod tests {
         assert_eq!(even, Split::EVEN);
         let clamped = choose_split(10_000, 1, 32, 288);
         assert_eq!(clamped.left_cols, 32);
+    }
+
+    #[test]
+    fn column_choice_generalizes_to_other_widths() {
+        // The same ratio policy works for a 640-column wall and an odd width.
+        let (left, right) = choose_columns(640, 70, 20, 32, 608);
+        assert_eq!(left + right, 640);
+        assert!((110..=150).contains(&left), "left {left}");
+        assert_eq!(choose_columns(640, 20, 20, 32, 608), (320, 320));
+        assert_eq!(choose_columns(641, 20, 20, 32, 608), (320, 321));
+        assert_eq!(choose_columns(640, 10_000, 1, 32, 608).0, 32);
     }
 
     #[test]

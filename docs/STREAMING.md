@@ -1,7 +1,7 @@
 # Streaming layer
 
-**Status:** C0 and D0 implemented; DOOM port (C1) and live productization (D1)
-are the next slices
+**Status:** C0, D0, C1, and D1 implemented and gated; C2 (grid derivation) is the
+next slice
 **Scope:** a general streaming controller above the batch stage/executor layer
 
 `jotnar-workload` runs typed stage graphs to completion. DOOM originally had a
@@ -53,13 +53,43 @@ A frame is RGB24 plus `index`, `ts_ms`, kind/shape/bytes, and a SHA-256. Source
 and sink are adapters:
 
 ```text
-FrameSource   frames-dir | camera | (RV32IM for DOOM, pending)
-FrameSink     frames-dir | tcp (existing SDL viewer) | null
+FrameSource   frames-dir | camera | RV32IM (DOOM)
+FrameSink     frames-dir | frames-hud | tcp (existing SDL viewer) | null
 ```
 
 The camera adapter spawns `ffmpeg` at MJPEG 1280x720 30 fps and reads raw
 RGB24 at the stream size. The base frame is downscaled once; the stream clock
 then paces at 15 fps.
+
+## Frame metadata and the HUD hook
+
+`FrameSink` has a second write path:
+
+```rust
+fn write_meta(&mut self, frame: &Frame, meta: &FrameMeta) -> Result<(), String> {
+    self.write(frame) // default: metadata is optional
+}
+```
+
+`FrameMeta` is controller reporting, not planning. It carries the frame index,
+`work_ms`, deadline, running p50/p95/p99, the active split (left/right/share),
+cumulative failovers and recoveries, the failed/recovered targets, a human note,
+and one entry per tile: row/col, planned target, actual target and address,
+owned columns, tile latency, worker time when the runner reports it, submit/
+status/result timings, attempts, failover origin, and job id.
+
+The default delegates to `write`, so frames-dir and null sinks are byte-for-byte
+unchanged. The receipt line adds the same fields without removing the existing
+ones. A sink that wants a HUD overrides `write_meta`:
+
+- `jotnar-doom-stream --sink tcp` renders the DOOM HUD (`hud::render`) and sends
+  the 640x466 frame over the existing viewer protocol.
+- `--sink frames --hud` writes the same composited HUD frames headlessly; the
+  live gate uses it to prove the bands are drawn and the game region is
+  unchanged without requiring SDL.
+
+The HUD is rendering only. Tile geometry, split selection, and recording stay in
+the controller; the executor still sees one listing and one payload per job.
 
 ## Tiles, halo, and composite
 
@@ -119,13 +149,28 @@ max 63, and the wall is p99 29.
 Each tile is attempted on its planned target and then on the other targets in
 order. The receipt records `attempts`, `failover_from`, and the errors for every
 tile. A dead target therefore costs a failed connect, not a dropped frame; the
-planned target is retried on the next frame, so recovery is automatic.
+planned target is retried on the next frame, so recovery is automatic. The
+controller tracks the failed-target set between measured frames and records a
+`recovered_targets` entry (and a cumulative `recoveries` count) when a target
+that failed last frame succeeds again.
 
 The wall gate includes a failover leg: the HIP endpoint is pointed at a closed
 port (`127.0.0.1:1`), the three HIP tiles must retry on CUDA, and the two
-composited frames must still match the reference. A blackholed target (accepts
-but never responds) still depends on the client timeout; tuning that is future
-work.
+composited frames must still match the reference. The live DOOM gate adds a
+recovery leg: HIP is refused for the first measured frames, then a local proxy
+brings it up on the same port; the later frames must return to `attempts == 1`
+with a recorded recovery.
+
+A blackholed target (accepts but never responds) is bounded by the controller's
+per-request deadline, not the 60 s client default: interactive tiles use
+`--request-timeout-ms` (default 1000; the blackhole gate uses 500) for submit,
+status, and result. After a real failed attempt the controller quarantines that
+target for `--quarantine-frames` (default 4), uses a persistent fallback
+session, and retries after the window. Fallback tile shapes are warmed on the
+other target before the measured loop (`--warm-fallbacks`, on by default for
+`jotnar-doom-stream`), so the first failover does not pay a multi-second
+artifact compile. `scripts/doom_blackhole_gate.py` proves detection, exactness,
+quarantine, and rejoin.
 
 ## DOOM column split (C1a)
 
@@ -191,11 +236,12 @@ The live `work_ms` includes the core and the GPU path. 72/248 split, 15 fps,
 100 measured frames after 3 warm-up frames:
 
 ```text
-live         p50 47, p95 56, p99 61, max 63 ms
+live         p50 39, p95 47, p99 49, max 52 ms
              budget 66, frames over budget 0
 matches      100/100 byte-identical to the coordinator (EVEN reference)
+HUD          640x466, game region identical
+calibration  declared 72/248; chosen 113/207 after one rebalance
 failover     HIP dead; right tile retried on CUDA; 2/2 exact
-             p50 64, p99 65 ms (survivor carries both halves)
 stage claim  79905e7d… rows/columns overlap 1
 ```
 
@@ -205,19 +251,51 @@ setting removes them.
 
 The SLO gate uses the frames sink. The TCP viewer sink can add a further tail
 when the SDL reader falls behind (a 30-frame viewer run showed two ~250 ms
-frames); that is sink backpressure. The HUD and the coordinator's
-calibration/rebalance policy are not ported; the viewer title currently shows
-mode/frame only.
+frames); that is sink backpressure. The viewer now renders the HUD bands from
+the controller metadata; `--sink frames --hud` is the headless equivalent.
+
+### Split calibration (D1a)
+
+A column-split descriptor can carry a calibration block:
+
+```json
+"calibration": {"probe_iters": 7, "min_cols": 32, "max_cols": 288, "rebalance": true}
+```
+
+`stream::SplitPolicy` runs on the first real source frame, before the measured
+loop: warm even, probe even `N` times (p50 per side), choose a split, warm it,
+then one rebalance pass (normalize to half-width, accept a change of at least
+four columns). It writes `summary.calibration` (`policy`, `declared`, `probe`,
+`chosen`, `split_warmup`, `rebalance`) and every measured receipt line carries
+the active split. A probe failure aborts calibration and keeps the declared
+split, so per-frame failover still runs when one target is dead.
+`jotnar-doom-stream` enables calibration by default; `--no-calibrate` pins the
+declared `--left-cols`.
+
+The controller never sends the policy to an executor: it only submits the probe
+and frame tiles it already owns. On this fleet the chosen split is about 94/226
+for a declared 72/248. The binary/U8 stage's kernel time is sub-millisecond, so
+the probe balances the observable end-to-end tile latency (transport plus host
+wake), not pure kernel time. The RV32 core dominates the DOOM frame, so the
+split is a weak lever here; the point of the gate is that the decision is made
+on the controller and recorded, not that it moves the SLO.
+
+The legacy coordinator is now a comparison tool: `doom_live_gate.py` still uses
+it to produce the deterministic EVEN reference, but the demo and the receipt
+path are `jotnar-doom-stream`.
 
 ## Receipt
 
 `jotnar-stream` writes `frames.jsonl` (one line per frame: work time, deadline
-verdict, wall hash/bytes, optional reference match, and per-tile row/col,
-target, executor, job id, timestamps, hash, attempts, failover origin, and
-bytes) and `summary.json` (descriptor and stage-descriptor hashes, listing hash,
-source/sink, clock, geometry, percentiles, failover count, exactness counts,
-leases, and the controller/source/state owner). A stream registers an
-interactive lease per target when `--fleet-dir` is supplied.
+verdict, mode, active split, per-target placement, running p50/p95/p99, failover
+and recovery counts, failed/recovered targets, a note, wall hash/bytes, optional
+reference match, and per-tile row/col, target, executor, job id, owned columns,
+timestamps, hash, attempts, failover origin, and bytes) and `summary.json`
+(descriptor and stage-descriptor hashes, listing hash, source/sink, clock,
+geometry, the calibration report if enabled, percentiles, failover/recovery
+counts, exactness counts, leases, and the controller/source/state owner). A
+stream registers an interactive lease per target when `--fleet-dir` is
+supplied.
 
 ## Wall measurements
 
@@ -233,7 +311,7 @@ Result on the live CUDA/HIP fleet (640x360 source, 1280x720 wall, 15 fps,
 
 ```text
 reference (all CUDA)  p50 61, p95 65, p99 65, max 65 ms (correctness only)
-distributed           p50 27, p95 28, p99 29, max 29 ms
+distributed           p50 29, p95 31, p99 31, max 31 ms
                       budget 66, frames over budget 0
 exactness             30/30 wall frames byte-identical
 stage descriptor      ab0715db…  partitionable rows/columns overlap 1

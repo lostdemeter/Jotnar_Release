@@ -9,7 +9,7 @@
 //! The first customer is the live camera wall. The second is DOOM, which will
 //! keep only its RV32IM source and display/HUD sink once the port is complete.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 
-use crate::doom_pipeline::percentile;
+use crate::doom_pipeline::{choose_columns, percentile};
 use crate::executor::{validate_binary_result, Executor, RemoteExecutor};
 use crate::fleet::{Fleet, LeaseGuard};
+use crate::hud::{render_wall, WallHudInfo, WallTileInfo, HUD_BOTTOM, HUD_TOP};
 
 pub const STREAM_SCHEMA: &str = "jotnar.stream/1";
 pub const STREAM_RECEIPT_SCHEMA: &str = "jotnar.stream.receipt/1";
@@ -128,6 +129,9 @@ pub struct StreamSinkSpec {
     pub listen: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Render the controller metadata as a wall HUD in the TCP viewer frame.
+    #[serde(default)]
+    pub hud: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -142,6 +146,45 @@ fn every_frame() -> String {
     "every-frame".to_string()
 }
 
+/// Controller-side split calibration policy for a `merge=columns` stream.
+///
+/// The controller probes both column sides on the first real source frame,
+/// chooses a split from the measured times, warms it, and (optionally) does one
+/// rebalance pass. The executor never sees this policy: it only runs the tiles
+/// the controller submits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CalibrationSpec {
+    /// Probe iterations per measurement point.
+    #[serde(default = "seven_u32")]
+    pub probe_iters: u32,
+    /// Smallest number of columns either side may receive.
+    #[serde(default = "thirty_two")]
+    pub min_cols: usize,
+    /// Largest number of columns either side may receive.
+    #[serde(default = "two_eighty_eight")]
+    pub max_cols: usize,
+    /// Measure the chosen split and adjust once if the normalized balance
+    /// differs by at least four columns.
+    #[serde(default = "default_true")]
+    pub rebalance: bool,
+}
+
+fn seven_u32() -> u32 {
+    7
+}
+
+fn thirty_two() -> usize {
+    32
+}
+
+fn two_eighty_eight() -> usize {
+    288
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamDescriptor {
     pub schema: String,
@@ -153,6 +196,9 @@ pub struct StreamDescriptor {
     /// Optional 1D column split for the DOOM shape. Requires merge="columns".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<ColumnSplit>,
+    /// Optional controller-side split calibration. Requires a column split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<CalibrationSpec>,
     pub sink: StreamSinkSpec,
     #[serde(default = "tile_grid")]
     pub merge: String,
@@ -265,6 +311,23 @@ impl StreamDescriptor {
                 ));
             }
         }
+        if let Some(calibration) = &self.calibration {
+            if self.split.is_none() || self.merge != "columns" {
+                return Err("calibration requires a column split with merge=columns".to_string());
+            }
+            if calibration.probe_iters == 0 {
+                return Err("calibration probe_iters must be > 0".to_string());
+            }
+            if calibration.min_cols == 0
+                || calibration.max_cols < calibration.min_cols
+                || calibration.max_cols >= self.source.width
+            {
+                return Err(format!(
+                    "calibration bounds {}..={} are invalid for source width {}",
+                    calibration.min_cols, calibration.max_cols, self.source.width
+                ));
+            }
+        }
         if self.stage.targets.is_empty() {
             return Err("stream stage needs at least one target".to_string());
         }
@@ -348,8 +411,82 @@ pub trait FrameSource {
     fn describe(&self) -> Json;
 }
 
+/// Per-frame controller metadata handed to a sink.
+///
+/// This is reporting, not planning: it says what the controller measured, where
+/// each tile ran, and why. A sink may render it (a HUD) or ignore it. The
+/// default [`FrameSink::write_meta`] falls back to [`FrameSink::write`], so
+/// frames-only and null sinks keep their byte-identical behavior.
+#[derive(Clone, Debug, Serialize)]
+pub struct FrameMeta {
+    pub index: u64,
+    pub work_ms: u64,
+    pub budget_ms: u64,
+    pub deadline_ok: bool,
+    pub mode: String,
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub p99_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split: Option<SplitMeta>,
+    pub failovers: u64,
+    pub recoveries: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovered_targets: Vec<String>,
+    pub note: String,
+    pub tiles: Vec<TileMeta>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SplitMeta {
+    pub left_cols: usize,
+    pub right_cols: usize,
+    pub left_share: f64,
+}
+
+impl SplitMeta {
+    fn from_split(split: &ColumnSplit) -> Self {
+        let total = (split.left_cols + split.right_cols).max(1);
+        Self {
+            left_cols: split.left_cols,
+            right_cols: split.right_cols,
+            left_share: split.left_cols as f64 / total as f64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TileMeta {
+    pub row: usize,
+    pub col: usize,
+    pub target: String,
+    pub addr: String,
+    pub planned_target: String,
+    pub cols: usize,
+    pub latency_ms: u64,
+    pub worker_ms: Option<u64>,
+    pub submit_call_ms: u64,
+    pub status_ms: u64,
+    pub result_ms: u64,
+    pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failover_from: Option<String>,
+    pub job_id: String,
+    pub ok: bool,
+}
+
 pub trait FrameSink {
     fn write(&mut self, frame: &Frame) -> Result<(), String>;
+
+    /// Write a frame together with its controller metadata. Sinks that do not
+    /// care about the metadata keep the default, which is exactly `write`.
+    fn write_meta(&mut self, frame: &Frame, meta: &FrameMeta) -> Result<(), String> {
+        let _ = meta;
+        self.write(frame)
+    }
+
     fn describe(&self) -> Json;
 }
 
@@ -549,10 +686,18 @@ pub struct TcpFrameSink {
     width: usize,
     height: usize,
     addr: String,
+    hud: bool,
+    fps: u32,
 }
 
 impl TcpFrameSink {
-    pub fn new(addr: &str, width: usize, height: usize) -> Result<Self, String> {
+    pub fn new(
+        addr: &str,
+        width: usize,
+        height: usize,
+        hud: bool,
+        fps: u32,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind(addr).map_err(|e| format!("bind viewer {addr}: {e}"))?;
         listener
             .set_nonblocking(true)
@@ -563,12 +708,12 @@ impl TcpFrameSink {
             width,
             height,
             addr: addr.to_string(),
+            hud,
+            fps,
         })
     }
-}
 
-impl FrameSink for TcpFrameSink {
-    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+    fn send(&mut self, header: &Json, body: &[u8]) -> Result<(), String> {
         if self.stream.is_none() {
             match self.listener.accept() {
                 Ok((stream, _)) => {
@@ -580,15 +725,7 @@ impl FrameSink for TcpFrameSink {
                 Err(e) => return Err(format!("accept viewer: {e}")),
             }
         }
-        let header = json!({
-            "v": 1,
-            "width": self.width,
-            "height": self.height,
-            "frame": frame.index,
-            "total_ms": 0,
-            "mode": "wall",
-        });
-        let header = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
+        let header = serde_json::to_vec(header).map_err(|e| e.to_string())?;
         let ok = self
             .stream
             .as_mut()
@@ -597,7 +734,7 @@ impl FrameSink for TcpFrameSink {
                     .write_all(&(header.len() as u32).to_be_bytes())
                     .is_ok()
                     && stream.write_all(&header).is_ok()
-                    && stream.write_all(&frame.data).is_ok()
+                    && stream.write_all(body).is_ok()
             })
             .unwrap_or(false);
         if !ok {
@@ -605,9 +742,66 @@ impl FrameSink for TcpFrameSink {
         }
         Ok(())
     }
+}
+
+impl FrameSink for TcpFrameSink {
+    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+        let header = json!({
+            "v": 1,
+            "width": self.width,
+            "height": self.height,
+            "frame": frame.index,
+            "total_ms": 0,
+            "mode": "wall",
+        });
+        self.send(&header, &frame.data)
+    }
+
+    fn write_meta(&mut self, frame: &Frame, meta: &FrameMeta) -> Result<(), String> {
+        if !self.hud {
+            return self.write(frame);
+        }
+        let info = WallHudInfo {
+            frame: meta.index,
+            fps: self.fps,
+            work_ms: meta.work_ms,
+            budget_ms: meta.budget_ms,
+            p50: meta.p50_ms,
+            p95: meta.p95_ms,
+            p99: meta.p99_ms,
+            tiles: meta
+                .tiles
+                .iter()
+                .map(|tile| WallTileInfo {
+                    row: tile.row,
+                    col: tile.col,
+                    target: tile.target.clone(),
+                    cols: tile.cols,
+                    ms: tile.worker_ms.filter(|ms| *ms > 0).unwrap_or(tile.latency_ms),
+                    attempts: tile.attempts,
+                    failover_from: tile.failover_from.clone(),
+                })
+                .collect(),
+            note: meta.note.clone(),
+        };
+        let body = render_wall(&frame.data, frame.width, frame.height, &info)?;
+        let header = json!({
+            "v": 1,
+            "width": frame.width,
+            "height": frame.height + HUD_TOP + HUD_BOTTOM,
+            "frame": frame.index,
+            "total_ms": meta.work_ms,
+            "mode": meta.mode,
+            "split": meta.split,
+            "failovers": meta.failovers,
+            "recoveries": meta.recoveries,
+            "note": meta.note,
+        });
+        self.send(&header, &body)
+    }
 
     fn describe(&self) -> Json {
-        json!({"kind": "tcp", "listen": self.addr, "width": self.width, "height": self.height})
+        json!({"kind": "tcp", "listen": self.addr, "width": self.width, "height": self.height, "hud": self.hud})
     }
 }
 
@@ -740,6 +934,16 @@ pub struct StreamRunConfig {
     pub fleet_dir: Option<PathBuf>,
     pub lease_ms: u64,
     pub timeout_ms: u64,
+    /// Per-request read/write deadline for submit/status/result. Keeps a
+    /// blackholed target from holding a frame for the 60 s client default.
+    pub request_timeout_ms: u64,
+    /// After a target fails over, skip it for this many measured frames before
+    /// probing it again. 0 disables quarantine.
+    pub quarantine_frames: u64,
+    /// Warm each tile shape on its fallback target before the measured loop.
+    /// This pays compilation once, so a blackholed target fails over without a
+    /// multi-second first-use compile.
+    pub warm_fallbacks: bool,
 }
 
 impl Default for StreamRunConfig {
@@ -752,6 +956,9 @@ impl Default for StreamRunConfig {
             fleet_dir: None,
             lease_ms: 3_000,
             timeout_ms: 10_000,
+            request_timeout_ms: 1_000,
+            quarantine_frames: 4,
+            warm_fallbacks: false,
         }
     }
 }
@@ -777,36 +984,43 @@ fn run_tile_with_failover(
     planned: Arc<RemoteExecutor>,
     planned_target: String,
     planned_addr: String,
-    fallbacks: Vec<GpuEndpoint>,
+    fallbacks: Vec<(GpuEndpoint, Arc<RemoteExecutor>)>,
     listing: String,
     tile: TileInput,
     timeout_ms: u64,
+    request_timeout_ms: u64,
+    skip_planned: bool,
 ) -> Result<(TileResult, u32, Option<String>, Vec<Json>), String> {
     let mut errors = Vec::new();
     let mut attempts = 0u32;
-    attempts += 1;
-    match run_tile(
-        planned,
-        planned_target.clone(),
-        planned_addr.clone(),
-        listing.clone(),
-        tile.clone(),
-        timeout_ms,
-    ) {
-        Ok(result) => return Ok((result, attempts, None, errors)),
-        Err(e) => errors.push(json!({
+    let request_timeout = Duration::from_millis(request_timeout_ms.max(1));
+    if skip_planned {
+        errors.push(json!({
             "target": planned_target,
             "addr": planned_addr,
-            "error": e,
-        })),
-    }
-    for fallback in fallbacks {
+            "error": "quarantined after an earlier failure",
+        }));
+    } else {
         attempts += 1;
-        let executor = Arc::new(RemoteExecutor::new(
-            fallback.capability.clone(),
-            fallback.addr.clone(),
-            fallback.token.clone(),
-        ));
+        match run_tile(
+            planned,
+            planned_target.clone(),
+            planned_addr.clone(),
+            listing.clone(),
+            tile.clone(),
+            timeout_ms,
+            request_timeout,
+        ) {
+            Ok(result) => return Ok((result, attempts, None, errors)),
+            Err(e) => errors.push(json!({
+                "target": planned_target,
+                "addr": planned_addr,
+                "error": e,
+            })),
+        }
+    }
+    for (fallback, executor) in fallbacks {
+        attempts += 1;
         match run_tile(
             executor,
             fallback.target.clone(),
@@ -814,14 +1028,10 @@ fn run_tile_with_failover(
             listing.clone(),
             tile.clone(),
             timeout_ms,
+            request_timeout,
         ) {
             Ok(result) => {
-                return Ok((
-                    result,
-                    attempts,
-                    Some(planned_target),
-                    errors,
-                ));
+                return Ok((result, attempts, Some(planned_target), errors));
             }
             Err(e) => errors.push(json!({
                 "target": fallback.target,
@@ -874,11 +1084,13 @@ fn run_tile(
     listing: String,
     tile: TileInput,
     timeout_ms: u64,
+    request_timeout: Duration,
 ) -> Result<TileResult, String> {
     let submit_ms = now_ms();
     let body = build_binary_body(&listing, &tile)?;
-    let mut header = json!({
+    let header = json!({
         "type": "submit",
+        "class": "interactive",
         "outputs": ["OUT"],
         "frames": 1,
         "output_format": "binary",
@@ -888,17 +1100,23 @@ fn run_tile(
     let submit_started = Instant::now();
     let mut submitted = None;
     for attempt in 0..2 {
-        match executor.submit(&header, &body) {
+        match executor.submit_with_timeout(&header, &body, request_timeout) {
             Ok(value) => {
                 submitted = Some(value);
                 break;
             }
             Err((code, msg))
-                if attempt == 0 && (code == "job-unavailable" || code == "job-invalid") =>
+                if attempt == 0
+                    && (code == "job-unavailable" || code == "job-invalid")
+                    && !msg.contains("timed out")
+                    && !msg.contains("os error 11")
+                    && !msg.contains("WouldBlock") =>
             {
                 // A persistent session can be reset between frames. Retrying a
                 // submit can duplicate a job whose ack was lost; the first
-                // result is ignored, so correctness is unchanged.
+                // result is ignored, so correctness is unchanged. A request
+                // timeout is already the bounded blackhole signal: fail over
+                // instead of paying the deadline twice.
                 continue;
             }
             Err((code, msg)) => {
@@ -917,7 +1135,7 @@ fn run_tile(
     let status_started = Instant::now();
     loop {
         let status = executor
-            .status(&job_id)
+            .status_with_timeout(&job_id, request_timeout)
             .map_err(|(code, msg)| format!("status {addr}: {code}: {msg}"))?;
         let state = status
             .get("job")
@@ -939,7 +1157,7 @@ fn run_tile(
     let status_ms = status_started.elapsed().as_millis() as u64;
     let result_started = Instant::now();
     let (header, body) = executor
-        .result(&job_id)
+        .result_with_timeout(&job_id, request_timeout)
         .map_err(|(code, msg)| format!("result {addr}: {code}: {msg}"))?;
     let result_ms = result_started.elapsed().as_millis() as u64;
     validate_binary_result(&header, &body)?;
@@ -982,6 +1200,352 @@ fn run_tile(
         bytes,
         data: body,
     })
+}
+
+/// Controller-side column split calibration.
+///
+/// The policy is deliberately outside the executor: it only measures the tiles
+/// the controller already knows how to submit. It runs on the first real source
+/// frame, before the measured loop, and never changes the frame sequence.
+struct SplitPolicy {
+    probe_iters: u32,
+    min_cols: usize,
+    max_cols: usize,
+    rebalance: bool,
+}
+
+struct CalibrationOutcome {
+    split: ColumnSplit,
+    report: Json,
+    ok: bool,
+}
+
+impl SplitPolicy {
+    fn new(spec: &CalibrationSpec) -> Self {
+        Self {
+            probe_iters: spec.probe_iters.max(1),
+            min_cols: spec.min_cols.max(1),
+            max_cols: spec.max_cols.max(1),
+            rebalance: spec.rebalance,
+        }
+    }
+
+    /// One probe iteration: run both column sides concurrently and return
+    /// `(left_elapsed_ms, right_elapsed_ms, left_worker_ms, right_worker_ms)`.
+    fn probe_once(
+        &self,
+        frame: &Frame,
+        split: &ColumnSplit,
+        planned_targets: &[usize],
+        pools: &[Vec<Arc<RemoteExecutor>>],
+        endpoints: &[GpuEndpoint],
+        listing: &str,
+        timeout_ms: u64,
+        request_timeout: Duration,
+    ) -> Result<(u64, u64, Option<u64>, Option<u64>), String> {
+        let tiles = column_tiles(frame, split)?;
+        if tiles.len() != 2 {
+            return Err("column calibration needs exactly two tiles".to_string());
+        }
+        let mut used = vec![0usize; endpoints.len()];
+        let mut sides = Vec::with_capacity(2);
+        for (i, tile) in tiles.into_iter().enumerate() {
+            let planned = *planned_targets
+                .get(i)
+                .ok_or_else(|| format!("calibration side {i} has no planned target"))?;
+            let slot = used[planned];
+            used[planned] += 1;
+            let executor = pools
+                .get(planned)
+                .and_then(|pool| pool.get(slot))
+                .cloned()
+                .ok_or_else(|| format!("calibration has no executor slot {slot} for target {planned}"))?;
+            let endpoint = endpoints
+                .get(planned)
+                .ok_or_else(|| format!("calibration target {planned} has no endpoint"))?;
+            sides.push((
+                executor,
+                endpoint.target.clone(),
+                endpoint.addr.clone(),
+                tile,
+            ));
+        }
+        let run = |(executor, target, addr, tile): (
+            Arc<RemoteExecutor>,
+            String,
+            String,
+            TileInput,
+        )| {
+            let started = Instant::now();
+            run_tile(
+                executor,
+                target,
+                addr,
+                listing.to_string(),
+                tile,
+                timeout_ms,
+                request_timeout,
+            )
+            .map(|result| (started.elapsed().as_millis() as u64, result.worker_ms))
+        };
+        let left_side = sides.remove(0);
+        let right_side = sides.pop().expect("two sides");
+        let (left, right) = thread::scope(|scope| {
+            let left = scope.spawn(|| run(left_side));
+            let right = scope.spawn(|| run(right_side));
+            (left.join(), right.join())
+        });
+        let left = left.map_err(|_| "calibration left probe panicked".to_string())??;
+        let right = right.map_err(|_| "calibration right probe panicked".to_string())??;
+        Ok((left.0, right.0, left.1, right.1))
+    }
+
+    fn probe_n(
+        &self,
+        frame: &Frame,
+        split: &ColumnSplit,
+        planned_targets: &[usize],
+        pools: &[Vec<Arc<RemoteExecutor>>],
+        endpoints: &[GpuEndpoint],
+        listing: &str,
+        timeout_ms: u64,
+        request_timeout: Duration,
+    ) -> Result<(Vec<u64>, Vec<u64>), String> {
+        let mut left = Vec::with_capacity(self.probe_iters as usize);
+        let mut right = Vec::with_capacity(self.probe_iters as usize);
+        for _ in 0..self.probe_iters {
+            let (l, r, _, _) = self.probe_once(
+                frame,
+                split,
+                planned_targets,
+                pools,
+                endpoints,
+                listing,
+                timeout_ms,
+                request_timeout,
+            )?;
+            left.push(l);
+            right.push(r);
+        }
+        Ok((left, right))
+    }
+
+    fn warm_once(
+        &self,
+        frame: &Frame,
+        split: &ColumnSplit,
+        planned_targets: &[usize],
+        pools: &[Vec<Arc<RemoteExecutor>>],
+        endpoints: &[GpuEndpoint],
+        listing: &str,
+        timeout_ms: u64,
+        request_timeout: Duration,
+    ) -> Result<Json, String> {
+        let (l, r, lw, rw) = self.probe_once(
+            frame,
+            split,
+            planned_targets,
+            pools,
+            endpoints,
+            listing,
+            timeout_ms,
+            request_timeout,
+        )?;
+        Ok(json!({
+            "left_ms": l,
+            "right_ms": r,
+            "left_worker_ms": lw,
+            "right_worker_ms": rw,
+        }))
+    }
+
+    /// Calibrate on `frame`. A probe failure aborts calibration and keeps the
+    /// declared split; per-frame failover still runs.
+    fn calibrate(
+        &self,
+        frame: &Frame,
+        declared: &ColumnSplit,
+        planned_targets: &[usize],
+        pools: &[Vec<Arc<RemoteExecutor>>],
+        endpoints: &[GpuEndpoint],
+        listing: &str,
+        timeout_ms: u64,
+        request_timeout_ms: u64,
+    ) -> CalibrationOutcome {
+        let request_timeout = Duration::from_millis(request_timeout_ms.max(1));
+        let width = frame.width;
+        let overlap = declared.overlap;
+        let even = ColumnSplit {
+            left_cols: width / 2,
+            right_cols: width - width / 2,
+            overlap,
+        };
+        let targets: Vec<String> = planned_targets
+            .iter()
+            .filter_map(|idx| endpoints.get(*idx).map(|e| e.target.clone()))
+            .collect();
+        let mut report = json!({
+            "ok": false,
+            "policy": {
+                "probe_iters": self.probe_iters,
+                "min_cols": self.min_cols,
+                "max_cols": self.max_cols,
+                "rebalance": self.rebalance,
+            },
+            "declared": SplitMeta::from_split(declared),
+            "source_width": width,
+            "targets": targets,
+        });
+        let abort = |report: &mut Json, stage: &str, error: String| CalibrationOutcome {
+            split: declared.clone(),
+            report: {
+                report["stage"] = json!(stage);
+                report["error"] = json!(error);
+                report["ok"] = json!(false);
+                report.clone()
+            },
+            ok: false,
+        };
+
+        if let Err(e) = self.warm_once(
+            frame,
+            &even,
+            planned_targets,
+            pools,
+            endpoints,
+            listing,
+            timeout_ms,
+            request_timeout,
+        ) {
+            return abort(&mut report, "warm-even", e);
+        }
+
+        let (left_samples, right_samples) = match self.probe_n(
+            frame,
+            &even,
+            planned_targets,
+            pools,
+            endpoints,
+            listing,
+            timeout_ms,
+            request_timeout,
+        ) {
+            Ok(samples) => samples,
+            Err(e) => return abort(&mut report, "probe", e),
+        };
+        let left_p50 = percentile(&left_samples, 50);
+        let right_p50 = percentile(&right_samples, 50);
+        let (left_cols, right_cols) = choose_columns(
+            width,
+            left_p50,
+            right_p50,
+            self.min_cols,
+            self.max_cols,
+        );
+        let mut split = ColumnSplit {
+            left_cols,
+            right_cols,
+            overlap,
+        };
+        report["probe"] = json!({
+            "split": SplitMeta::from_split(&even),
+            "samples": {"left": left_samples, "right": right_samples},
+            "p50_ms": {"left": left_p50, "right": right_p50},
+        });
+
+        let split_warmup = match self.warm_once(
+            frame,
+            &split,
+            planned_targets,
+            pools,
+            endpoints,
+            listing,
+            timeout_ms,
+            request_timeout,
+        ) {
+            Ok(warm) => warm,
+            Err(e) => return abort(&mut report, "warm-chosen", e),
+        };
+        report["split_warmup"] = split_warmup;
+
+        let mut rebalance = Json::Null;
+        if self.rebalance {
+            match self.probe_n(
+                frame,
+                &split,
+                planned_targets,
+                pools,
+                endpoints,
+                listing,
+                timeout_ms,
+                request_timeout,
+            ) {
+                Ok((left_samples, right_samples)) => {
+                    let left_p50 = percentile(&left_samples, 50);
+                    let right_p50 = percentile(&right_samples, 50);
+                    let half = (width / 2) as u64;
+                    let left_norm = left_p50 * half / split.left_cols.max(1) as u64;
+                    let right_norm = right_p50 * half / split.right_cols.max(1) as u64;
+                    let (next_left, next_right) = choose_columns(
+                        width,
+                        left_norm,
+                        right_norm,
+                        self.min_cols,
+                        self.max_cols,
+                    );
+                    let before = SplitMeta::from_split(&split);
+                    let mut changed = next_left.abs_diff(split.left_cols) >= 4;
+                    let mut warmup = Json::Null;
+                    if changed {
+                        let next = ColumnSplit {
+                            left_cols: next_left,
+                            right_cols: next_right,
+                            overlap,
+                        };
+                        match self.warm_once(
+                            frame,
+                            &next,
+                            planned_targets,
+                            pools,
+                            endpoints,
+                            listing,
+                            timeout_ms,
+                            request_timeout,
+                        ) {
+                            Ok(warm) => {
+                                warmup = warm;
+                                split = next;
+                            }
+                            Err(e) => {
+                                changed = false;
+                                warmup = json!({"error": e});
+                            }
+                        }
+                    }
+                    rebalance = json!({
+                        "before": before,
+                        "after": SplitMeta::from_split(&split),
+                        "samples": {"left": left_samples, "right": right_samples},
+                        "p50_ms": {"left": left_p50, "right": right_p50},
+                        "normalized_ms": {"left": left_norm, "right": right_norm},
+                        "changed": changed,
+                        "warmup": warmup,
+                    });
+                }
+                Err(e) => {
+                    rebalance = json!({"error": e});
+                }
+            }
+        }
+        report["rebalance"] = rebalance;
+        report["chosen"] = json!(SplitMeta::from_split(&split));
+        report["ok"] = json!(true);
+        CalibrationOutcome {
+            split,
+            report: report.clone(),
+            ok: true,
+        }
+    }
 }
 
 fn composite(
@@ -1220,6 +1784,8 @@ fn default_adapters(
                 .ok_or("tcp sink needs listen")?,
             wall_w,
             wall_h,
+            descriptor.sink.hud,
+            descriptor.clock.fps,
         )?),
         "null" => Box::new(NullSink),
         other => return Err(format!("unknown sink kind {other:?}")),
@@ -1289,6 +1855,18 @@ pub fn run_stream_with(
                 .collect(),
         );
     }
+    // One persistent session per endpoint for fallback attempts. Reusing it
+    // keeps the first failover from paying a new handshake every frame.
+    let fallback_pools: Vec<Arc<RemoteExecutor>> = endpoints
+        .iter()
+        .map(|endpoint| {
+            Arc::new(RemoteExecutor::new(
+                endpoint.capability.clone(),
+                endpoint.addr.clone(),
+                endpoint.token.clone(),
+            ))
+        })
+        .collect();
     let listing = fs::read_to_string(&descriptor.stage.listing)
         .map_err(|e| format!("read listing {}: {e}", descriptor.stage.listing.display()))?;
     let listing_sha256 = sha256_hex(listing.as_bytes());
@@ -1344,12 +1922,35 @@ pub fn run_stream_with(
     let mut matches = 0u64;
     let mut mismatches = 0u64;
     let mut failover_count = 0u64;
+    let mut recovery_count = 0u64;
     let mut source_index = 0u64;
     let mut measured = 0u64;
     let started = Instant::now();
     let mut paused = Duration::ZERO;
+    let split_policy = descriptor.calibration.as_ref().map(SplitPolicy::new);
+    let mut active_split = descriptor.split.clone();
+    let mut calibration_pending = split_policy.is_some();
+    let mut calibration = Json::Null;
+    let mut prev_failed: BTreeSet<String> = BTreeSet::new();
+    let mut down_until: BTreeMap<String, u64> = BTreeMap::new();
+    let mut warm_fallbacks_pending =
+        cfg.warm_fallbacks && descriptor.split.is_some() && endpoints.len() > 1;
+    let tile_cols = |split: &Option<ColumnSplit>, col: usize| -> usize {
+        match split {
+            Some(split) if col == 0 => split.left_cols,
+            Some(split) => split.right_cols,
+            None => descriptor.source.width / descriptor.tiles.cols,
+        }
+    };
+    let result_index = |split: &Option<ColumnSplit>, row: usize, col: usize| -> usize {
+        if split.is_some() {
+            col
+        } else {
+            row * descriptor.tiles.cols + col
+        }
+    };
     loop {
-        let frame_start = Instant::now();
+        let mut frame_start = Instant::now();
         for lease in &mut leases {
             lease.renew(cfg.lease_ms)?;
         }
@@ -1357,7 +1958,83 @@ pub fn run_stream_with(
             break;
         };
         source_index += 1;
-        let tiles = if let Some(split) = &descriptor.split {
+        if calibration_pending {
+            if let Some(policy) = split_policy.as_ref() {
+                if let Some(declared) = active_split.clone() {
+                    let outcome = policy.calibrate(
+                        &frame,
+                        &declared,
+                        &planned_targets,
+                        &pools,
+                        endpoints,
+                        &listing,
+                        cfg.timeout_ms,
+                        cfg.request_timeout_ms,
+                    );
+                    calibration = outcome.report;
+                    if outcome.ok {
+                        // The calibrated split is still a partition claim; a
+                        // policy must not pick a shape the compiler rejected.
+                        let mut candidate = descriptor.clone();
+                        candidate.split = Some(outcome.split.clone());
+                        let partitionable = claim
+                            .get("partitionable")
+                            .cloned()
+                            .unwrap_or(Json::Null);
+                        match validate_partition_claim(&partitionable, &candidate) {
+                            Ok(()) => active_split = Some(outcome.split),
+                            Err(e) => {
+                                calibration["ok"] = json!(false);
+                                calibration["stage"] = json!("claim");
+                                calibration["error"] = json!(e);
+                            }
+                        }
+                    }
+                }
+            }
+            calibration_pending = false;
+            // Calibration is setup, not part of this frame's pipeline work.
+            frame_start = Instant::now();
+            for lease in &mut leases {
+                lease.renew(cfg.lease_ms)?;
+            }
+        }
+        if warm_fallbacks_pending {
+            let warm_tiles = if let Some(split) = &active_split {
+                column_tiles(&frame, split)?
+            } else {
+                tile_frame(&frame, &descriptor.tiles)?
+            };
+            let request_timeout =
+                Duration::from_millis(cfg.request_timeout_ms.max(1));
+            for (i, tile) in warm_tiles.into_iter().enumerate() {
+                let planned = *planned_targets
+                    .get(i)
+                    .ok_or_else(|| format!("tile {i} has no planned target"))?;
+                for (idx, endpoint) in endpoints.iter().enumerate() {
+                    if idx == planned {
+                        continue;
+                    }
+                    let executor = fallback_pools[idx].clone();
+                    // A cold fallback compiles here, before the measured loop.
+                    let _ = run_tile(
+                        executor,
+                        endpoint.target.clone(),
+                        endpoint.addr.clone(),
+                        listing.clone(),
+                        tile.clone(),
+                        cfg.timeout_ms,
+                        request_timeout,
+                    );
+                }
+            }
+            warm_fallbacks_pending = false;
+            frame_start = Instant::now();
+            for lease in &mut leases {
+                lease.renew(cfg.lease_ms)?;
+            }
+        }
+        let tiles = if let Some(split) = &active_split {
             column_tiles(&frame, split)?
         } else {
             tile_frame(&frame, &descriptor.tiles)?
@@ -1380,16 +2057,31 @@ pub fn run_stream_with(
                 .ok_or_else(|| format!("no executor slot {slot} for target {planned}"))?;
             let target = endpoints[planned].target.clone();
             let addr = endpoints[planned].addr.clone();
-            let fallbacks: Vec<GpuEndpoint> = endpoints
+            let skip_planned = cfg.quarantine_frames > 0
+                && down_until
+                    .get(&target)
+                    .is_some_and(|until| measured < *until);
+            let fallbacks: Vec<(GpuEndpoint, Arc<RemoteExecutor>)> = endpoints
                 .iter()
                 .enumerate()
                 .filter(|(idx, _)| *idx != planned)
-                .map(|(_, endpoint)| endpoint.clone())
+                .map(|(idx, endpoint)| (endpoint.clone(), fallback_pools[idx].clone()))
                 .collect();
             let listing = listing.clone();
             let timeout = cfg.timeout_ms;
+            let request_timeout = cfg.request_timeout_ms;
             handles.push(thread::spawn(move || {
-                run_tile_with_failover(executor, target, addr, fallbacks, listing, tile, timeout)
+                run_tile_with_failover(
+                    executor,
+                    target,
+                    addr,
+                    fallbacks,
+                    listing,
+                    tile,
+                    timeout,
+                    request_timeout,
+                    skip_planned,
+                )
             }));
         }
         for handle in handles {
@@ -1403,7 +2095,7 @@ pub fn run_stream_with(
             }
         }
         results.sort_by_key(|r| (r.row, r.col));
-        let composited = if let Some(split) = &descriptor.split {
+        let composited = if let Some(split) = &active_split {
             stitch_columns(split, &results)?
         } else {
             composite(
@@ -1416,9 +2108,123 @@ pub fn run_stream_with(
         if source_index <= cfg.warmup_frames {
             continue;
         }
-        failover_count += tile_meta.values().filter(|m| m.0 > 1).count() as u64;
+        // A planned target that failed over this frame; a target that failed
+        // last frame but not now has rejoined.
+        let failed: BTreeSet<String> = tile_meta
+            .values()
+            .filter_map(|meta| meta.1.clone())
+            .collect();
+        let recovered: Vec<String> = prev_failed.difference(&failed).cloned().collect();
+        prev_failed = failed.clone();
+        if cfg.quarantine_frames > 0 {
+            // Only a real failed attempt extends the quarantine. A skipped
+            // frame also carries `failover_from`, so keying off that alone
+            // would keep the target quarantined forever.
+            for (attempts, failover_from, _) in tile_meta.values() {
+                if *attempts > 1 {
+                    if let Some(target) = failover_from {
+                        down_until.insert(target.clone(), measured + cfg.quarantine_frames);
+                    }
+                }
+            }
+            for target in &recovered {
+                down_until.remove(target);
+            }
+        }
+        let frame_failovers = tile_meta
+            .values()
+            .filter(|m| m.1.is_some())
+            .count() as u64;
+        failover_count += frame_failovers;
+        recovery_count += recovered.len() as u64;
+
+        let work = frame_start.elapsed().as_millis() as u64;
+        work_ms.push(work);
+        let p50_ms = percentile(&work_ms, 50);
+        let p95_ms = percentile(&work_ms, 95);
+        let p99_ms = percentile(&work_ms, 99);
+        let split_meta = active_split.as_ref().map(SplitMeta::from_split);
+        let failed_targets: Vec<String> = failed.iter().cloned().collect();
+        let mut note_parts = Vec::new();
+        if !recovered.is_empty() {
+            note_parts.push(format!("recovered {}", recovered.join("+")));
+        }
+        if !failed_targets.is_empty() {
+            note_parts.push(format!("failover {}", failed_targets.join("+")));
+        }
+        if note_parts.is_empty() {
+            note_parts.push("all targets healthy".to_string());
+        }
+        let note = note_parts.join("; ");
+
+        let tile_metas: Vec<TileMeta> = results
+            .iter()
+            .map(|r| {
+                let (attempts, failover_from, _) = tile_meta
+                    .get(&(r.row, r.col))
+                    .cloned()
+                    .unwrap_or((1, None, Vec::new()));
+                let idx = result_index(&active_split, r.row, r.col);
+                let planned_target = planned_targets
+                    .get(idx)
+                    .and_then(|target| endpoints.get(*target))
+                    .map(|endpoint| endpoint.target.clone())
+                    .unwrap_or_default();
+                TileMeta {
+                    row: r.row,
+                    col: r.col,
+                    target: r.target.clone(),
+                    addr: r.addr.clone(),
+                    planned_target,
+                    cols: tile_cols(&active_split, r.col),
+                    latency_ms: r.done_ms.saturating_sub(r.submit_ms),
+                    worker_ms: r.worker_ms,
+                    submit_call_ms: r.submit_call_ms,
+                    status_ms: r.status_ms,
+                    result_ms: r.result_ms,
+                    attempts,
+                    failover_from,
+                    job_id: r.job_id.clone(),
+                    ok: true,
+                }
+            })
+            .collect();
+        let mut placement: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        for tile in &tile_metas {
+            let entry = placement
+                .entry(tile.planned_target.clone())
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += tile.cols;
+        }
+        let placement: Vec<Json> = placement
+            .into_iter()
+            .map(|(target, (tiles, cols))| json!({"target": target, "tiles": tiles, "cols": cols}))
+            .collect();
+
+        let meta = FrameMeta {
+            index: measured,
+            work_ms: work,
+            budget_ms: frame_budget,
+            deadline_ok: work <= frame_budget,
+            mode: if active_split.is_some() {
+                "columns".to_string()
+            } else {
+                "tile-grid".to_string()
+            },
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            split: split_meta.clone(),
+            failovers: failover_count,
+            recoveries: recovery_count,
+            failed_targets: failed_targets.clone(),
+            recovered_targets: recovered.clone(),
+            note: note.clone(),
+            tiles: tile_metas.clone(),
+        };
         let wall = Frame::rgb(measured, wall_w, wall_h, composited)?;
-        sink.write(&wall)?;
+        sink.write_meta(&wall, &meta)?;
 
         let expected_path = cfg
             .reference_dir
@@ -1441,8 +2247,6 @@ pub fn run_stream_with(
             });
         }
 
-        let work = frame_start.elapsed().as_millis() as u64;
-        work_ms.push(work);
         let line = json!({
             "index": measured,
             "ts_ms": frame.ts_ms,
@@ -1450,6 +2254,17 @@ pub fn run_stream_with(
             "work_ms": work,
             "deadline_ms": frame_budget,
             "deadline_ok": work <= frame_budget,
+            "mode": meta.mode,
+            "split": split_meta,
+            "placement": placement,
+            "p50_ms": p50_ms,
+            "p95_ms": p95_ms,
+            "p99_ms": p99_ms,
+            "failovers": failover_count,
+            "recoveries": recovery_count,
+            "failed_targets": failed_targets,
+            "recovered_targets": recovered,
+            "note": note,
             "wall_sha256": wall.sha256(),
             "wall_bytes": wall.data.len(),
             "verdict": verdict,
@@ -1467,6 +2282,7 @@ pub fn run_stream_with(
                 "done_ms": r.done_ms,
                 "sha256": r.sha256,
                 "bytes": r.bytes,
+                "cols": tile_cols(&active_split, r.col),
                 "attempts": tile_meta.get(&(r.row, r.col)).map(|m| m.0).unwrap_or(1),
                 "failover_from": tile_meta.get(&(r.row, r.col)).and_then(|m| m.1.clone()),
                 "errors": tile_meta.get(&(r.row, r.col)).map(|m| m.2.clone()).unwrap_or_default(),
@@ -1501,6 +2317,14 @@ pub fn run_stream_with(
         "sink": sink.describe(),
         "clock": descriptor.clock,
         "tiles": descriptor.tiles,
+        "mode": if active_split.is_some() {
+            "columns"
+        } else {
+            "tile-grid"
+        },
+        "split": active_split.as_ref().map(SplitMeta::from_split),
+        "calibration": calibration,
+        "placement": descriptor.placement,
         "determinism": descriptor.determinism,
         "stage_descriptor": claim,
         "controller": {
@@ -1519,6 +2343,7 @@ pub fn run_stream_with(
             "over_budget": over_budget,
         },
         "failovers": failover_count,
+        "recoveries": recovery_count,
         "exactness": match cfg.reference_dir {
             Some(_) => json!({"matches": matches, "mismatches": mismatches}),
             None => Json::Null,
@@ -1599,9 +2424,47 @@ mod tests {
         assert!(out.iter().all(|v| *v == 7));
     }
 
+    fn meta() -> FrameMeta {
+        FrameMeta {
+            index: 0,
+            work_ms: 1,
+            budget_ms: 66,
+            deadline_ok: true,
+            mode: "columns".to_string(),
+            p50_ms: 1,
+            p95_ms: 1,
+            p99_ms: 1,
+            split: None,
+            failovers: 0,
+            recoveries: 0,
+            failed_targets: Vec::new(),
+            recovered_targets: Vec::new(),
+            note: "ok".to_string(),
+            tiles: Vec::new(),
+        }
+    }
+
     #[test]
-    fn descriptor_rejects_bad_geometry() {
-        let descriptor = StreamDescriptor {
+    fn default_write_meta_delegates_to_write() {
+        struct Recorder {
+            writes: u32,
+        }
+        impl FrameSink for Recorder {
+            fn write(&mut self, _frame: &Frame) -> Result<(), String> {
+                self.writes += 1;
+                Ok(())
+            }
+            fn describe(&self) -> Json {
+                json!({"kind": "recorder"})
+            }
+        }
+        let mut sink = Recorder { writes: 0 };
+        sink.write_meta(&frame(), &meta()).unwrap();
+        assert_eq!(sink.writes, 1);
+    }
+
+    fn descriptor() -> StreamDescriptor {
+        StreamDescriptor {
             schema: STREAM_SCHEMA.to_string(),
             name: "test".to_string(),
             clock: StreamClock {
@@ -1627,24 +2490,69 @@ mod tests {
                 targets: vec!["cuda".to_string()],
             },
             tiles: TileSpec {
-                rows: 7,
+                rows: 2,
                 cols: 2,
                 halo: 1,
                 bezel: 0,
             },
             split: None,
+            calibration: None,
             sink: StreamSinkSpec {
                 kind: "null".to_string(),
                 dir: None,
                 listen: None,
                 title: None,
+                hud: false,
             },
             merge: "tile-grid".to_string(),
             placement: BTreeMap::new(),
             backpressure: "drop-oldest".to_string(),
             determinism: "exact".to_string(),
             receipt: None,
-        };
+        }
+    }
+
+    #[test]
+    fn descriptor_rejects_bad_geometry() {
+        let mut descriptor = descriptor();
+        descriptor.tiles.rows = 7;
+        assert!(descriptor.validate().is_err());
+    }
+
+    #[test]
+    fn calibration_requires_a_column_split_and_sane_bounds() {
+        let mut descriptor = descriptor();
+        descriptor.calibration = Some(CalibrationSpec {
+            probe_iters: 7,
+            min_cols: 32,
+            max_cols: 288,
+            rebalance: true,
+        });
+        // No split: calibration has nothing to balance.
+        assert!(descriptor.validate().is_err());
+
+        descriptor.merge = "columns".to_string();
+        descriptor.split = Some(ColumnSplit {
+            left_cols: 320,
+            right_cols: 320,
+            overlap: 1,
+        });
+        assert!(descriptor.validate().is_ok());
+
+        // Bounds must stay inside the source width.
+        descriptor.calibration = Some(CalibrationSpec {
+            probe_iters: 7,
+            min_cols: 32,
+            max_cols: 640,
+            rebalance: true,
+        });
+        assert!(descriptor.validate().is_err());
+        descriptor.calibration = Some(CalibrationSpec {
+            probe_iters: 0,
+            min_cols: 32,
+            max_cols: 288,
+            rebalance: true,
+        });
         assert!(descriptor.validate().is_err());
     }
 }

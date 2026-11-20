@@ -8,6 +8,7 @@
 //! This module intentionally contains no placement, model, or workload logic.
 
 use serde_json::Value as Json;
+use std::time::Duration;
 
 use crate::job::JobClient;
 
@@ -54,6 +55,38 @@ impl RemoteExecutor {
 
     pub fn endpoint(&self) -> &str {
         &self.client.endpoint
+    }
+
+    /// Submit with a bounded response deadline (interactive streaming).
+    pub fn submit_with_timeout(
+        &self,
+        spec: &Json,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Json, (String, String)> {
+        self.client
+            .submit_frame_with_timeout(spec, payload, timeout)
+            .map(|(header, _)| header)
+    }
+
+    pub fn status_with_timeout(
+        &self,
+        job_id: &str,
+        timeout: Duration,
+    ) -> Result<Json, (String, String)> {
+        self.client.status_with_timeout(job_id, timeout)
+    }
+
+    pub fn result_with_timeout(
+        &self,
+        job_id: &str,
+        timeout: Duration,
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
+        self.client.result_with_timeout(job_id, timeout)
+    }
+
+    pub fn ping_with_timeout(&self, timeout: Duration) -> Result<Json, (String, String)> {
+        self.client.ping_with_timeout(timeout)
     }
 }
 

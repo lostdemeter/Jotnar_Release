@@ -39,6 +39,30 @@ hand a checkpoint from one to the other:
 It is a streaming coordinator above the same executor contract, not a new
 model or stage format.
 
+## Product path (D1a)
+
+The demo path is now the generic controller, not the legacy coordinator:
+
+```sh
+./target/release/jotnar-doom-stream \
+  --image "$HOME/Documents/OpenCode/jotnar-main/programs/doom/build/doom.bin" \
+  --wad "$HOME/Documents/OpenCode/jotnar-assets/doom1.wad" \
+  --listing demos/doom-two-nodes/upscale-half.asm \
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test \
+  --sink tcp --viewer
+```
+
+`jotnar-doom-stream` owns the live RV32IM source and the viewer/HUD sink; the
+generic `jotnar.stream/1` controller owns the clock, adaptive column split, GPU
+placement, stitch, failover, leases, frame metadata, and receipt. Calibration is
+on by default (`--no-calibrate` pins `--left-cols`); every run writes the probe,
+chosen split, rebalance, and warm-up to `summary.json`.
+
+`jotnar-doom-coord` remains the comparison/reference tool: the live gate uses
+its EVEN split run to produce byte-identical expected frames, and
+`doom_failover_gate.py` still exercises its coordinator-level recovery. It is no
+longer the demo path.
+
 ## Listing
 
 [`demos/doom-two-nodes/upscale-half.asm`](../demos/doom-two-nodes/upscale-half.asm):
@@ -54,7 +78,10 @@ resident. The per-frame cost is the Jotnar op plus copies, not process
 startup. The runner reports the F32 output descriptor and binary body; the
 coordinator validates it before use.
 
-## Commands
+## Commands (reference / comparison)
+
+The coordinator command below produces the deterministic reference used by the
+gates. The product run is `jotnar-doom-stream` in the section above.
 
 ```sh
 cargo build --release -p jotnar-node-tools --bin jotnar-doom-coord
@@ -113,10 +140,11 @@ B 192.168.1.116:9997   C 192.168.1.195:9997
 P50 45MS  P95 47MS  |  ALL NODES HEALTHY
 ```
 
-The HUD is drawn by the coordinator into the viewer frame, so the live display
-shows which node is running which part, the current split, per-node latency,
-the frame budget, rolling p50/p95, and failover/recovery state. The raw frames
-written for the GIF stay clean.
+The HUD is drawn by the active sink into the viewer frame (the coordinator in
+this reference run, `jotnar-doom-stream` in the product path), so the live
+display shows which node is running which part, the current split, per-node
+latency, the frame budget, rolling p50/p95, and failover/recovery state. The raw
+frames written for the GIF stay clean.
 
 The viewer forwards key events to the coordinator over TCP. Arrows move, ctrl
 fires, space uses, shift runs, esc opens the menu, and q quits.
