@@ -97,6 +97,25 @@ U8 tile output is ~0.7 MB; the four-tile wall is ~2.8 MB/frame at 15 fps. The
 JSON path would expand the input by roughly 10x and does not fit the wall's
 frame budget. See [`EXECUTOR_CONTRACT.md`](EXECUTOR_CONTRACT.md).
 
+## Persistent transport
+
+`JobClient` keeps one TCP session and the GPU runner's `handle` serves requests
+in a loop until EOF. The stream controller creates one executor per tile slot
+and reuses it across frames; submit, status polling, and result fetch share the
+same connection. A status/result call retries once if a session was reset; a
+submit retries once on `job-unavailable`/`job-invalid` (a duplicate job whose
+ack was lost is possible, but the first result is ignored, so correctness is
+unchanged).
+
+This removed the ~210 ms new-connection submit stalls. The remaining wake
+latency is on the runner host: with the CPU `powersave` governor and deep idle
+states, a persistent connection thread can take ~30 ms to wake for a status
+poll even though the GPU job is 1-12 ms. The CUDA host needs the CPU performance
+governor/C-state setting in `artifacts/jotnar-wall/CUDA_CPU_COMMANDS.md` in the
+handoff package for the strict SLO. With it applied (or a temporary keepalive),
+the live DOOM 100-frame gate passes at p99 58 / max 68; the wall improves to
+p99 33.
+
 ## Failover
 
 Each tile is attempted on its planned target and then on the other targets in
@@ -174,21 +193,18 @@ The live `work_ms` includes the core and the GPU path. 72/248 split, 15 fps,
 100 measured frames after 3 warm-up frames:
 
 ```text
-live         p50 44, p95 48, p99 244, max 247 ms
-             budget 66, 2/100 frames over budget
+live         p50 49, p95 55, p99 58, max 68 ms
+             budget 66, 1/100 frames over budget
 matches      100/100 byte-identical to the coordinator (EVEN reference)
 failover     HIP dead; right tile retried on CUDA; 2/2 exact
-             p99 62 ms (survivor carries both halves)
+             p99 72 ms (survivor carries both halves)
 stage claim  79905e7d… rows/columns overlap 1
 ```
 
-A 20-frame smoke run passes (p50 50, p99 65, 20/20 exact), but it does not
-exercise the rare tail. The 100-frame run exposes two **transport stalls**:
-`submit_call_ms` is ~210 ms while the runner's job elapsed is 8–12 ms. The GPU
-is not the cause; the request/ack path to the CUDA runner stalled. This is
-the next transport debt (persistent connections / accept scheduling), not a
-stream-planning error. The p95 and exactness are clean; the strict p99/max SLO
-does not pass until the transport tail is fixed.
+This is with the persistent transport and the CPU performance setting. Without
+the CPU setting, persistent status polls can wake ~30 ms late and the strict
+tail fails; the GPU job remains 1–12 ms. The 20-frame smoke is not enough to
+expose that.
 
 The SLO gate uses the frames sink. The TCP viewer sink can add a further tail
 when the SDL reader falls behind (a 30-frame viewer run showed two ~250 ms

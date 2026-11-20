@@ -15,6 +15,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -765,6 +766,7 @@ struct TileResult {
     submit_call_ms: u64,
     status_ms: u64,
     result_ms: u64,
+    worker_ms: Option<u64>,
     done_ms: u64,
     sha256: String,
     bytes: usize,
@@ -772,39 +774,58 @@ struct TileResult {
 }
 
 fn run_tile_with_failover(
-    endpoints: Vec<GpuEndpoint>,
-    planned: usize,
+    planned: Arc<RemoteExecutor>,
+    planned_target: String,
+    planned_addr: String,
+    fallbacks: Vec<GpuEndpoint>,
     listing: String,
     tile: TileInput,
     timeout_ms: u64,
 ) -> Result<(TileResult, u32, Option<String>, Vec<Json>), String> {
-    let mut order = vec![planned];
-    for i in 0..endpoints.len() {
-        if i != planned {
-            order.push(i);
-        }
-    }
     let mut errors = Vec::new();
     let mut attempts = 0u32;
-    for idx in order {
+    attempts += 1;
+    match run_tile(
+        planned,
+        planned_target.clone(),
+        planned_addr.clone(),
+        listing.clone(),
+        tile.clone(),
+        timeout_ms,
+    ) {
+        Ok(result) => return Ok((result, attempts, None, errors)),
+        Err(e) => errors.push(json!({
+            "target": planned_target,
+            "addr": planned_addr,
+            "error": e,
+        })),
+    }
+    for fallback in fallbacks {
         attempts += 1;
+        let executor = Arc::new(RemoteExecutor::new(
+            fallback.capability.clone(),
+            fallback.addr.clone(),
+            fallback.token.clone(),
+        ));
         match run_tile(
-            endpoints[idx].clone(),
+            executor,
+            fallback.target.clone(),
+            fallback.addr.clone(),
             listing.clone(),
             tile.clone(),
             timeout_ms,
         ) {
             Ok(result) => {
-                let failover_from = if idx != planned {
-                    Some(endpoints[planned].target.clone())
-                } else {
-                    None
-                };
-                return Ok((result, attempts, failover_from, errors));
+                return Ok((
+                    result,
+                    attempts,
+                    Some(planned_target),
+                    errors,
+                ));
             }
             Err(e) => errors.push(json!({
-                "target": endpoints[idx].target,
-                "addr": endpoints[idx].addr,
+                "target": fallback.target,
+                "addr": fallback.addr,
                 "error": e,
             })),
         }
@@ -847,17 +868,14 @@ fn build_binary_body(listing: &str, tile: &TileInput) -> Result<Vec<u8>, String>
 }
 
 fn run_tile(
-    endpoint: GpuEndpoint,
+    executor: Arc<RemoteExecutor>,
+    target: String,
+    addr: String,
     listing: String,
     tile: TileInput,
     timeout_ms: u64,
 ) -> Result<TileResult, String> {
     let submit_ms = now_ms();
-    let executor = RemoteExecutor::new(
-        endpoint.capability.clone(),
-        endpoint.addr.clone(),
-        endpoint.token.clone(),
-    );
     let body = build_binary_body(&listing, &tile)?;
     let mut header = json!({
         "type": "submit",
@@ -867,13 +885,28 @@ fn run_tile(
         "payload_format": "binary",
         "output_u8": true,
     });
-    if let Some(token) = &endpoint.token {
-        header["auth"] = json!(token);
-    }
     let submit_started = Instant::now();
-    let submitted = executor
-        .submit(&header, &body)
-        .map_err(|(code, msg)| format!("submit {}: {code}: {msg}", endpoint.addr))?;
+    let mut submitted = None;
+    for attempt in 0..2 {
+        match executor.submit(&header, &body) {
+            Ok(value) => {
+                submitted = Some(value);
+                break;
+            }
+            Err((code, msg))
+                if attempt == 0 && (code == "job-unavailable" || code == "job-invalid") =>
+            {
+                // A persistent session can be reset between frames. Retrying a
+                // submit can duplicate a job whose ack was lost; the first
+                // result is ignored, so correctness is unchanged.
+                continue;
+            }
+            Err((code, msg)) => {
+                return Err(format!("submit {addr}: {code}: {msg}"));
+            }
+        }
+    }
+    let submitted = submitted.ok_or_else(|| format!("submit {addr} failed after retry"))?;
     let submit_call_ms = submit_started.elapsed().as_millis() as u64;
     let job_id = submitted
         .get("job_id")
@@ -885,7 +918,7 @@ fn run_tile(
     loop {
         let status = executor
             .status(&job_id)
-            .map_err(|(code, msg)| format!("status {}: {code}: {msg}", endpoint.addr))?;
+            .map_err(|(code, msg)| format!("status {addr}: {code}: {msg}"))?;
         let state = status
             .get("job")
             .and_then(|j| j.get("state"))
@@ -907,7 +940,7 @@ fn run_tile(
     let result_started = Instant::now();
     let (header, body) = executor
         .result(&job_id)
-        .map_err(|(code, msg)| format!("result {}: {code}: {msg}", endpoint.addr))?;
+        .map_err(|(code, msg)| format!("result {addr}: {code}: {msg}"))?;
     let result_ms = result_started.elapsed().as_millis() as u64;
     validate_binary_result(&header, &body)?;
     let out = header
@@ -929,16 +962,21 @@ fn run_tile(
         return Err(format!("tile output shape {got:?}, expected {expected:?}"));
     }
     let bytes = out.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    let worker_ms = header
+        .get("frame_ms")
+        .and_then(|x| x.as_u64())
+        .or_else(|| header.get("run_ms").and_then(|x| x.as_u64()));
     Ok(TileResult {
         row: tile.row,
         col: tile.col,
-        target: endpoint.target,
-        addr: endpoint.addr,
+        target,
+        addr,
         job_id,
         submit_ms,
         submit_call_ms,
         status_ms,
         result_ms,
+        worker_ms,
         done_ms: now_ms(),
         sha256: sha256_hex(&body),
         bytes,
@@ -1220,6 +1258,37 @@ pub fn run_stream_with(
     if placement.is_empty() {
         return Err("stream placement is empty".to_string());
     }
+    let tile_count = if descriptor.split.is_some() {
+        2
+    } else {
+        descriptor.tiles.rows * descriptor.tiles.cols
+    };
+    let planned_targets: Vec<usize> = if cfg.all_first_target {
+        vec![0; tile_count]
+    } else {
+        (0..tile_count)
+            .map(|i| placement[i % placement.len()])
+            .collect()
+    };
+    let mut pools: Vec<Vec<Arc<RemoteExecutor>>> = Vec::with_capacity(endpoints.len());
+    for (idx, endpoint) in endpoints.iter().enumerate() {
+        let count = planned_targets
+            .iter()
+            .filter(|target| **target == idx)
+            .count()
+            .max(1);
+        pools.push(
+            (0..count)
+                .map(|_| {
+                    Arc::new(RemoteExecutor::new(
+                        endpoint.capability.clone(),
+                        endpoint.addr.clone(),
+                        endpoint.token.clone(),
+                    ))
+                })
+                .collect(),
+        );
+    }
     let listing = fs::read_to_string(&descriptor.stage.listing)
         .map_err(|e| format!("read listing {}: {e}", descriptor.stage.listing.display()))?;
     let listing_sha256 = sha256_hex(listing.as_bytes());
@@ -1297,17 +1366,30 @@ pub fn run_stream_with(
         let mut tile_meta: BTreeMap<(usize, usize), (u32, Option<String>, Vec<Json>)> =
             BTreeMap::new();
         let mut handles = Vec::with_capacity(tiles.len());
+        let mut used = vec![0usize; endpoints.len()];
         for (i, tile) in tiles.into_iter().enumerate() {
-            let planned = if cfg.all_first_target {
-                0
-            } else {
-                placement[i % placement.len()]
-            };
-            let endpoints_for_tile = endpoints.to_vec();
+            let planned = *planned_targets
+                .get(i)
+                .ok_or_else(|| format!("tile {i} has no planned target"))?;
+            let slot = used[planned];
+            used[planned] += 1;
+            let executor = pools
+                .get(planned)
+                .and_then(|pool| pool.get(slot))
+                .cloned()
+                .ok_or_else(|| format!("no executor slot {slot} for target {planned}"))?;
+            let target = endpoints[planned].target.clone();
+            let addr = endpoints[planned].addr.clone();
+            let fallbacks: Vec<GpuEndpoint> = endpoints
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != planned)
+                .map(|(_, endpoint)| endpoint.clone())
+                .collect();
             let listing = listing.clone();
             let timeout = cfg.timeout_ms;
             handles.push(thread::spawn(move || {
-                run_tile_with_failover(endpoints_for_tile, planned, listing, tile, timeout)
+                run_tile_with_failover(executor, target, addr, fallbacks, listing, tile, timeout)
             }));
         }
         for handle in handles {
@@ -1381,6 +1463,7 @@ pub fn run_stream_with(
                 "submit_call_ms": r.submit_call_ms,
                 "status_ms": r.status_ms,
                 "result_ms": r.result_ms,
+                "worker_ms": r.worker_ms,
                 "done_ms": r.done_ms,
                 "sha256": r.sha256,
                 "bytes": r.bytes,
@@ -1505,6 +1588,7 @@ mod tests {
             submit_call_ms: 0,
             status_ms: 0,
             result_ms: 0,
+            worker_ms: None,
             done_ms: 0,
             sha256: String::new(),
             bytes: data.len(),

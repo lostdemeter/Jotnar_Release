@@ -3,9 +3,16 @@
 //! The capability layer never re-implements job execution: it submits to the
 //! same `jotnar-noded` endpoint the controller uses. Program and blob names are
 //! opaque to the node; the module sees only the capability operation.
+//!
+//! A client keeps one TCP session and reuses it for submit/status/result. The
+//! executors close a session only on EOF or a malformed request, so a
+//! controller can avoid a fresh handshake for every poll. Submit is not
+//! retried automatically (that could duplicate a job); status/result are
+//! retried once on a stale session.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jotnar::protocol::{decode_frame, request};
@@ -15,6 +22,7 @@ use serde_json::{json, Value as Json};
 pub struct JobClient {
     pub endpoint: String,
     pub token: Option<String>,
+    session: Arc<Mutex<Option<TcpStream>>>,
 }
 
 fn connect_with_timeout(endpoint: &str, timeout: Duration) -> Result<TcpStream, String> {
@@ -40,6 +48,7 @@ impl JobClient {
         Self {
             endpoint: endpoint.into(),
             token,
+            session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -48,59 +57,54 @@ impl JobClient {
             .map(|(header, _)| header)
     }
 
+    fn call_retry(
+        &self,
+        typ: &str,
+        fields: Json,
+        payload: &[u8],
+    ) -> Result<Json, (String, String)> {
+        match self.call(typ, fields.clone(), payload) {
+            Ok(value) => Ok(value),
+            Err(_) => self.call(typ, fields, payload),
+        }
+    }
+
     fn call_frame(
         &self,
         typ: &str,
         fields: Json,
         payload: &[u8],
     ) -> Result<(Json, Vec<u8>), (String, String)> {
-        let mut stream = connect_with_timeout(&self.endpoint, Duration::from_secs(5))
-            .map_err(|e| ("job-unavailable".to_string(), e))?;
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
-        let mut fields = fields;
-        if let Some(token) = &self.token {
-            if let Some(o) = fields.as_object_mut() {
-                o.insert("auth".into(), json!(token));
+        let outcome = {
+            let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                let stream = connect_with_timeout(&self.endpoint, Duration::from_secs(5))
+                    .map_err(|e| ("job-unavailable".to_string(), e))?;
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
+                *guard = Some(stream);
             }
+            let stream = guard.as_mut().expect("session was just established");
+            exchange(stream, &self.token, typ, fields, payload)
+        };
+        if outcome.is_err() {
+            let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = None;
         }
-        let frame = request(1, typ, fields, payload)
-            .map_err(|e| ("job-invalid".to_string(), e.to_string()))?;
-        stream
-            .write_all(&frame)
-            .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
-        let mut hdr = [0u8; 4];
-        stream
-            .read_exact(&mut hdr)
-            .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
-        let n = u32::from_be_bytes(hdr) as usize;
-        if n > 1024 * 1024 * 1024 {
-            return Err(("job-invalid".to_string(), "response too large".to_string()));
+        outcome
+    }
+
+    fn call_frame_retry(
+        &self,
+        typ: &str,
+        fields: Json,
+        payload: &[u8],
+    ) -> Result<(Json, Vec<u8>), (String, String)> {
+        match self.call_frame(typ, fields.clone(), payload) {
+            Ok(value) => Ok(value),
+            Err(_) => self.call_frame(typ, fields, payload),
         }
-        let mut body = vec![0u8; n];
-        stream
-            .read_exact(&mut body)
-            .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
-        let mut full = Vec::with_capacity(4 + n);
-        full.extend_from_slice(&hdr);
-        full.extend_from_slice(&body);
-        let (header, response) =
-            decode_frame(&full).map_err(|e| ("job-invalid".to_string(), e.to_string()))?;
-        if header.get("ok").and_then(|x| x.as_bool()) != Some(true) {
-            let err = header.get("error").cloned().unwrap_or(json!({}));
-            return Err((
-                err.get("code")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("job-error")
-                    .to_string(),
-                err.get("msg")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("job endpoint rejected the request")
-                    .to_string(),
-            ));
-        }
-        Ok((header, response.to_vec()))
     }
 
     pub fn submit(&self, args: &Json) -> Result<Json, (String, String)> {
@@ -116,23 +120,23 @@ impl JobClient {
     }
 
     pub fn status(&self, job_id: &str) -> Result<Json, (String, String)> {
-        self.call("job-status", json!({"job_id": job_id}), &[])
+        self.call_retry("job-status", json!({"job_id": job_id}), &[])
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<Json, (String, String)> {
-        self.call("job-cancel", json!({"job_id": job_id}), &[])
+        self.call_retry("job-cancel", json!({"job_id": job_id}), &[])
     }
 
     pub fn result(&self, job_id: &str) -> Result<(Json, Vec<u8>), (String, String)> {
-        self.call_frame("job-result", json!({"job_id": job_id}), &[])
+        self.call_frame_retry("job-result", json!({"job_id": job_id}), &[])
     }
 
     pub fn list(&self) -> Result<Json, (String, String)> {
-        self.call("job-list", json!({}), &[])
+        self.call_retry("job-list", json!({}), &[])
     }
 
     pub fn ping(&self) -> Result<Json, (String, String)> {
-        self.call("ping", json!({}), &[])
+        self.call_retry("ping", json!({}), &[])
     }
 
     /// Live executor view: queue, running jobs, warm workers, recent jobs.
@@ -141,6 +145,57 @@ impl JobClient {
     /// is not part of discovery. Executors that do not implement it return an
     /// error, which the controller records and treats as unknown.
     pub fn health(&self) -> Result<Json, (String, String)> {
-        self.call("health", json!({}), &[])
+        self.call_retry("health", json!({}), &[])
     }
+}
+
+fn exchange(
+    stream: &mut TcpStream,
+    token: &Option<String>,
+    typ: &str,
+    fields: Json,
+    payload: &[u8],
+) -> Result<(Json, Vec<u8>), (String, String)> {
+    let mut fields = fields;
+    if let Some(token) = token {
+        if let Some(o) = fields.as_object_mut() {
+            o.insert("auth".into(), json!(token));
+        }
+    }
+    let frame =
+        request(1, typ, fields, payload).map_err(|e| ("job-invalid".to_string(), e.to_string()))?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
+    let mut hdr = [0u8; 4];
+    stream
+        .read_exact(&mut hdr)
+        .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
+    let n = u32::from_be_bytes(hdr) as usize;
+    if n > 1024 * 1024 * 1024 {
+        return Err(("job-invalid".to_string(), "response too large".to_string()));
+    }
+    let mut body = vec![0u8; n];
+    stream
+        .read_exact(&mut body)
+        .map_err(|e| ("job-unavailable".to_string(), e.to_string()))?;
+    let mut full = Vec::with_capacity(4 + n);
+    full.extend_from_slice(&hdr);
+    full.extend_from_slice(&body);
+    let (header, response) =
+        decode_frame(&full).map_err(|e| ("job-invalid".to_string(), e.to_string()))?;
+    if header.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let err = header.get("error").cloned().unwrap_or(json!({}));
+        return Err((
+            err.get("code")
+                .and_then(|x| x.as_str())
+                .unwrap_or("job-error")
+                .to_string(),
+            err.get("msg")
+                .and_then(|x| x.as_str())
+                .unwrap_or("job endpoint rejected the request")
+                .to_string(),
+        ));
+    }
+    Ok((header, response.to_vec()))
 }

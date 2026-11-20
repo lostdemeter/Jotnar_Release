@@ -489,6 +489,22 @@ fn start_mdns(cfg: &Config, port: u16) -> Result<ServiceDaemon, String> {
 
 fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
     let _ = stream.set_nodelay(true);
+    loop {
+        match handle_one(&mut stream, cfg) {
+            Ok(()) => {}
+            Err(e)
+                if e.contains("failed to fill whole buffer")
+                    || e.contains("Connection reset")
+                    || e.contains("Broken pipe") =>
+            {
+                return Ok(())
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn handle_one(stream: &mut TcpStream, cfg: &Config) -> Result<(), String> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -510,7 +526,7 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
         let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
         if want.trim().is_empty() || got != want.as_str() {
             return send_error(
-                &mut stream,
+                stream,
                 &id,
                 "unauthorized",
                 "bad or missing auth token",
@@ -530,7 +546,7 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
                 "nvcc"
             };
             send(
-                &mut stream,
+                stream,
                 &json!({
                     "v": PROTO_V,
                     "id": id,
@@ -545,8 +561,8 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             )
         }
         "health" => {
-            if let Err(e) = send_health(&mut stream, cfg, &id) {
-                send_error(&mut stream, &id, "health-failed", &e)?;
+            if let Err(e) = send_health(stream, cfg, &id) {
+                send_error(stream, &id, "health-failed", &e)?;
             }
             Ok(())
         }
@@ -559,17 +575,17 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             if !cached {
                 let parsed: Json = match serde_json::from_slice(payload) {
                     Ok(v) => v,
-                    Err(e) => return send_error(&mut stream, &id, "bad-payload", &format!("{e}")),
+                    Err(e) => return send_error(stream, &id, "bad-payload", &format!("{e}")),
                 };
                 let feeds = match feeds_from_json(&parsed) {
                     Ok(f) => f,
-                    Err(e) => return send_error(&mut stream, &id, "bad-payload", &e.to_string()),
+                    Err(e) => return send_error(stream, &id, "bad-payload", &e.to_string()),
                 };
                 let mut cache = cfg.payload_cache.lock().unwrap_or_else(|e| e.into_inner());
                 cache.put(pid.clone(), feeds, payload.len());
             }
             send(
-                &mut stream,
+                stream,
                 &json!({
                     "v": PROTO_V,
                     "id": id,
@@ -582,64 +598,64 @@ fn handle(mut stream: TcpStream, cfg: &Config) -> Result<(), String> {
             )
         }
         "submit" => {
-            if let Err(e) = submit_job(&mut stream, cfg, &id, &header, payload) {
-                send_error(&mut stream, &id, "submit-failed", &e)?;
+            if let Err(e) = submit_job(stream, cfg, &id, &header, payload) {
+                send_error(stream, &id, "submit-failed", &e)?;
             }
             Ok(())
         }
         "job-status" => {
-            if let Err(e) = job_status(&mut stream, cfg, &id, &header) {
+            if let Err(e) = job_status(stream, cfg, &id, &header) {
                 let code = if e.starts_with("unknown job") {
                     "unknown-job"
                 } else {
                     "job-status-failed"
                 };
-                send_error(&mut stream, &id, code, &e)?;
+                send_error(stream, &id, code, &e)?;
             }
             Ok(())
         }
         "job-result" => {
-            if let Err(e) = job_result(&mut stream, cfg, &id, &header) {
+            if let Err(e) = job_result(stream, cfg, &id, &header) {
                 let code = if e.starts_with("unknown job") {
                     "unknown-job"
                 } else {
                     "job-result-failed"
                 };
-                send_error(&mut stream, &id, code, &e)?;
+                send_error(stream, &id, code, &e)?;
             }
             Ok(())
         }
         "job-cancel" => {
-            if let Err(e) = job_cancel(&mut stream, cfg, &id, &header) {
+            if let Err(e) = job_cancel(stream, cfg, &id, &header) {
                 let code = if e.starts_with("unknown job") {
                     "unknown-job"
                 } else {
                     "job-cancel-failed"
                 };
-                send_error(&mut stream, &id, code, &e)?;
+                send_error(stream, &id, code, &e)?;
             }
             Ok(())
         }
         "run" => {
-            if let Err(e) = run(&mut stream, cfg, &id, &header, payload) {
-                send_error(&mut stream, &id, "run-failed", &e)?;
+            if let Err(e) = run(stream, cfg, &id, &header, payload) {
+                send_error(stream, &id, "run-failed", &e)?;
             }
             Ok(())
         }
         "run-batch" => {
-            if let Err(e) = run_batch(&mut stream, cfg, &id, &header, payload) {
-                send_error(&mut stream, &id, "run-batch-failed", &e)?;
+            if let Err(e) = run_batch(stream, cfg, &id, &header, payload) {
+                send_error(stream, &id, "run-batch-failed", &e)?;
             }
             Ok(())
         }
         "warm-prepare" => {
-            if let Err(e) = warm_prepare(&mut stream, cfg, &id, &header, payload) {
-                send_error(&mut stream, &id, "warm-prepare-failed", &e)?;
+            if let Err(e) = warm_prepare(stream, cfg, &id, &header, payload) {
+                send_error(stream, &id, "warm-prepare-failed", &e)?;
             }
             Ok(())
         }
         other => send_error(
-            &mut stream,
+            stream,
             &id,
             "unknown-type",
             &format!("no such message {other:?}"),
@@ -2027,6 +2043,7 @@ mod async_job_tests {
             .unwrap();
             client.write_all(&frame).unwrap();
             let (reply, _) = read_frame(&mut client);
+            drop(client);
             handler.join().unwrap().unwrap();
             assert_eq!(reply["type"], "error", "{typ}: {reply}");
             assert_eq!(reply["error"]["code"], "unknown-job", "{typ}: {reply}");
