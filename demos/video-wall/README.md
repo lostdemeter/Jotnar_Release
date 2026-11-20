@@ -18,22 +18,28 @@ recorded clip so its reference is deterministic.
 
 ## Live camera
 
-Terminal 1 (controller):
+One command (starts the SDL viewer as a child; requires `DISPLAY`):
 
 ```sh
 cd /home/balrog/Documents/OpenCode/jotnar-hip-release
 ./target/release/jotnar-stream --descriptor demos/video-wall/camera-wall.json \
-  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test --viewer
 ```
 
-Terminal 2 (viewer; the existing DOOM viewer speaks the same frame protocol):
+Or two terminals. The stream is the frame server; it does not create a window
+by itself.
 
 ```sh
+# terminal 1
+./target/release/jotnar-stream --descriptor demos/video-wall/camera-wall.json \
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test
+# terminal 2
 ./target/release/jotnar-doom-view --addr 127.0.0.1:9990
 ```
 
 The viewer retries the connection for 15 seconds, so either order works. The
-stream keeps running if the viewer disconnects.
+stream keeps running if the viewer disconnects. The viewer must run in the
+desktop session that owns the camera/display (`DISPLAY=:0` here).
 
 ## Recorded clip
 

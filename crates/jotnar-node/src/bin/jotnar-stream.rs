@@ -6,7 +6,7 @@
 //! are wired.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use jotnar_node_tools::stream::{run_stream, GpuEndpoint, StreamDescriptor, StreamRunConfig};
 
@@ -17,12 +17,13 @@ fn usage() -> &'static str {
        jotnar-stream --descriptor FILE --cuda ADDR --hip ADDR [--token T]\n\
                      [--frames N] [--fleet-dir DIR] [--lease-ms N]\n\
                      [--reference DIR] [--clip DIR] [--out DIR] [--receipt DIR]\n\
-                     [--all-cuda] [--timeout-ms N]\n\
+                     [--all-cuda] [--viewer] [--timeout-ms N]\n\
      \n\
      The descriptor declares the stream clock, source, tiled GPU stage, sink,\n\
      and receipt policy. `--clip` overrides a frames source; `--out` overrides\n\
      a frames sink. `--reference` compares each composited frame to\n\
-     frame_%06d.rgb in that directory."
+     frame_%06d.rgb in that directory. `--viewer` starts jotnar-doom-view for a\n\
+     tcp sink."
 }
 
 struct Args {
@@ -38,6 +39,7 @@ struct Args {
     out: Option<PathBuf>,
     receipt: Option<PathBuf>,
     all_cuda: bool,
+    viewer: bool,
     timeout_ms: u64,
 }
 
@@ -56,6 +58,7 @@ fn parse() -> Result<Args, String> {
     let mut out = None;
     let mut receipt = None;
     let mut all_cuda = false;
+    let mut viewer = false;
     let mut timeout_ms = 10_000u64;
     while let Some(arg) = it.next() {
         let mut value = |flag: &str| it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -82,6 +85,7 @@ fn parse() -> Result<Args, String> {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--receipt" => receipt = Some(PathBuf::from(value("--receipt")?)),
             "--all-cuda" => all_cuda = true,
+            "--viewer" => viewer = true,
             "--timeout-ms" => {
                 timeout_ms = value("--timeout-ms")?
                     .parse()
@@ -104,6 +108,7 @@ fn parse() -> Result<Args, String> {
         out,
         receipt,
         all_cuda,
+        viewer,
         timeout_ms: timeout_ms.max(1),
     })
 }
@@ -166,7 +171,39 @@ fn real_main() -> Result<(), String> {
         lease_ms: args.lease_ms,
         timeout_ms: args.timeout_ms,
     };
-    let summary = run_stream(&descriptor, &sha, &endpoints, &cfg)?;
+    let mut viewer = None;
+    if descriptor.sink.kind == "tcp" {
+        let addr = descriptor
+            .sink
+            .listen
+            .as_deref()
+            .ok_or("tcp sink needs listen")?;
+        if args.viewer {
+            let local = PathBuf::from("target/release/jotnar-doom-view");
+            let program = if local.exists() {
+                local
+            } else {
+                PathBuf::from("jotnar-doom-view")
+            };
+            eprintln!("viewer: starting {} --addr {addr}", program.display());
+            viewer = Some(
+                Command::new(program)
+                    .args(["--addr", addr])
+                    .spawn()
+                    .map_err(|e| format!("start viewer: {e}"))?,
+            );
+        } else {
+            eprintln!("viewer: run `jotnar-doom-view --addr {addr}` in another terminal");
+        }
+    } else if args.viewer {
+        return Err("--viewer needs a tcp sink".to_string());
+    }
+    let result = run_stream(&descriptor, &sha, &endpoints, &cfg);
+    if let Some(mut child) = viewer {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let summary = result?;
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?

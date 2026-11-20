@@ -119,9 +119,11 @@ correctness reference, not the SLO target.
 cd /home/balrog/Documents/OpenCode/jotnar-hip-release
 cargo build --release -p jotnar-node-tools --bin jotnar-stream
 
-# live camera + viewer
+# live camera + viewer (one command)
 ./target/release/jotnar-stream --descriptor demos/video-wall/camera-wall.json \
-  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test
+  --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test --viewer
+
+# or two terminals: stream first, then the viewer
 ./target/release/jotnar-doom-view --addr 127.0.0.1:9990
 
 # recorded clip
