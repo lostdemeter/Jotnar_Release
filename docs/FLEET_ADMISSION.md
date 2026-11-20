@@ -187,9 +187,11 @@ Without `--fleet-dir`, behavior is unchanged (best effort).
 - A co-resident batch stage on the current CUDA/HIP pair materially degrades
   the interactive tail; the implemented policy defers it. Finer concurrency
   needs runner-side priority/preemption or GPU partitioning.
-- Rare 200 ms+ executor stalls are present even in the DOOM-alone baseline on
-  an idle-clock GPU; the receipt records them separately. The strict max SLO
-  needs a host-clock fix (persistence/boost) before it can be claimed.
+- Rare 200 ms+ executor stalls were present even in the DOOM-alone baseline
+  on an idle-clock GPU. On the current CUDA host, persistence mode plus a
+  210 MHz clock floor removed them (three consecutive post-fix gates had zero
+  stalls over the ceiling). The receipt records any stall above the ceiling
+  separately if the host is allowed to idle again.
 - CPU stages are not yet admitted through the lease table; the current
   interactive competitor is GPU-only.
 
