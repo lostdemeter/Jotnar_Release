@@ -108,13 +108,11 @@ ack was lost is possible, but the first result is ignored, so correctness is
 unchanged).
 
 This removed the ~210 ms new-connection submit stalls. The remaining wake
-latency is on the runner host: with the CPU `powersave` governor and deep idle
-states, a persistent connection thread can take ~30 ms to wake for a status
-poll even though the GPU job is 1-12 ms. The CUDA host needs the CPU performance
-governor/C-state setting in `artifacts/jotnar-wall/CUDA_CPU_COMMANDS.md` in the
-handoff package for the strict SLO. With it applied (or a temporary keepalive),
-the live DOOM 100-frame gate passes at p99 58 / max 68; the wall improves to
-p99 33.
+latency is on the runner host: under the CPU `powersave` governor and deep idle
+states, a persistent connection thread could take ~30 ms to wake for a status
+poll even though the GPU job is 1-12 ms. The CUDA host now runs the performance
+governor with C1E+ disabled; the final live DOOM 100-frame gate is p99 61 /
+max 63, and the wall is p99 29.
 
 ## Failover
 
@@ -193,18 +191,17 @@ The live `work_ms` includes the core and the GPU path. 72/248 split, 15 fps,
 100 measured frames after 3 warm-up frames:
 
 ```text
-live         p50 49, p95 55, p99 58, max 68 ms
-             budget 66, 1/100 frames over budget
+live         p50 47, p95 56, p99 61, max 63 ms
+             budget 66, frames over budget 0
 matches      100/100 byte-identical to the coordinator (EVEN reference)
 failover     HIP dead; right tile retried on CUDA; 2/2 exact
-             p99 72 ms (survivor carries both halves)
+             p50 64, p99 65 ms (survivor carries both halves)
 stage claim  79905e7d… rows/columns overlap 1
 ```
 
-This is with the persistent transport and the CPU performance setting. Without
-the CPU setting, persistent status polls can wake ~30 ms late and the strict
-tail fails; the GPU job remains 1–12 ms. The 20-frame smoke is not enough to
-expose that.
+This is with persistent transport and the CPU performance setting. The earlier
+powersave run showed the same GPU work plus ~30 ms status-wake stalls; the host
+setting removes them.
 
 The SLO gate uses the frames sink. The TCP viewer sink can add a further tail
 when the SDL reader falls behind (a 30-frame viewer run showed two ~250 ms
@@ -235,13 +232,13 @@ Result on the live CUDA/HIP fleet (640x360 source, 1280x720 wall, 15 fps,
 1 CUDA + 3 HIP tiles):
 
 ```text
-reference (all CUDA)  p50 61, p95 68, p99 262, max 262 ms (correctness only)
-distributed           p50 49, p95 53, p99 54, max 54 ms
+reference (all CUDA)  p50 61, p95 65, p99 65, max 65 ms (correctness only)
+distributed           p50 27, p95 28, p99 29, max 29 ms
                       budget 66, frames over budget 0
 exactness             30/30 wall frames byte-identical
 stage descriptor      ab0715db…  partitionable rows/columns overlap 1
 failover leg          HIP dead, 6 tiles retried on CUDA, 2/2 exact
-                      p50 63, p99 64, max 64 ms
+                      p50 58, p99 60, max 60 ms
 ```
 
 Three frames are processed through the full tile path as warm-up
