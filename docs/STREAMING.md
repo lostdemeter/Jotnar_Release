@@ -170,7 +170,9 @@ cargo build --release -p jotnar-node-tools --bin jotnar-stream
 
 - The tiler is a uniform tile grid. The compiler's `partitionable` claim is
   loaded and validated (size range and overlap), but the grid is still a
-  descriptor decision rather than derived from the claim.
+  descriptor decision rather than derived from the claim. The gate's stage
+  claim is compiled for CUDA; HIP tiles are covered by exactness, not by a
+  second compiled descriptor.
 - Failover retries a failed tile on the other targets and retries the planned
   target on the next frame, so recovery is automatic. A blackholed target that
   accepts and never responds still depends on the client timeout; the gate uses
