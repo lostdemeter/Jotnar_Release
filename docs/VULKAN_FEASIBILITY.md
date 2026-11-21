@@ -207,6 +207,28 @@ propagates through attention, the residual, both norms and the MLP. This is
 the same divergence the small parity case exposed; the block gate confirms it
 at scale. Vulkan matches the oracle at every stage.
 
+## Dispatch fusion: evaluated, not implemented
+
+The next obvious optimization was to fuse elementwise chains. Measured cost
+per dispatch in a resident ladder `MUL` chain:
+
+| elements | chain | time | per dispatch |
+|---|---|---|---|
+| 4,096 | 1 | 0.358 ms | - |
+| 4,096 | 32 | 0.829 ms | ~0.015 ms |
+| 262,144 | 1 | 3.22 ms | - |
+| 262,144 | 64 | 18.48 ms | ~0.242 ms |
+
+At small sizes the per-dispatch overhead is negligible (~15 us), and the
+Qwen block has exactly one adjacent fusable pair (`SILU -> MUL`), so fusion
+would save ~15 us of a ~3 ms block. At large sizes the per-dispatch time is
+the element work itself, not launch overhead.
+
+Fusion would pay for a workload with long elementwise chains, where the win
+is intermediate memory traffic rather than launch count. This block does not
+have that shape, so it was not implemented. `scripts/bench_dispatch.py`
+reproduces the table.
+
 ## Measurements
 
 1,048,576 elements, `S = MUL(A,B)` then `OUT = ADD(S,B)`, three-plane T
