@@ -123,6 +123,64 @@ OUT = MATMUL(A, B)
         True,
     ),
     (
+        "t_transpose",
+        """IN A AS T:*
+OUT = TRANSPOSE(A)
+""",
+        lambda: {"A": t3([1, 1, -1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 33200],
+                         [0, 0, 0, 1, 0, 0], [2, 3])},
+        {"kind": "T", "shape": [3, 2]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "t_slice",
+        """IN A AS T:*
+OUT = SLICE(A, 1, 1, 3)
+""",
+        lambda: {"A": t3([1, 1, -1, 1, -1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 33200, 32900, 33100],
+                         [0, 0, 0, 1, 0, 0, 0, 0], [2, 4])},
+        {"kind": "T", "shape": [2, 2]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "t_tshift",
+        """IN A AS T:*
+OUT = TSHIFT(A)
+""",
+        lambda: {"A": t3([1, 1, -1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 33200],
+                         [0, 0, 0, 1, 0, 0], [2, 3])},
+        {"kind": "T", "shape": [2, 3]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "t_tbeta",
+        """CONFIG beta_b 0.31622776601683794
+IN A AS T:*
+OUT = TBETA(A)
+""",
+        lambda: {"A": t3([1, 1, -1, 1], [32768, 33000, 32500, 32768],
+                         [0, 0, 0, 1], [4])},
+        {"kind": "T", "shape": [4]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "i_iget",
+        """IN X AS I:*
+OUT = IGET(X, 2)
+""",
+        lambda: {"X": i64([11, 22, 33, 44], [4])},
+        {"kind": "I64", "shape": [1]},
+        "c",
+        True,
+    ),
+    (
         "i_chain",
         """IN A AS I:*
 IN B AS I:*
@@ -223,7 +281,7 @@ def run_case(bin_path, case, workroot):
     def argv_for(exe, man, tag):
         n = numel(out_spec["shape"])
         argv = []
-        for s_name in ("A", "B"):
+        for s_name in streams:
             s = streams[s_name]
             for suffix, fmt, key in planes(s):
                 if fmt == "d" and man["dtype"] == "f32":

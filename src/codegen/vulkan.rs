@@ -162,7 +162,7 @@ type Lowered = (String, Vec<usize>, [u32; 4], [u32; 3], [u32; 3]);
 /// so a dispatch can bind them like any other storage buffer.
 struct Tables {
     n_plane: usize,
-    names: Vec<&'static str>,
+    names: Vec<String>,
     data: Vec<Vec<i64>>,
 }
 
@@ -171,13 +171,19 @@ impl Tables {
         Tables { n_plane, names: Vec::new(), data: Vec::new() }
     }
 
-    fn get(&mut self, name: &'static str, make: impl FnOnce() -> Vec<i64>) -> usize {
-        if let Some(i) = self.names.iter().position(|n| *n == name) {
+    fn get(&mut self, name: &str, make: impl FnOnce() -> Vec<i64>) -> usize {
+        if let Some(i) = self.names.iter().position(|n| n == name) {
             return self.n_plane + i;
         }
         let d = make();
-        self.names.push(name);
+        self.names.push(name.to_string());
         self.data.push(d);
+        self.n_plane + self.data.len() - 1
+    }
+
+    fn push(&mut self, name: String, data: Vec<i64>) -> usize {
+        self.names.push(name);
+        self.data.push(data);
         self.n_plane + self.data.len() - 1
     }
 }
@@ -192,6 +198,7 @@ struct Ctx<'a> {
     /// `CONFIG t2 <M>` selects the four-plane φ-float; `f` is the bridge width.
     t2: Option<i64>,
     f: i64,
+    beta_b: f64,
 }
 
 impl<'a> Ctx<'a> {
@@ -324,6 +331,9 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         m_cov: bound.config.get_i64("m_cov").unwrap_or(33280),
         t2,
         f: f_bits,
+        beta_b: bound
+            .config
+            .get_f64_or("beta_b", bound.config.get_f64_or("beta", 0.5)),
     };
 
     let mut dispatches: Vec<Dispatch> = Vec::new();
@@ -427,6 +437,13 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
                 tmatmul(ins, ctx, tabs)
             }
         }
+        ("TRANSPOSE", CKind::T) => transpose(ins, ctx, tabs, out_ord),
+        ("SLICE", CKind::T) | ("SLICE", CKind::F) => {
+            slice(ins, ctx, tabs, out_ord, out_kind)
+        }
+        ("IGET", CKind::I) => iget(ins, ctx, tabs, out_ord),
+        ("TBETA", CKind::T) => tbeta(ins, ctx, out_ord, out_n),
+        ("TSHIFT", CKind::T) => tshift(ins, ctx, tabs, out_ord),
 
         // exact integer arithmetic
         ("IADD", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "+"),
@@ -441,9 +458,8 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         ("DIV", CKind::T)
         | ("RMSNORM", CKind::T) | ("SOFTMAX", CKind::T)
         | ("SOFTMAX_WIDE", CKind::T) | ("SILU", CKind::T) | ("GELU", CKind::T)
-        | ("ROTARY", CKind::T) | ("TSHIFT", CKind::T) | ("TBETA", CKind::T)
-        | ("TRANSPOSE", CKind::T) | ("SLICE", CKind::T) | ("CONCAT", CKind::T)
-        | ("T2I", CKind::I) | ("IGET", CKind::I) | ("IREDUCE_SUM", CKind::I) => {
+        | ("ROTARY", CKind::T) | ("CONCAT", CKind::T)
+        | ("T2I", CKind::I) | ("IREDUCE_SUM", CKind::I) => {
             Err(Error::unimplemented(format!(
                 "Vulkan backend: {} on {out_kind:?} needs the ladder bridge/tables (next milestone)",
                 ins.mn
@@ -1260,6 +1276,322 @@ void main()
         [m as u32, n as u32, k as u32, 0],
         groups,
         [16, 16, 1],
+    ))
+}
+
+fn plane_glsl_type(kind: CKind, c: Comp) -> &'static str {
+    match c {
+        Comp::S | Comp::E | Comp::M => "int",
+        Comp::Z => "uint",
+        Comp::V => {
+            if kind == CKind::I {
+                "int64_t"
+            } else {
+                "float"
+            }
+        }
+    }
+}
+
+/// Exact plane move: one baked index table, every plane gathered with it.
+fn gather_planes(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+    kind: CKind,
+    idx: Vec<i64>,
+    tag: &str,
+) -> Result<Lowered> {
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let comps = comps_for(kind, ctx.t2);
+    let out_n = ctx.elems(out_ord)?;
+    if idx.len() != out_n {
+        return Err(Error::asm(format!(
+            "Vulkan: {} index table has {} entries, output has {out_n}",
+            ins.mn,
+            idx.len()
+        )));
+    }
+
+    let mut bufs = Vec::new();
+    let mut decl = String::new();
+    let n = comps.len();
+    for (i, &c) in comps.iter().enumerate() {
+        let t = plane_glsl_type(kind, c);
+        bufs.push(ctx.plane_of(in_ord, c)?);
+        decl.push_str(&format!(
+            "layout(std430, binding = {i}) readonly buffer I{i} {{ {t} i{i}[]; }};\n"
+        ));
+    }
+    for (i, &c) in comps.iter().enumerate() {
+        let t = plane_glsl_type(kind, c);
+        bufs.push(ctx.plane_of(out_ord, c)?);
+        decl.push_str(&format!(
+            "layout(std430, binding = {}) buffer O{i} {{ {t} o{i}[]; }};\n",
+            n + i
+        ));
+    }
+    bufs.push(tabs.push(format!("{tag}:{n}:{}", idx.len()), idx));
+    decl.push_str(&format!(
+        "layout(std430, binding = {}) readonly buffer IDX {{ int64_t ix[]; }};\n",
+        2 * n
+    ));
+
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!("  o{i}[k] = i{i}[int(ix[k])];\n"));
+    }
+
+    let src = format!(
+        "#version 450\n#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n\
+layout(local_size_x = {LOCAL_SIZE}) in;\n{decl}\
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
+void main() {{\n  uint k = gl_GlobalInvocationID.x;\n  if (k >= pc.n) return;\n{body}}}\n"
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// TRANSPOSE: swap the last two dims; exact plane move.
+fn transpose(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 TRANSPOSE is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let shape = ctx.info(in_ord)?.static_shape(&ctx.name(in_ord))?;
+    if shape.len() < 2 {
+        return Err(Error::asm("Vulkan: TRANSPOSE needs rank >= 2"));
+    }
+    let r = shape[shape.len() - 2];
+    let c = shape[shape.len() - 1];
+    let batch: usize = shape[..shape.len() - 2].iter().product();
+
+    let mut idx = Vec::with_capacity(batch * r * c);
+    for b in 0..batch {
+        for i in 0..c {
+            for j in 0..r {
+                idx.push((b * r * c + j * c + i) as i64);
+            }
+        }
+    }
+    gather_planes(ins, ctx, tabs, out_ord, CKind::T, idx, "transpose")
+}
+
+/// SLICE(x, axis, start, end): end is exclusive, matching the reference.
+fn slice(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+    kind: CKind,
+) -> Result<Lowered> {
+    if ctx.t2.is_some() && kind == CKind::T {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 SLICE is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let shape = ctx.info(in_ord)?.static_shape(&ctx.name(in_ord))?;
+    if ins.args.len() != 4 {
+        return Err(Error::asm("Vulkan: SLICE expects axis, start, end"));
+    }
+    let num = |i: usize, what: &str| -> Result<usize> {
+        ins.args[i]
+            .parse::<i64>()
+            .ok()
+            .and_then(|v| if v >= 0 { Some(v as usize) } else { None })
+            .ok_or_else(|| Error::asm(format!("Vulkan: SLICE {what} must be a non-negative literal")))
+    };
+    let axis = num(1, "axis")?;
+    let start = num(2, "start")?;
+    let end = num(3, "end")?;
+    if axis >= shape.len() || start >= end || end > shape[axis] {
+        return Err(Error::asm(format!(
+            "Vulkan: SLICE axis={axis} start={start} end={end} out of range for {shape:?}"
+        )));
+    }
+
+    let mut oshape = shape.clone();
+    oshape[axis] = end - start;
+    let mut istr = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        istr[i] = istr[i + 1] * shape[i + 1];
+    }
+    let mut ostr = vec![1usize; oshape.len()];
+    for i in (0..oshape.len().saturating_sub(1)).rev() {
+        ostr[i] = ostr[i + 1] * oshape[i + 1];
+    }
+
+    let out_n: usize = oshape.iter().product();
+    let mut idx = Vec::with_capacity(out_n);
+    for lin in 0..out_n {
+        let mut rem = lin;
+        let mut src_lin = 0usize;
+        for d in 0..oshape.len() {
+            let coord = rem / ostr[d];
+            rem %= ostr[d];
+            let src = if d == axis { coord + start } else { coord };
+            src_lin += src * istr[d];
+        }
+        idx.push(src_lin as i64);
+    }
+    gather_planes(ins, ctx, tabs, out_ord, kind, idx, "slice")
+}
+
+/// IGET: scalar extraction by literal index (v1 contract).
+fn iget(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let lit: i64 = ins
+        .args
+        .get(1)
+        .and_then(|a| a.parse().ok())
+        .ok_or_else(|| Error::asm("Vulkan: IGET needs an integer literal index"))?;
+    let n = ctx.elems(in_ord)?;
+    if lit < 0 || lit as usize >= n {
+        return Err(Error::asm(format!(
+            "Vulkan: IGET index {lit} out of range {n}"
+        )));
+    }
+    gather_planes(ins, ctx, tabs, out_ord, CKind::I, vec![lit], "iget")
+}
+
+/// TBETA: a constant field of the encoded `beta_b` value.
+fn tbeta(ins: &BoundInstr, ctx: &Ctx, out_ord: usize, out_n: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 TBETA is not implemented yet (frozen T is)",
+        ));
+    }
+    let _ = ins;
+    let enc = phi_core::lattice::encode(&ndarray::ArrayD::from_elem(
+        ndarray::IxDyn(&[1]),
+        ctx.beta_b,
+    ));
+    let s0 = enc.s.iter().next().copied().unwrap_or(1) as i32;
+    let e0 = enc.e.iter().next().copied().unwrap_or(BIAS as i32);
+    let z0 = enc.z.iter().next().copied().unwrap_or(1) as u32;
+    let _ = s0;
+
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let src = format!(
+        "#version 450\nlayout(local_size_x = {LOCAL_SIZE}) in;\n\
+layout(std430, binding = 0) buffer OS {{ int s[]; }};\n\
+layout(std430, binding = 1) buffer OE {{ int e[]; }};\n\
+layout(std430, binding = 2) buffer OZ {{ uint z[]; }};\n\
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
+void main() {{\n  uint k = gl_GlobalInvocationID.x;\n  if (k >= pc.n) return;\n\
+  s[k] = {s0}; e[k] = {e0}; z[k] = {z0}u;\n}}\n"
+    );
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, vec![o_s, o_e, o_z], [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// TSHIFT: per-row max via the wide bridge, subtract, convert back.
+fn tshift(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 TSHIFT is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let shape = ctx.info(in_ord)?.static_shape(&ctx.name(in_ord))?;
+    let cols = *shape.last().unwrap_or(&1);
+    let rows: usize = shape[..shape.len().saturating_sub(1)].iter().product();
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(in_ord, Comp::S)?,
+        ctx.plane_of(in_ord, Comp::E)?,
+        ctx.plane_of(in_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let frac_hi = tabs.get("frac_hi", || phi_core::lattice::frac_hi_lut().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+
+    let ladder = LADDER_GLSL;
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) buffer OS {{ int os_[]; }};
+layout(std430, binding = 4) buffer OE {{ int oe[]; }};
+layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 6) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 7) readonly buffer FRACHI {{ int64_t frac_hi[]; }};
+layout(std430, binding = 8) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 9) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+const int WIDE_CAP = 8192;
+
+int64_t to_fixed_wide(int sgn, int ev, uint z, int64_t m0)
+{{
+  int64_t d = m0 - int64_t(ev);
+  int64_t q_lo;
+  if (d < int64_t(-WIDE_CAP)) {{
+    q_lo = int64_t(sgn) * frac[0];
+  }} else {{
+    int64_t k = -d;
+    if (k < 1) k = 1;
+    if (k > int64_t(WIDE_CAP)) k = int64_t(WIDE_CAP);
+    q_lo = int64_t(sgn) * frac_hi[int(k - 1)];
+  }}
+  if (z != 0u) return 0;
+  if (d < 0) return q_lo;
+  if (d > int64_t(FRAC_CAP)) return 0;
+  return int64_t(sgn) * frac[int(d)];
+}}
+
+void main()
+{{
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.n) return;
+  uint c = pc.p0;
+  int64_t m0 = int64_t(pc.p1);
+
+  int64_t mx = int64_t(0);
+  bool first = true;
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], m0);
+    if (first || q > mx) {{ mx = q; first = false; }}
+  }}
+
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], m0);
+    Ladder res = from_fixed(q - mx, m0);
+    os_[i] = res.s;
+    oe[i] = res.e;
+    oz[i] = res.z;
+  }}
+}}
+"#
+    );
+
+    let groups = [div_ceil(rows, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![a_s, a_e, a_z, o_s, o_e, o_z, frac, frac_hi, coarse, fine],
+        [rows as u32, cols as u32, ctx.m_acc as u32, 0],
+        groups,
+        [LOCAL_SIZE, 1, 1],
     ))
 }
 
