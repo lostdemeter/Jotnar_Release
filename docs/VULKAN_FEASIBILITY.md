@@ -20,7 +20,8 @@ integration.
 
 This spike did **not**:
 
-- implement T2 (four-plane φ-float) — frozen T only;
+- implement T2 beyond `MUL`/`SQUARE`/`ADD`/`SUB` (no T2 `MATMUL`, norms,
+  softmax, or image ops);
 - implement batched matmul, broadcasting, reductions, norms, softmax,
   rotary, or the image ops;
 - support T streams in the CUDA/HIP emitters (unchanged) or change any
@@ -117,15 +118,31 @@ from the reference.
 `assert_bound < 2^62` and `from_fixed < 2^53`; both fit in `i64`, and the
 shader saturates at `2^53` rather than trapping.
 
-T2 is the open question: `to_fixed`/`from_fixed` compute `(a << M) / base`,
-which can reach ~2^77. Note that when `M == F` (the documented 24/24 target)
-the `2^(M-F)` factor cancels, so T2 may also fit in `i64`. That is untested
-and is the next experiment.
+**T2 also needs none**, which was the point of the experiment. The reference
+uses `i128` in `to_fixed`/`from_fixed` because `(a << M) / base` can reach
+~2^77, and naively that means emulating 128-bit division on the Adreno. Two
+facts remove the need:
+
+- `base` is capped by the hi-ladder table at `φ^16 · 2^F` (~2^35), and
+- the mantissa is clamped to `[-2^(M-1), 2^(M-1))`, so once `a/base` leaves
+  `[0.5, 1.5)` the result is the clamp bound and the exact quotient is
+  discarded.
+
+So an explicit clamp test before the division keeps the operand in 64 bits.
+Checked against the reference on **43,488 vectors** (powers of two, their
+neighbours, and random `q` across `m0 ∈ {31344, 32768, 33280, 38000, 39000,
+65535}`): **zero mismatches**, and `a << M` peaks at **60 bits** inside the
+non-clamped branch. `MUL` also stays in i64: `ma*mb` fits, and
+`round_div_signed` is exact.
+
+This holds for the documented `M == F = 24`; it is not a claim for arbitrary
+widths.
 
 ## Supported opcode set
 
 ```text
-T:  MUL SQUARE ADD SUB MATMUL
+T   (frozen): MUL SQUARE ADD SUB MATMUL
+T2  (CONFIG t2 M): MUL SQUARE ADD SUB
 I:  IADD ISUB IMUL IMATMUL
 F:  MATMUL
 ```
@@ -149,6 +166,7 @@ dtype (`f32`) with a tolerance.
 | `ADD` then `SUB` (intermediate stream) | PASS | PASS (bit-identical) |
 | `MATMUL` (T) | PASS | PASS (bit-identical) |
 | `IADD`/`IMUL`, `IMATMUL`, `MATMUL` (F) | PASS | PASS |
+| T2 `MUL` then `ADD` (all four planes) | PASS | PASS (bit-identical) |
 
 ## Measurements
 
@@ -168,6 +186,15 @@ init=9.6  buffers=12.7  load=7.1  pipelines=0.2  dispatch=3.4  store=4.0 ms
 ```
 
 - GPU dispatch is **3.4 ms**, faster than the CPU's entire 19.4 ms run.
+- T2 vs frozen T, same listing and size, resident:
+
+  | format | planes | time |
+  |---|---|---|
+  | frozen T | 3 | 8.70 ms/frame |
+  | T2 | 4 | **10.80 ms/frame** (1.24x) |
+
+  T2 is cheap on the GPU because the frame is I/O-bound at this size; the
+  ~2.5x CPU ratio in `T2_PHI_FLOAT.md` does not carry over.
 - The first measurement had `store=125 ms`: reading results out of
   write-combined coherent memory cost more than everything else combined.
   `HOST_CACHED|HOST_COHERENT` fixed it.
@@ -181,7 +208,8 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 - Rank-2 `MATMUL` only; no `BATCH_MATMUL`.
 - No broadcasting between different element counts.
 - No reductions, norms, softmax, rotary, or image ops.
-- No T2, no `T2I`/`IGET`, no `ROTARY`/`TSHIFT`.
+- T2 covers `MUL`/`SQUARE`/`ADD`/`SUB` only; no `T2I`/`IGET`, no
+  `ROTARY`/`TSHIFT`.
 - No bounds-fault channel yet: over-range accumulators saturate instead of
   failing the run. The reference raises an error.
 - Host I/O is scalar conversion plus a copy; a real embedding would write
@@ -189,8 +217,8 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. T2 with the `M == F` question: implement `to_fixed`/`from_fixed` both
-   bounded-i64 and hi/lo 128-bit, measure, and gate against `phi_core::t2`.
+1. T2 `MATMUL` (block-floating two-pass), which is the shape the Qwen block
+   needs; the bridge and mantissa arithmetic already exist.
 2. `RMSNORM`, `ROTARY`, `TSHIFT`, `TBETA`, `SOFTMAX_WIDE`, `SILU`,
    `TRANSPOSE`, `SLICE` — the rest of the Qwen block.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
