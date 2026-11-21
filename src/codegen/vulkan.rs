@@ -274,14 +274,28 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
             "Vulkan serve mode needs both CONFIG serve_input and CONFIG serve_output",
         ));
     }
+    let split_list = |v: &str| -> Vec<String> {
+        v.split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
     if let Some(n) = &serve_in {
-        if !in_names.contains(n) {
-            return Err(Error::asm("Vulkan serve_input must be an IN stream"));
+        for name in split_list(n) {
+            if !in_names.contains(&name) {
+                return Err(Error::asm(format!(
+                    "Vulkan serve_input '{name}' must be an IN stream"
+                )));
+            }
         }
     }
     if let Some(n) = &serve_out {
-        if !outputs.contains(n) {
-            return Err(Error::asm("Vulkan serve_output must be an output"));
+        for name in split_list(n) {
+            if !outputs.contains(&name) {
+                return Err(Error::asm(format!(
+                    "Vulkan serve_output '{name}' must be an output"
+                )));
+            }
         }
     }
 
@@ -2724,26 +2738,24 @@ fn emit_c(
     }
     c.push_str(" };\n");
 
-    let serve_in_planes: Vec<usize> = match serve_in {
-        Some(n) => {
-            let ord = ctx.ordinal(n)?;
-            comps_for(ctx.info(ord)?.kind, ctx.t2)
-                .iter()
-                .map(|&c| ctx.plane_of(ord, c))
-                .collect::<Result<_>>()?
+    let mut serve_in_planes: Vec<usize> = Vec::new();
+    if let Some(list) = serve_in {
+        for name in list.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
+            let ord = ctx.ordinal(name)?;
+            for &c in comps_for(ctx.info(ord)?.kind, ctx.t2) {
+                serve_in_planes.push(ctx.plane_of(ord, c)?);
+            }
         }
-        None => Vec::new(),
-    };
-    let serve_out_planes: Vec<usize> = match serve_out {
-        Some(n) => {
-            let ord = ctx.ordinal(n)?;
-            comps_for(ctx.info(ord)?.kind, ctx.t2)
-                .iter()
-                .map(|&c| ctx.plane_of(ord, c))
-                .collect::<Result<_>>()?
+    }
+    let mut serve_out_planes: Vec<usize> = Vec::new();
+    if let Some(list) = serve_out {
+        for name in list.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
+            let ord = ctx.ordinal(name)?;
+            for &c in comps_for(ctx.info(ord)?.kind, ctx.t2) {
+                serve_out_planes.push(ctx.plane_of(ord, c)?);
+            }
         }
-        None => Vec::new(),
-    };
+    }
     c.push_str(&format!("\n#define SERVE_MODE {}\n", serve_in.is_some() as u8));
     c.push_str(&format!("#define N_SERVE_IN {}\n", serve_in_planes.len()));
     c.push_str("static const int kServeIn[N_SERVE_IN > 0 ? N_SERVE_IN : 1] = {");
