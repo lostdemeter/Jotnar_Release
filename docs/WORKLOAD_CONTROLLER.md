@@ -1,7 +1,7 @@
 # Workload controller
 
-**Status:** native and GPU stages run; DOOM checkpoint handoff and a CUDA → HIP
-batch chain are the acceptance tests
+**Status:** native and GPU stages run; DOOM checkpoint handoff, a CUDA → HIP
+batch chain, and a pipeline-parallel transformer block are the acceptance tests
 **Scope:** model-aware planning above the CPU, GPU, and native executors
 
 ## Boundary decision
@@ -381,6 +381,48 @@ The single-client run at 64 items stayed inside the DOOM budget
 The 4-client run exposes the missing controller layer: batch work is admitted
 without priority or leases, so a DOOM frame can wait behind GPU jobs and miss
 its budget even when p95 looks healthy.
+
+## Model flagship: pipeline-parallel transformer block
+
+The first model slice is a two-block, single-head pre-norm transformer run as a
+stage graph on the live fleet. The controller holds the model manifest,
+weights, and input as bundle artifacts; each stage gets one listing plus
+payloads, so the executors stay model-blind.
+
+```text
+block i:  CUDA attention  X -> RMSNorm -> QKV -> QK^T -> softmax -> AV
+                          -> out proj -> +X -> RMSNorm   (outputs N2, RES)
+          HIP MLP         N2 -> gate/up -> SiLU(gate)*up -> down -> +RES
+                                                       (output OUT)
+```
+
+`demos/model-block/attn.asm` and `mlp.asm` are the two listings. Block i>0's
+attention consumes block i-1's `OUT` as `X`; the workload DAG carries the
+activation. The ops are in the shared CUDA/HIP set (MATMUL, RMSNORM, SOFTMAX,
+SILU, MUL, ADD; TRANSPOSE on CUDA).
+
+Gate:
+
+```sh
+python3 scripts/model_block_gate.py --no-build --blocks 2
+```
+
+```text
+model      2 blocks, D=64, N=8, inter=128, single head, F32, seed 7
+reference  numpy, same seed/weights
+CUDA       attn-0, attn-1
+HIP        mlp-0, mlp-1
+checks     block0 max_abs 3.0e-8, block1 max_abs 3.0e-8
+repeat     byte-identical block outputs
+control    perturbed WQ tracks the perturbed reference; differs from the
+           original by 1.57e-2
+receipt    all four stages done, placement and output hashes recorded
+```
+
+The block is not spatially partitionable (attention/reductions), so the
+distribution axis is stage/pipeline parallelism, not the `partitionable` grid.
+A real checkpoint, multi-head attention, and a full
+embedding->blocks->logits sentence are the next slices.
 
 ## Limits
 
