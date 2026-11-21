@@ -142,7 +142,7 @@ widths.
 
 ```text
 T   (frozen): MUL SQUARE ADD SUB MATMUL TRANSPOSE SLICE TSHIFT TBETA
-              SILU SOFTMAX_WIDE RMSNORM
+              SILU SOFTMAX_WIDE RMSNORM ROTARY
 T2  (CONFIG t2 M): MUL SQUARE ADD SUB MATMUL
 I:  IADD ISUB IMUL IMATMUL IGET
 T2I (T -> I)
@@ -233,7 +233,8 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 - No reductions, norms, softmax, rotary, or image ops.
 - T2 covers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL` only; no T2 `TRANSPOSE`,
   `SLICE`, `TSHIFT`, `TBETA` or `T2I`.
-- No `GELU`, plain `SOFTMAX`, `ROTARY` or `CONCAT` yet.
+- No `GELU`, plain `SOFTMAX` or `CONCAT` yet (the Qwen block does not use
+  them; `SOFTMAX_WIDE` is the ladder softmax).
 - No bounds-fault channel yet: over-range accumulators saturate instead of
   failing the run. The reference raises an error.
 - Host I/O is scalar conversion plus a copy; a real embedding would write
@@ -241,12 +242,10 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. Batch B: `RMSNORM`, `SILU`, `SOFTMAX_WIDE`, `T2I`. These need baked LUTs
-   (`sig_lut` 1M entries, `exp_lut` 262k, `t2i_lut` 64k), so this is where
-   emitted-artifact size and `cc` time should be measured.
-2. `ROTARY`, whose cos/sin tables depend on the payload's position range.
-   Then `GELU`, plain `SOFTMAX` and `CONCAT` if the Qwen listing needs them.
-3. The Qwen block listing as the acceptance gate.
+1. The Qwen block listing as the acceptance gate: build it for Vulkan,
+   non-FPU and the interpreter, and compare plane-for-plane.
+2. `GELU`, plain `SOFTMAX` and `CONCAT` only if something beyond the Qwen
+   block needs them.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
 4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
