@@ -296,12 +296,12 @@ static void nf_softmax_row(const int64_t *q, int64_t n,
   int64_t s0 = q[0] / 16;  /* tdiv: C99 division truncates toward zero */
   int64_t vmax = s0;
   for (int64_t j = 1; j < n; ++j) {
-      int64_t s14 = q[j] / 16;  /* tdiv toward zero */
+    int64_t s14 = q[j] / 16;  /* tdiv toward zero */
     if (s14 > vmax) vmax = s14;
   }
   int64_t den = 0;
   for (int64_t j = 0; j < n; ++j) {
-      int64_t s14 = q[j] / 16;  /* tdiv toward zero */
+    int64_t s14 = q[j] / 16;  /* tdiv toward zero */
     int64_t dd = vmax - s14;
     if (dd < 0) dd = 0;
     if (dd > 262144) dd = 262144;
