@@ -399,7 +399,9 @@ block i:  CUDA attention  X -> RMSNorm -> QKV -> QK^T -> softmax -> AV
 `demos/model-block/attn.asm` and `mlp.asm` are the two listings. Block i>0's
 attention consumes block i-1's `OUT` as `X`; the workload DAG carries the
 activation. The ops are in the shared CUDA/HIP set (MATMUL, RMSNORM, SOFTMAX,
-SILU, MUL, ADD; TRANSPOSE on CUDA).
+SILU, MUL, ADD, TRANSPOSE, SLICE, CONCAT). The earlier note that TRANSPOSE was
+CUDA-only was stale: slice 3's all-HIP placement matches numpy on the full
+graph.
 
 Gate:
 
@@ -456,6 +458,104 @@ The checkpoint is a deterministic fixture; the container, loader, graph,
 placement, and reference paths are real. A trained checkpoint can replace the
 fixture without changing the graph. A larger model and a decode loop are the
 next slices.
+
+### Model slice 3 — trained checkpoint, tokenizer, decode, measurement
+
+`demos/model-block/trained/` now holds a real trained F32 checkpoint, not a
+fixture. It is a deliberately tiny byte-level model:
+
+```text
+checkpoint   jotnar.model.checkpoint/1, F32, 22 tensors, 464,128 bytes
+             manifest sha256 01b128cea5b4d2d12297503f2742186825d235ad4e432a0313ed60c7e9d0a4c4
+model        D=64, 2 blocks, H=4, Dh=16, inter=128, vocab=256, context=16
+tokenizer    byte-level (identity on 0..255)
+objective    next byte from a 16-byte context, CE on the last position
+corpus       110,491 bytes of in-repo README/docs (sha256 eb51498b...)
+training     2,500 steps, batch 64, AdamW lr 2e-3 cosine, seed 0, CPU F32
+loss         3.22 bits/byte train, 3.36 bits/byte val (uniform = 8.00)
+```
+
+The objective matches the graph. The attention has no causal mask, so a causal
+LM objective would leak the future; instead the controller feeds a 16-byte
+context and supervises the following byte at the last position. Greedy decode
+takes the argmax, appends it, slides the window, and reruns the graph.
+
+The decode gate keeps the checkpoint, tokenizer, prompt, and decode policy in
+the controller. It materializes `tok_embed[tokens] + pos_embed[0..16]`, writes
+the five-stage bundle, and runs eight steps. The reference is numpy and the
+torch model that trained the checkpoint:
+
+```sh
+python3 scripts/model_decode_gate.py --no-build \
+  --checkpoint demos/model-block/trained --decode 8 \
+  --out /tmp/opencode/model-decode-gate
+```
+
+```text
+prompt        "rity. GPU partit" (validation split; continuation "ioning o")
+greedy 8      " the the"
+pipeline      attn/head CUDA, mlp HIP: 2.17e-5 full / 4.29e-6 last vs numpy
+all-HIP       attn/mlp/head HIP:       1.70e-5 full / 3.81e-6 last vs numpy
+torch         numpy-vs-torch           9.63e-6; sequences identical
+sequence      exact for both placements; 8 steps x 5 stages all done
+repeat        byte-identical logits, noise floor 0.0
+control       block0.WQ + 0.5: 3.70e-5 vs the perturbed reference,
+              8.08 vs the original; generated sequence changes to " the sta"
+bound         1e-4 absolute (observed < 1/4 of the bound)
+```
+
+The greedy text is weak -- the model learned byte statistics, not a language
+model. The gate reports the true-continuation match as a quality signal, not a
+pass criterion. The checkpoint provenance and limits are in
+[`demos/model-block/trained/README.md`](../demos/model-block/trained/README.md).
+
+**HIP attention parity is already real.** The HIP target has F32 `TRANSPOSE`,
+`SLICE`, `CONCAT`, and `SOFTMAX`; the earlier "TRANSPOSE on CUDA" note was
+stale. The all-HIP placement matches numpy on the full graph. No new lowering
+was needed for slice 3.
+
+`scripts/model_perf_gate.py` measures the same graph four ways and records what
+ran where:
+
+```sh
+python3 scripts/model_perf_gate.py --no-build \
+  --checkpoint demos/model-block/trained --repeats 10 --warmup 2 \
+  --decode 8 --clients 1,2,4 --requests 4 \
+  --out /tmp/opencode/model-perf-gate
+```
+
+```text
+warm, controller load ~6 (32 CPUs), 10 repeats
+placement      p50      p99      max      util
+single-cuda    2343.8   2394.2   2394.2   0.96 CUDA
+pipeline       1702.4   1780.2   1780.2   0.80 CUDA / 0.16 HIP
+single-hip      732.0    756.6    756.6   0.91 HIP
+decode-8       pipeline 14.05 s, single-hip 5.89 s
+throughput     pipeline 0.58 / 0.74 / 0.74 req/s at 1/2/4 clients
+               data-parallel 0.86 / 0.89 req/s at 2/4 clients
+               data-parallel / pipeline = 1.20x at 4 clients
+```
+
+The stage clocks separate dispatch from model time. With a warm build cache the
+executor reports `compile_ms=0`, `build_ms=0`, `cache_hit=true`, but `run_ms`
+is about 440 ms per CUDA stage and 120-130 ms per HIP stage. Every stage is a
+separate executor process launch, and the CUDA context setup dominates this tiny
+graph's kernel time. The controller overhead is only 15-26 ms per forward.
+
+Cold, with the runner build caches cleared before each placement:
+
+```text
+single-cuda  21.23 s   (3 CUDA builds at ~6.2 s each)
+pipeline     16.66 s   (3 CUDA builds + 1 HIP build)
+single-hip    7.34 s   (3 HIP builds at ~2.2 s each)
+```
+
+Verdict: **single-HIP is the best option, warm and cold.** The pipeline is
+1.38x faster than single-CUDA but 2.33x slower than single-HIP. Data-parallel
+is only 1.20x the pipeline at four clients because the CUDA half carries the
+dispatch cost. This is a correctness and substrate result, not a
+compute-scaling win. A resident/fused execution path is required before the
+split can be judged on model compute; that is the next slice.
 
 ## Limits
 

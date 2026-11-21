@@ -1,0 +1,83 @@
+{
+  "ok": true,
+  "manifest": "/tmp/opencode/tiny-2500/manifest.json",
+  "bytes": 464128,
+  "config": {
+    "blocks": 2,
+    "d_model": 64,
+    "context": 16,
+    "heads": 4,
+    "head_dim": 16,
+    "inter": 128,
+    "vocab": 256,
+    "eps": 1e-05,
+    "pos": "learned",
+    "tokens": 16
+  },
+  "training": {
+    "method": "next-byte-from-context",
+    "context": 16,
+    "corpus_sha256": "eb51498b55d742009b093d9a231e9739df49f80bf48da039949b940b126bf0a7",
+    "corpus_bytes": 110491,
+    "corpus_files": [
+      {
+        "path": "README.md",
+        "bytes": 12745,
+        "sha256": "ed1e78ccaba39dcc8dd5968a31d1fa22e3b2f223cf051c517b9a3403d69f8d10"
+      },
+      {
+        "path": "docs/USAGE.md",
+        "bytes": 23131,
+        "sha256": "ec87847dfe8e164db1d2ab4a6588ea783f7db5117f4c0bd84cb87d99b1503445"
+      },
+      {
+        "path": "docs/WORKLOAD_CONTROLLER.md",
+        "bytes": 19069,
+        "sha256": "51cb658f3ea62968647f02ce5611e1bc54a1c203e9f4f7f5cfea6c98f5e0b118"
+      },
+      {
+        "path": "docs/STREAMING.md",
+        "bytes": 18179,
+        "sha256": "494b8d1b4a7405ca344774aed1e51b0e94709cc8cbfef55e4c9b0f9b0a48cc3c"
+      },
+      {
+        "path": "docs/EXECUTOR_CONTRACT.md",
+        "bytes": 7828,
+        "sha256": "7bfeb0c32fc72482ded158a4feb2377503979d9b9804d7a04fbba9e051f2fbad"
+      },
+      {
+        "path": "docs/LADDER_OPS.md",
+        "bytes": 9824,
+        "sha256": "a222ed17b8d6ece13b5ef5db5f6fd8364ca06b531113d64ec86b272126f67072"
+      },
+      {
+        "path": "docs/FLEET_ADMISSION.md",
+        "bytes": 9426,
+        "sha256": "3ea7e39fdb195086c82350ca0fc22f19ef7d8c1be11003b87e5187f7e564138b"
+      },
+      {
+        "path": "docs/DOOM_TWO_NODE.md",
+        "bytes": 10274,
+        "sha256": "e6e7ca01460fa91818527bb60fda784736bf9de752305669a06d76f08fdcd710"
+      }
+    ],
+    "train_bytes": 99441,
+    "val_bytes": 11050,
+    "steps": 2500,
+    "batch": 64,
+    "lr": 0.002,
+    "seed": 0,
+    "device": "cpu",
+    "threads": 8,
+    "train_bits_per_byte": 3.220662004467731,
+    "val_bits_per_byte": 3.3599180766978556,
+    "uniform_bits_per_byte": 8.0,
+    "prompt_source": "val",
+    "prompt_hex": "726974792e2047505520706172746974",
+    "continuation_hex": "696f6e696e67206f",
+    "greedy_hex": "2074686520746865",
+    "torch_version": "2.14.1+cu130"
+  },
+  "greedy_text": " the the",
+  "continuation_text": "ioning o"
+}

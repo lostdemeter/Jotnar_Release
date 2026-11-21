@@ -72,3 +72,37 @@ receipt               5 stages done, attn/head CUDA, mlp HIP
 
 The checkpoint is a deterministic fixture; replace it with a trained F32
 checkpoint without changing the graph.
+
+## Slice 3 — trained checkpoint, tokenizer, decode, measurement
+
+`trained/` is a real trained F32 checkpoint (22 tensors, 464,128 bytes) for the
+same graph. It is a tiny byte-level next-byte model: D=64, 2 blocks, 4 heads,
+context 16, vocab 256, learned position embedding. It was trained from scratch
+on 110 KB of in-repo docs; the manifest and `training.json` record the corpus
+hash, 2,500 steps, and losses (3.22 train / 3.36 val bits per byte, uniform is
+8.00). It is not a chat model; the generated sample is reported honestly.
+
+`scripts/model_decode_gate.py` owns the checkpoint, byte tokenizer, prompt, and
+greedy policy in the controller, materializes `tok_embed + pos_embed`, and runs
+eight decode steps through the graph. It checks per-step logits against numpy
+and the torch training model, the exact sequence, every stage done, repeat
+determinism, and a `block0.WQ + 0.5` control. It runs the pipeline and an
+all-HIP placement; both match numpy, so the HIP attention path is parity-clean.
+
+```sh
+python3 scripts/model_decode_gate.py --no-build \
+  --checkpoint demos/model-block/trained --decode 8 \
+  --out /tmp/opencode/model-decode-gate
+python3 scripts/model_perf_gate.py --no-build \
+  --checkpoint demos/model-block/trained --repeats 10 --warmup 2 \
+  --decode 8 --clients 1,2,4 --requests 4 \
+  --out /tmp/opencode/model-perf-gate
+```
+
+Measured warm on the live fleet: single-CUDA p50 2343.8 ms, pipeline 1702.4 ms,
+single-HIP 732.0 ms. The split beats single-CUDA (1.38x) and loses to single-HIP
+(2.33x). With a warm build cache every stage is a separate process launch and
+the executor reports `run_ms` about 440 ms on CUDA and 125 ms on HIP; dispatch
+dominates the model. Data-parallel is only 1.20x the pipeline at four clients.
+The honest verdict is in `docs/WORKLOAD_CONTROLLER.md`; a resident/fused path is
+needed before the split can be a compute-scaling claim.

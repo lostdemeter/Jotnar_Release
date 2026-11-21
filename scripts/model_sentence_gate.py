@@ -146,6 +146,9 @@ def load_checkpoint(directory: Path) -> dict:
         "config": manifest["config"],
         "tokens": manifest["tokens"],
         "tensors": tensors,
+        "name": manifest.get("name"),
+        "tokenizer": manifest.get("tokenizer"),
+        "training": manifest.get("training"),
         "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
     }
 
@@ -181,9 +184,11 @@ def reference_block(x: np.ndarray, w: dict[str, np.ndarray]) -> dict[str, np.nda
     return {"N2": n2, "RES": res, "OUT": out}
 
 
-def reference(checkpoint: dict) -> tuple[list[dict], np.ndarray, np.ndarray]:
-    tokens = checkpoint["tokens"]
-    x = checkpoint["tensors"]["embedding"][tokens].astype(np.float32)
+def reference_from_x(
+    checkpoint: dict, x: np.ndarray
+) -> tuple[list[dict], np.ndarray, np.ndarray]:
+    """Run the blocks, final norm, and head from an explicit activation."""
+    x = x.astype(np.float32)
     outputs = []
     for index in range(checkpoint["config"]["blocks"]):
         block = reference_block(x, block_weights(checkpoint, index))
@@ -192,6 +197,12 @@ def reference(checkpoint: dict) -> tuple[list[dict], np.ndarray, np.ndarray]:
     final = mb.rmsnorm(x, checkpoint["tensors"]["final_norm"])
     logits = (final @ checkpoint["tensors"]["head"]).astype(np.float32)
     return outputs, logits, x
+
+
+def reference(checkpoint: dict) -> tuple[list[dict], np.ndarray, np.ndarray]:
+    tokens = checkpoint["tokens"]
+    x = checkpoint["tensors"]["embedding"][tokens].astype(np.float32)
+    return reference_from_x(checkpoint, x)
 
 
 def add_blob(bundle: Path, data: bytes) -> dict:
@@ -204,11 +215,14 @@ def add_blob(bundle: Path, data: bytes) -> dict:
     return {"sha256": digest, "bytes": len(data), "path": rel}
 
 
-def write_bundle(bundle: Path, checkpoint: dict) -> Path:
+def write_bundle(bundle: Path, checkpoint: dict, x: np.ndarray | None = None) -> Path:
     bundle.mkdir(parents=True, exist_ok=True)
     blocks = checkpoint["config"]["blocks"]
     tokens = checkpoint["tokens"]
-    x = checkpoint["tensors"]["embedding"][tokens].astype(np.float32)
+    if x is None:
+        x = checkpoint["tensors"]["embedding"][tokens].astype(np.float32)
+    else:
+        x = x.astype(np.float32)
     artifacts = {
         "attn4-listing": add_blob(bundle, ATTN4.read_bytes()),
         "mlp-listing": add_blob(bundle, MLP.read_bytes()),
@@ -329,6 +343,7 @@ def run_bundle(
     hip: str,
     token: str,
     blocks: int,
+    places: dict[str, str] | None = None,
 ) -> dict:
     if ledger.exists():
         shutil.rmtree(ledger)
@@ -346,14 +361,14 @@ def run_bundle(
         "--gpu-executor",
         f"hip={hip}",
     ]
-    for index in range(blocks):
-        cmd += [
-            "--place",
-            f"attn-{index}={cuda}",
-            "--place",
-            f"mlp-{index}={hip}",
-        ]
-    cmd += ["--place", f"head={cuda}"]
+    if places is None:
+        places = {}
+        for index in range(blocks):
+            places[f"attn-{index}"] = cuda
+            places[f"mlp-{index}"] = hip
+        places["head"] = cuda
+    for stage, addr in places.items():
+        cmd += ["--place", f"{stage}={addr}"]
     mb.run(cmd)
     return json.loads((ledger / "receipt.json").read_text())
 

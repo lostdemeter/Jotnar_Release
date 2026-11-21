@@ -1151,6 +1151,11 @@ pub struct StageRecord {
     pub started_ms: u64,
     #[serde(default)]
     pub finished_ms: u64,
+    /// What the executor reported about its own execution: compile/build/run
+    /// milliseconds and whether the compile cache was hit. Additive; absent
+    /// for executors that do not report timings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Json>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1341,6 +1346,36 @@ fn prepare_inputs(
         }
     }
     Ok(out)
+}
+
+/// Keep the executor-reported timing fields in the receipt. GPU runners put
+/// them at the top level for binary results and under `timing` for JSON
+/// results; both shapes are accepted.
+fn executor_timing(header: &Json) -> Option<Json> {
+    if let Some(timing) = header.get("timing") {
+        return Some(timing.clone());
+    }
+    let mut map = serde_json::Map::new();
+    for key in [
+        "compile_ms",
+        "build_ms",
+        "worker_start_ms",
+        "run_ms",
+        "frame_ms",
+        "cache_hit",
+        "warm",
+    ] {
+        if let Some(value) = header.get(key) {
+            if !value.is_null() {
+                map.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(Json::Object(map))
+    }
 }
 
 fn split_result(
@@ -2537,6 +2572,7 @@ pub fn run_bundle(
                 .get("finished_ms")
                 .and_then(|x| x.as_u64())
                 .unwrap_or_else(now_ms),
+            timing: executor_timing(&header),
         };
         ledger.stages.insert(name.clone(), record);
         ledger.save(ledger_dir)?;
@@ -3008,6 +3044,23 @@ mod tests {
         );
         assert_eq!(loaded.bundle.artifacts.len(), 3);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn executor_timing_keeps_runner_fields_and_skips_empty_headers() {
+        let header = json!({
+            "compile_ms": 0,
+            "build_ms": 12,
+            "run_ms": 34,
+            "cache_hit": true,
+        });
+        let timing = executor_timing(&header).unwrap();
+        assert_eq!(timing["build_ms"], 12);
+        assert_eq!(timing["run_ms"], 34);
+        assert_eq!(timing["cache_hit"], true);
+        assert!(executor_timing(&json!({"ok": true})).is_none());
+        let nested = json!({"timing": {"run_ms": 7, "cache_hit": false}});
+        assert_eq!(executor_timing(&nested).unwrap()["run_ms"], 7);
     }
 
     #[test]

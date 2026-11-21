@@ -1,0 +1,297 @@
+{
+  "schema": "jotnar.model.checkpoint/1",
+  "name": "jotnar-tiny-byte-2x4",
+  "config": {
+    "blocks": 2,
+    "d_model": 64,
+    "context": 16,
+    "heads": 4,
+    "head_dim": 16,
+    "inter": 128,
+    "vocab": 256,
+    "eps": 1e-05,
+    "pos": "learned",
+    "tokens": 16
+  },
+  "tokens": [
+    114,
+    105,
+    116,
+    121,
+    46,
+    32,
+    71,
+    80,
+    85,
+    32,
+    112,
+    97,
+    114,
+    116,
+    105,
+    116
+  ],
+  "tokenizer": {
+    "kind": "byte",
+    "vocab": 256
+  },
+  "training": {
+    "method": "next-byte-from-context",
+    "context": 16,
+    "corpus_sha256": "eb51498b55d742009b093d9a231e9739df49f80bf48da039949b940b126bf0a7",
+    "corpus_bytes": 110491,
+    "corpus_files": [
+      {
+        "path": "README.md",
+        "bytes": 12745,
+        "sha256": "ed1e78ccaba39dcc8dd5968a31d1fa22e3b2f223cf051c517b9a3403d69f8d10"
+      },
+      {
+        "path": "docs/USAGE.md",
+        "bytes": 23131,
+        "sha256": "ec87847dfe8e164db1d2ab4a6588ea783f7db5117f4c0bd84cb87d99b1503445"
+      },
+      {
+        "path": "docs/WORKLOAD_CONTROLLER.md",
+        "bytes": 19069,
+        "sha256": "51cb658f3ea62968647f02ce5611e1bc54a1c203e9f4f7f5cfea6c98f5e0b118"
+      },
+      {
+        "path": "docs/STREAMING.md",
+        "bytes": 18179,
+        "sha256": "494b8d1b4a7405ca344774aed1e51b0e94709cc8cbfef55e4c9b0f9b0a48cc3c"
+      },
+      {
+        "path": "docs/EXECUTOR_CONTRACT.md",
+        "bytes": 7828,
+        "sha256": "7bfeb0c32fc72482ded158a4feb2377503979d9b9804d7a04fbba9e051f2fbad"
+      },
+      {
+        "path": "docs/LADDER_OPS.md",
+        "bytes": 9824,
+        "sha256": "a222ed17b8d6ece13b5ef5db5f6fd8364ca06b531113d64ec86b272126f67072"
+      },
+      {
+        "path": "docs/FLEET_ADMISSION.md",
+        "bytes": 9426,
+        "sha256": "3ea7e39fdb195086c82350ca0fc22f19ef7d8c1be11003b87e5187f7e564138b"
+      },
+      {
+        "path": "docs/DOOM_TWO_NODE.md",
+        "bytes": 10274,
+        "sha256": "e6e7ca01460fa91818527bb60fda784736bf9de752305669a06d76f08fdcd710"
+      }
+    ],
+    "train_bytes": 99441,
+    "val_bytes": 11050,
+    "steps": 2500,
+    "batch": 64,
+    "lr": 0.002,
+    "seed": 0,
+    "device": "cpu",
+    "threads": 8,
+    "train_bits_per_byte": 3.220662004467731,
+    "val_bits_per_byte": 3.3599180766978556,
+    "uniform_bits_per_byte": 8.0,
+    "prompt_source": "val",
+    "prompt_hex": "726974792e2047505520706172746974",
+    "continuation_hex": "696f6e696e67206f",
+    "greedy_hex": "2074686520746865",
+    "torch_version": "2.14.1+cu130"
+  },
+  "tensors": {
+    "embedding": {
+      "dtype": "F32",
+      "shape": [
+        256,
+        64
+      ],
+      "sha256": "19808f960065f48ed322bd262b15beb0035a25ed6cfe12d62cdaab6b8125c267",
+      "path": "tensors/embedding.bin"
+    },
+    "position_embedding": {
+      "dtype": "F32",
+      "shape": [
+        16,
+        64
+      ],
+      "sha256": "fafbc389174caa7477aa6b8805e6695478eef6199be5ba1f9c08e8b49533d592",
+      "path": "tensors/position_embedding.bin"
+    },
+    "final_norm": {
+      "dtype": "F32",
+      "shape": [
+        64
+      ],
+      "sha256": "3c7035834090582efbf6a789d67112f33046b2b7ec6fd9a6ac1cd17bd73ff0b9",
+      "path": "tensors/final_norm.bin"
+    },
+    "head": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        256
+      ],
+      "sha256": "bba7402877acc96e5328de66d992587603b131b9b5596db7843167cc322e2df1",
+      "path": "tensors/head.bin"
+    },
+    "block0.WQ": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "fe070c4577a4f4d77477191f6735e89ec300255d4c8ac2d753a0db0a0a9879ab",
+      "path": "tensors/block0.WQ.bin"
+    },
+    "block0.WK": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "1a15b96159300e81b4840eddabb4ec7e5a2c7799ed822f7b3311857b5c071c62",
+      "path": "tensors/block0.WK.bin"
+    },
+    "block0.WV": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "10435fe7923f57af36575a5158fffcf56f7057da1907c44efa0d3ce257a5f1bd",
+      "path": "tensors/block0.WV.bin"
+    },
+    "block0.WO": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "3854bd191176c872551446aebb459c2ec531d8283fce14434f065b26108e4280",
+      "path": "tensors/block0.WO.bin"
+    },
+    "block0.W1": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        128
+      ],
+      "sha256": "db2cda4439dd2b253bd78120cd5a234e320740fd312b5500e3083a1fc84af438",
+      "path": "tensors/block0.W1.bin"
+    },
+    "block0.WUP": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        128
+      ],
+      "sha256": "60062f372bbdecd56197b4e7bea6079f3e38bf62084b2ebd1a29f11b0020f39e",
+      "path": "tensors/block0.WUP.bin"
+    },
+    "block0.W2": {
+      "dtype": "F32",
+      "shape": [
+        128,
+        64
+      ],
+      "sha256": "906c3972a938bea4e41140e451ae8d69c7c8461146557dd3f8a67af776404da0",
+      "path": "tensors/block0.W2.bin"
+    },
+    "block0.R1": {
+      "dtype": "F32",
+      "shape": [
+        64
+      ],
+      "sha256": "c900d9c603737e22e3eb17cda5de66dbfc90f657c8342ede3f689991b76d1165",
+      "path": "tensors/block0.R1.bin"
+    },
+    "block0.R2": {
+      "dtype": "F32",
+      "shape": [
+        64
+      ],
+      "sha256": "4c7e46627ef3babc106bc2c71c20ed28ad913f1059df7f936c61dc3e82106541",
+      "path": "tensors/block0.R2.bin"
+    },
+    "block1.WQ": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "5d6b700baa56654a06fdcc8b1e529007476a8a5132ab02059df51dbe2587874a",
+      "path": "tensors/block1.WQ.bin"
+    },
+    "block1.WK": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "725693e2df6aa7a6f95717c240d3bb4b78f0a8594b7b52df530d202a088948db",
+      "path": "tensors/block1.WK.bin"
+    },
+    "block1.WV": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "d2c59a88be2091e4f420ebea1a700fe28892de57cda6e92f2ca37a64a7f6ab59",
+      "path": "tensors/block1.WV.bin"
+    },
+    "block1.WO": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        64
+      ],
+      "sha256": "bf7519f1edda68473d329dc3b02abdbbfdca12e6c100a69431799e2c51ffb613",
+      "path": "tensors/block1.WO.bin"
+    },
+    "block1.W1": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        128
+      ],
+      "sha256": "f3ba5970431edc21669e54f64adebca9b4615fdac1ccfc6ee31d12f3888dab9c",
+      "path": "tensors/block1.W1.bin"
+    },
+    "block1.WUP": {
+      "dtype": "F32",
+      "shape": [
+        64,
+        128
+      ],
+      "sha256": "d36cf09517e6339b88305f59181e55b0918ef0660e1480235008327ff4686aac",
+      "path": "tensors/block1.WUP.bin"
+    },
+    "block1.W2": {
+      "dtype": "F32",
+      "shape": [
+        128,
+        64
+      ],
+      "sha256": "c6de5dea1d28ef049d0ae141e44042422d3d6bb616faed01c6bdbf6fa41cf4ae",
+      "path": "tensors/block1.W2.bin"
+    },
+    "block1.R1": {
+      "dtype": "F32",
+      "shape": [
+        64
+      ],
+      "sha256": "af04f806314ed915f5b743264440799c4fde8f38ad5227e0efb767f099b36c11",
+      "path": "tensors/block1.R1.bin"
+    },
+    "block1.R2": {
+      "dtype": "F32",
+      "shape": [
+        64
+      ],
+      "sha256": "cc8a92363dd105869304194d23e2541dd0b4c863b8b9e4aa4a892001b3cdc255",
+      "path": "tensors/block1.R2.bin"
+    }
+  }
+}
