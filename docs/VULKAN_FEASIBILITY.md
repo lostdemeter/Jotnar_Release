@@ -142,11 +142,11 @@ widths.
 
 ```text
 T   (frozen): MUL SQUARE ADD SUB MATMUL TRANSPOSE SLICE TSHIFT TBETA
-              SILU SOFTMAX_WIDE RMSNORM ROTARY
+              SILU GELU SOFTMAX SOFTMAX_WIDE RMSNORM ROTARY CONCAT
 T2  (CONFIG t2 M): MUL SQUARE ADD SUB MATMUL
-I:  IADD ISUB IMUL IMATMUL IGET
+I:  IADD ISUB IMUL IMATMUL IGET CONCAT
 T2I (T -> I)
-F:  MATMUL SLICE
+F:  MATMUL SLICE CONCAT
 ```
 
 `TRANSPOSE`, `SLICE` and `IGET` share one mechanism: a baked index table plus
@@ -221,20 +221,32 @@ init=9.6  buffers=12.7  load=7.1  pipelines=0.2  dispatch=3.4  store=4.0 ms
   ~4.8 MB of generated C and ~1.1 s of build time. Same order as the T2 C
   emitter, so tables stay as inline literals rather than a sidecar artifact.
 
-- **Emitter divergence found by the gate:** non-FPU `SOFTMAX_WIDE` gives
-  `e[4] = 27070` where the interpreter gives `27071` on the gate case.
-  Vulkan matches the interpreter on every plane. `parity_vulkan.py` supports
-  an `interp` reference for cases like this; the oracle wins over an emitter.
+- **Emitter divergence found by the gate, and fixed.** non-FPU
+  `SOFTMAX_WIDE` computed `s14` for negative `q` with a floor-style idiom
+  instead of `tdiv` (truncation toward zero), shifting whole rows by a rung.
+  It scored 77/91 planes on the Qwen block and failed from `qwen_pr` onward.
+  Fixed; non-FPU is now 91/91 as well.
 
-- T2 vs frozen T, same listing and size, resident:
+- Host setup, after the arena and direct-I/O changes (Qwen block, one-shot):
 
-  | format | planes | time |
+  | phase | before | after |
   |---|---|---|
-  | frozen T | 3 | 8.70 ms/frame |
-  | T2 | 4 | **10.80 ms/frame** (1.24x) |
+  | init | 11.7 ms | 10.2 ms |
+  | buffers | 11.0 ms | **4.9 ms** |
+  | load | 1.8 ms | 1.4 ms |
+  | dispatch | 3.5 ms | 3.5 ms |
+  | store | 0.95 ms | 0.61 ms |
 
-  T2 is cheap on the GPU because the frame is I/O-bound at this size; the
-  ~2.5x CPU ratio in `T2_PHI_FLOAT.md` does not carry over.
+- Resident throughput, same listing and size:
+
+  | format | planes | before | after |
+  |---|---|---|---|
+  | frozen T | 3 | 8.70 ms/frame | **5.99 ms/frame** |
+  | T2 | 4 | 10.80 ms/frame | **7.43 ms/frame** (1.24x) |
+
+  So in steady state the ladder is ~3.2x the non-FPU one-shot run (19.4 ms).
+  The Qwen block one-shot is 22 ms, but that is startup: `init` is ~10 ms per
+  process and needs a resident multi-stream mode to amortize.
 - The first measurement had `store=125 ms`: reading results out of
   write-combined coherent memory cost more than everything else combined.
   `HOST_CACHED|HOST_COHERENT` fixed it.
@@ -250,8 +262,8 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 - No reductions, norms, softmax, rotary, or image ops.
 - T2 covers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL` only; no T2 `TRANSPOSE`,
   `SLICE`, `TSHIFT`, `TBETA` or `T2I`.
-- No `GELU`, plain `SOFTMAX` or `CONCAT` yet (the Qwen block does not use
-  them; `SOFTMAX_WIDE` is the ladder softmax).
+- Broadcasting, batched matmul, `IREDUCE_SUM` and the image ops are still
+  missing.
 - No bounds-fault channel yet: over-range accumulators saturate instead of
   failing the run. The reference raises an error.
 - Host I/O is scalar conversion plus a copy; a real embedding would write
@@ -259,14 +271,12 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. The non-FPU `SOFTMAX_WIDE` divergence, which is a bug in that emitter
-   rather than in Vulkan (the interpreter is the oracle).
-2. `GELU`, plain `SOFTMAX` and `CONCAT` only if something beyond the Qwen
-   block needs them.
-3. Performance: the current ladder path is correctness-first (one dispatch
-   per op, barrier between, host-visible buffers). The resident loop is
-   already 2.4x the CPU reference; batching and device-local staging are the
-   next levers.
+1. A resident mode for multi-stream graphs, so setup is paid once for
+   blocks like Qwen rather than per run.
+2. Device-local buffers with staging, and dispatch fusion for elementwise
+   chains — the remaining correctness-first costs.
+3. T2 coverage for the ops that still refuse: `TRANSPOSE`, `SLICE`, `TSHIFT`,
+   `TBETA`, `SILU`, `T2I`.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
 4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
