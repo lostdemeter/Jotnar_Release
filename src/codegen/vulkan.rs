@@ -1,17 +1,17 @@
 //! Vulkan compute backend (correctness-first).
 //!
-//! Numeric model, forced by the hardware this targets (Adreno 750 / Turnip):
-//!   - F streams are **f32**: `shaderFloat64` is false, so there is no f64
-//!     path and no silent promotion.
-//!   - I streams are **i64**: `shaderInt64` is true, so integer work stays
-//!     exact instead of being silently narrowed to 32 bits.
-//!   - T streams are refused (decode/quantize first), same as CUDA.
+//! Primary numeric path is the **φ-ladder (T)**: the same integer arithmetic
+//! the non-FPU target emits, so results can be gated bit-identically instead
+//! of by float tolerance. Streams are multi-plane:
 //!
-//! Shape of the emitted program: one compute dispatch per instruction, a
-//! global memory barrier between dispatches, one command buffer, one submit,
-//! one wait. Buffers are host-visible/coherent, so there are no staging
-//! copies. This is a correctness backend; scheduling and memory placement are
-//! later milestones.
+//!   T   -> 3 planes (s, e, z); T2 adds m (not yet)
+//!   I   -> 1 plane  (i64)
+//!   F   -> 1 plane  (f32; Adreno has no shaderFloat64)
+//!
+//! Ladder values are `s * φ^((e - 32768)/512)`. MUL is the φ-spoof identity:
+//! sign multiply, rung add with bias, zero OR — no float hardware involved.
+//! ADD/SUB need the fixed-point bridge and its baked tables; they are the
+//! next milestone and refuse loudly until then.
 //!
 //! `glslc` is required at emit time: the emitted C embeds the resulting
 //! SPIR-V, so the runtime needs only libvulkan.
@@ -26,6 +26,64 @@ use super::infer::{infer_shapes, CKind, StreamInfo};
 use super::{sanitize_cnames, Artifact, CompileOptions};
 
 const LOCAL_SIZE: u32 = 64;
+
+/// Ladder constants, mirrored from phi_core::lattice.
+const BIAS: i64 = 32768;
+const NLVL: i64 = 65536;
+const FRAC_CAP: i64 = 13312;
+const FIXED_F: i64 = 18;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Comp {
+    V,
+    S,
+    E,
+    Z,
+}
+
+/// How a plane is laid out on the host side. GPU-side every plane is 32-bit
+/// except I64, which keeps shaders free of int8/int16 features.
+#[derive(Clone, Copy, PartialEq)]
+enum Elem {
+    I8,
+    U8,
+    I32,
+    I64,
+    F32,
+}
+
+fn gpu_width(e: Elem) -> usize {
+    match e {
+        Elem::I64 => 8,
+        _ => 4,
+    }
+}
+
+fn file_width(e: Elem) -> usize {
+    match e {
+        Elem::I8 | Elem::U8 => 1,
+        Elem::I32 | Elem::F32 => 4,
+        Elem::I64 => 8,
+    }
+}
+
+fn comps_for(kind: CKind) -> &'static [Comp] {
+    match kind {
+        CKind::T => &[Comp::S, Comp::E, Comp::Z],
+        _ => &[Comp::V],
+    }
+}
+
+fn elem_for(kind: CKind, c: Comp) -> Elem {
+    match (kind, c) {
+        (CKind::T, Comp::S) => Elem::I8,
+        (CKind::T, Comp::E) => Elem::I32,
+        (CKind::T, Comp::Z) => Elem::U8,
+        (CKind::I, _) => Elem::I64,
+        (CKind::F, _) => Elem::F32,
+        _ => Elem::F32,
+    }
+}
 
 enum Operand {
     Stream(usize),
@@ -42,6 +100,81 @@ struct Dispatch {
 
 type Lowered = (String, Vec<usize>, [u32; 4], [u32; 3], [u32; 3]);
 
+/// Ladder tables are appended to the buffer table after the stream planes,
+/// so a dispatch can bind them like any other storage buffer.
+struct Tables {
+    n_plane: usize,
+    names: Vec<&'static str>,
+    data: Vec<Vec<i64>>,
+}
+
+impl Tables {
+    fn new(n_plane: usize) -> Self {
+        Tables { n_plane, names: Vec::new(), data: Vec::new() }
+    }
+
+    fn get(&mut self, name: &'static str, make: impl FnOnce() -> Vec<i64>) -> usize {
+        if let Some(i) = self.names.iter().position(|n| *n == name) {
+            return self.n_plane + i;
+        }
+        let d = make();
+        self.names.push(name);
+        self.data.push(d);
+        self.n_plane + self.data.len() - 1
+    }
+}
+
+struct Ctx<'a> {
+    streams: &'a HashMap<String, StreamInfo>,
+    index: &'a HashMap<String, usize>,
+    plane: &'a HashMap<(usize, Comp), usize>,
+    /// Declared fixed-point scales: the scale is part of the contract.
+    m_acc: i64,
+    m_cov: i64,
+}
+
+impl<'a> Ctx<'a> {
+    fn ordinal(&self, name: &str) -> Result<usize> {
+        self.index
+            .get(name)
+            .copied()
+            .ok_or_else(|| Error::asm(format!("Vulkan: '{name}' is not a stream")))
+    }
+
+    fn plane_of(&self, ord: usize, c: Comp) -> Result<usize> {
+        self.plane
+            .get(&(ord, c))
+            .copied()
+            .ok_or_else(|| Error::asm("Vulkan: missing plane".to_string()))
+    }
+
+    fn info(&self, ord: usize) -> Result<&StreamInfo> {
+        let name = self
+            .index
+            .iter()
+            .find(|(_, v)| **v == ord)
+            .map(|(k, _)| k.as_str())
+            .ok_or_else(|| Error::asm("Vulkan: stream not in table".to_string()))?;
+        self.streams
+            .get(name)
+            .ok_or_else(|| Error::asm(format!("Vulkan: unknown stream '{name}'")))
+    }
+
+    fn elems(&self, ord: usize) -> Result<usize> {
+        self.info(ord)?.elems().ok_or_else(|| {
+            Error::unimplemented("Vulkan: dynamic shape (static geometry required)".to_string())
+        })
+    }
+
+    fn name(&self, ord: usize) -> String {
+        self.index
+            .iter()
+            .find(|(_, v)| **v == ord)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default()
+    }
+}
+
 pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Result<Artifact> {
     if opts.outputs.is_empty() {
         return Err(Error::asm(
@@ -56,13 +189,6 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
     sanitize_cnames(&mut bound, &mut outputs, &mut sample)?;
 
     let streams = infer_shapes(&bound, &sample)?;
-    for (name, s) in &streams {
-        if s.kind == CKind::T {
-            return Err(Error::unimplemented(format!(
-                "Vulkan: T stream {name:?} is not supported (decode/quantize first)"
-            )));
-        }
-    }
     for o in &outputs {
         if !streams.contains_key(o) {
             return Err(Error::asm(format!("Vulkan: output '{o}' is not a stream")));
@@ -70,38 +196,64 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
     }
     let in_names: Vec<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
 
-    // Buffer table: inputs first, then every instruction result in order.
+    // Streams (ordinals), then planes (GPU buffers).
     let mut order: Vec<String> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    let add = |name: &str, order: &mut Vec<String>, index: &mut HashMap<String, usize>| {
-        if !index.contains_key(name) {
-            index.insert(name.to_string(), order.len());
-            order.push(name.to_string());
+    {
+        let mut add = |name: &str, order: &mut Vec<String>, index: &mut HashMap<String, usize>| {
+            if !index.contains_key(name) {
+                index.insert(name.to_string(), order.len());
+                order.push(name.to_string());
+            }
+        };
+        for n in &in_names {
+            add(n, &mut order, &mut index);
         }
+        for ins in &bound.instrs {
+            if ins.mn.starts_with("__") {
+                return Err(Error::unimplemented(format!(
+                    "Vulkan: control pseudo-op {} not supported yet",
+                    ins.mn
+                )));
+            }
+            for o in &ins.outs {
+                add(o, &mut order, &mut index);
+            }
+        }
+    }
+
+    let mut planes: Vec<(usize, Comp)> = Vec::new();
+    let mut plane: HashMap<(usize, Comp), usize> = HashMap::new();
+    for (ord, name) in order.iter().enumerate() {
+        let kind = streams[name].kind;
+        for &c in comps_for(kind) {
+            plane.insert((ord, c), planes.len());
+            planes.push((ord, c));
+        }
+    }
+
+    let ctx = Ctx {
+        streams: &streams,
+        index: &index,
+        plane: &plane,
+        m_acc: bound.config.get_i64("m_acc").unwrap_or(31344),
+        m_cov: bound.config.get_i64("m_cov").unwrap_or(33280),
     };
-    for n in &in_names {
-        add(n, &mut order, &mut index);
-    }
-    for ins in &bound.instrs {
-        if ins.mn.starts_with("__") {
-            return Err(Error::unimplemented(format!(
-                "Vulkan: control pseudo-op {} not supported yet",
-                ins.mn
-            )));
-        }
-        for o in &ins.outs {
-            add(o, &mut order, &mut index);
-        }
-    }
 
     let mut dispatches: Vec<Dispatch> = Vec::new();
     let mut shader_srcs: Vec<String> = Vec::new();
     let mut shader_ids: HashMap<String, usize> = HashMap::new();
+    let mut tabs = Tables::new(planes.len());
 
     for ins in &bound.instrs {
-        let (glsl, buffers, params, groups, local) =
-            lower(ins, &streams, &index)?;
-
+        let (glsl, buffers, params, groups, local) = lower(ins, &ctx, &mut tabs)?;
+        if buffers.len() > 16 {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} needs {} bindings (max 16)",
+                ins.mn,
+                buffers.len()
+            )));
+        }
         let sid = match shader_ids.get(&glsl) {
             Some(&id) => id,
             None => {
@@ -126,8 +278,17 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         .map(|(i, src)| glslc(src, i))
         .collect::<Result<_>>()?;
 
-    let source = emit_c(&order, &streams, &dispatches, &spirv, &in_names, &outputs)?;
-    let n_argv = in_names.len() + outputs.len();
+    let source = emit_c(&order, &planes, &ctx, &tabs, &dispatches, &spirv, &in_names, &outputs)?;
+
+    // argv = one file per plane, inputs then outputs
+    let n_argv = in_names
+        .iter()
+        .map(|n| comps_for(streams[n].kind).len())
+        .sum::<usize>()
+        + outputs
+            .iter()
+            .map(|n| comps_for(streams[n].kind).len())
+            .sum::<usize>();
 
     Ok(Artifact {
         source,
@@ -142,18 +303,353 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
     })
 }
 
-fn elems(s: &StreamInfo, name: &str) -> Result<usize> {
-    s.elems()
-        .ok_or_else(|| Error::unimplemented(format!("Vulkan: dynamic shape in {name}")))
+fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
+    let out = ins
+        .outs
+        .first()
+        .ok_or_else(|| Error::asm(format!("Vulkan: {} has no output", ins.mn)))?;
+    let out_ord = ctx.ordinal(out)?;
+    let out_n = ctx.elems(out_ord)?;
+    let out_kind = ctx.info(out_ord)?.kind;
+
+    match (ins.mn.as_str(), out_kind) {
+        // φ-ladder: MUL is the spoof identity, pure integer.
+        ("MUL", CKind::T) => tmul(ins, ctx, out_ord, out_n, false),
+        ("SQUARE", CKind::T) => tmul(ins, ctx, out_ord, out_n, true),
+        ("ADD", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, false),
+        ("SUB", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, true),
+
+        // exact integer arithmetic
+        ("IADD", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "+"),
+        ("ISUB", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "-"),
+        ("IMUL", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "*"),
+        ("IMATMUL", CKind::I) => matmul(ins, ctx, CKind::I),
+
+        // float path (F streams only; not the ladder)
+        ("MATMUL", CKind::F) => matmul(ins, ctx, CKind::F),
+
+        // Ladder ops that need the fixed-point bridge / baked tables.
+        ("DIV", CKind::T)
+        | ("MATMUL", CKind::T) | ("RMSNORM", CKind::T) | ("SOFTMAX", CKind::T)
+        | ("SOFTMAX_WIDE", CKind::T) | ("SILU", CKind::T) | ("GELU", CKind::T)
+        | ("ROTARY", CKind::T) | ("TSHIFT", CKind::T) | ("TBETA", CKind::T)
+        | ("TRANSPOSE", CKind::T) | ("SLICE", CKind::T) | ("CONCAT", CKind::T)
+        | ("T2I", CKind::I) | ("IGET", CKind::I) | ("IREDUCE_SUM", CKind::I) => {
+            Err(Error::unimplemented(format!(
+                "Vulkan backend: {} on {out_kind:?} needs the ladder bridge/tables (next milestone)",
+                ins.mn
+            )))
+        }
+
+        (other, kind) => Err(Error::unimplemented(format!(
+            "Vulkan backend: no lowering for {other} on {kind:?} yet"
+        ))),
+    }
 }
 
-fn operand(
-    arg: &str,
-    streams: &HashMap<String, StreamInfo>,
-    index: &HashMap<String, usize>,
-) -> Result<Operand> {
-    if let Some(&i) = index.get(arg) {
-        if streams.contains_key(arg) {
+/// T = A*B: s multiplies, rung adds with bias, zero propagates.
+fn tmul(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    out_ord: usize,
+    out_n: usize,
+    square: bool,
+) -> Result<Lowered> {
+    let (a_ord, b_ord) = if square {
+        if ins.args.len() != 1 {
+            return Err(Error::asm("Vulkan: SQUARE expects 1 operand"));
+        }
+        let a = ctx.ordinal(&ins.args[0])?;
+        (a, a)
+    } else {
+        if ins.args.len() != 2 {
+            return Err(Error::asm("Vulkan: MUL expects 2 operands"));
+        }
+        (ctx.ordinal(&ins.args[0])?, ctx.ordinal(&ins.args[1])?)
+    };
+    for ord in [a_ord, b_ord] {
+        let k = ctx.info(ord)?.kind;
+        if k != CKind::T {
+            return Err(Error::asm(format!(
+                "Vulkan: MUL mixes ladder with {k:?} at {}",
+                ctx.name(ord)
+            )));
+        }
+        if ctx.elems(ord)? != out_n {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: MUL shape mismatch at {} (broadcasting not implemented)",
+                ctx.name(ord)
+            )));
+        }
+    }
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(a_ord, Comp::S)?,
+        ctx.plane_of(a_ord, Comp::E)?,
+        ctx.plane_of(a_ord, Comp::Z)?,
+    );
+    let (b_s, b_e, b_z) = (
+        ctx.plane_of(b_ord, Comp::S)?,
+        ctx.plane_of(b_ord, Comp::E)?,
+        ctx.plane_of(b_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+
+    // Bindings are positional; identical operands (SQUARE) still bind twice,
+    // which is legal and keeps the shader uniform.
+    let bufs = vec![a_s, a_e, a_z, b_s, b_e, b_z, o_s, o_e, o_z];
+    let src = format!(
+        r#"#version 450
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int s[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int e[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint z[]; }};
+layout(std430, binding = 3) readonly buffer BS {{ int s2[]; }};
+layout(std430, binding = 4) readonly buffer BE {{ int e2[]; }};
+layout(std430, binding = 5) readonly buffer BZ {{ uint z2[]; }};
+layout(std430, binding = 6) buffer OS {{ int os[]; }};
+layout(std430, binding = 7) buffer OE {{ int oe[]; }};
+layout(std430, binding = 8) buffer OZ {{ uint oz[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+void main() {{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  os[i] = s[i] * s2[i];
+  int e = e[i] + e2[i] - {BIAS};
+  oe[i] = clamp(e, 0, {NLVL} - 1);
+  oz[i] = z[i] | z2[i];
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// T = A ± B through the fixed-point bridge: align to the larger rung,
+/// convert both to integers at that rung, add, convert back.
+fn tadd(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+    out_n: usize,
+    sub: bool,
+) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let a = match operand(&ins.args[0], ctx)? {
+        Operand::Stream(i) => i,
+        Operand::Lit(_) => {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} with a literal ladder operand is not implemented",
+                ins.mn
+            )))
+        }
+    };
+    let b = match operand(&ins.args[1], ctx)? {
+        Operand::Stream(i) => i,
+        Operand::Lit(_) => {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} with a literal ladder operand is not implemented",
+                ins.mn
+            )))
+        }
+    };
+    for ord in [a, b] {
+        if ctx.info(ord)?.kind != CKind::T {
+            return Err(Error::asm(format!(
+                "Vulkan: {} mixes ladder with another kind at {}",
+                ins.mn,
+                ctx.name(ord)
+            )));
+        }
+        if ctx.elems(ord)? != out_n {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} shape mismatch at {}; broadcasting not implemented",
+                ins.mn,
+                ctx.name(ord)
+            )));
+        }
+    }
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(a, Comp::S)?,
+        ctx.plane_of(a, Comp::E)?,
+        ctx.plane_of(a, Comp::Z)?,
+    );
+    let (b_s, b_e, b_z) = (
+        ctx.plane_of(b, Comp::S)?,
+        ctx.plane_of(b, Comp::E)?,
+        ctx.plane_of(b, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+
+    let op = if sub { "-" } else { "+" };
+    let bufs = vec![a_s, a_e, a_z, b_s, b_e, b_z, o_s, o_e, o_z, frac, coarse, fine];
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) readonly buffer BS {{ int bs[]; }};
+layout(std430, binding = 4) readonly buffer BE {{ int be[]; }};
+layout(std430, binding = 5) readonly buffer BZ {{ uint bz[]; }};
+layout(std430, binding = 6) buffer OS {{ int os_[]; }};
+layout(std430, binding = 7) buffer OE {{ int oe[]; }};
+layout(std430, binding = 8) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 9) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 10) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 11) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+
+const int FRAC_CAP = {FRAC_CAP};
+const int FIXED_F = {FIXED_F};
+const int BIAS = {BIAS};
+const int NLVL = {NLVL};
+
+int64_t to_fixed(int sgn, int ev, uint z, int64_t m0)
+{{
+  if (z != 0u) return 0;
+  int64_t d = m0 - int64_t(ev);
+  if (d < 0) return int64_t(sgn) * frac[0];
+  if (d > int64_t(FRAC_CAP)) return 0;
+  return int64_t(sgn) * frac[int(d)];
+}}
+
+int bitlen64(uint64_t a)
+{{
+  int bl = 0;
+  while (a > 0ul) {{ bl += 1; a >>= 1; }}
+  return bl;
+}}
+
+void main()
+{{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+
+  /* The frozen T bridge uses the declared m_cov scale, not the max rung. */
+  int64_t m0 = int64_t(pc.p0);
+
+  int64_t qa = to_fixed(as_[i], ae[i], az[i], m0);
+  int64_t qb = to_fixed(bs[i], be[i], bz[i], m0);
+  int64_t q = qa {op} qb;
+
+  int sgn = q > 0 ? 1 : -1;
+  uint64_t uq = q < 0 ? (~uint64_t(q)) + 1ul : uint64_t(q);
+
+  /* reference asserts |q| < 2^53; we saturate instead of trapping */
+  if (uq >= (1ul << 53)) uq = (1ul << 53) - 1ul;
+
+  int bl = bitlen64(uq);
+  int shift = bl - 15;
+  uint64_t mant = shift >= 0 ? (uq >> uint(shift)) : (uq << uint(-shift));
+  int t = shift + 14 - FIXED_F;
+  int idx = t + 64;
+  idx = idx < 0 ? 0 : (idx > 192 ? 192 : idx);
+  int fi = int(mant) - 16384;
+  fi = fi < 0 ? 0 : (fi > 16383 ? 16383 : fi);
+
+  int64_t ev = m0 + coarse[idx] + fine[fi];
+  ev = ev < 0 ? 0 : (ev > int64_t(NLVL - 1) ? int64_t(NLVL - 1) : ev);
+
+  os_[i] = sgn;
+  oe[i] = int(ev);
+  oz[i] = (q == 0) ? 1u : 0u;
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, ctx.m_cov as u32, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+fn int_bin(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    out_ord: usize,
+    out_n: usize,
+    op: &str,
+) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let a = match operand(&ins.args[0], ctx)? {
+        Operand::Stream(i) => i,
+        Operand::Lit(_) => {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} with a literal integer operand is not implemented",
+                ins.mn
+            )))
+        }
+    };
+    let b = match operand(&ins.args[1], ctx)? {
+        Operand::Stream(i) => i,
+        Operand::Lit(_) => {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} with a literal integer operand is not implemented",
+                ins.mn
+            )))
+        }
+    };
+    for ord in [a, b] {
+        if ctx.info(ord)?.kind != CKind::I {
+            return Err(Error::asm(format!(
+                "Vulkan: {} mixes kinds at {}",
+                ins.mn,
+                ctx.name(ord)
+            )));
+        }
+        if ctx.elems(ord)? != out_n {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: {} shape mismatch at {}; broadcasting not implemented",
+                ins.mn,
+                ctx.name(ord)
+            )));
+        }
+    }
+    let a_p = ctx.plane_of(a, Comp::V)?;
+    let b_p = ctx.plane_of(b, Comp::V)?;
+    let o_p = ctx.plane_of(out_ord, Comp::V)?;
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer A {{ int64_t a[]; }};
+layout(std430, binding = 1) readonly buffer B {{ int64_t b[]; }};
+layout(std430, binding = 2) buffer O {{ int64_t c[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+void main() {{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  c[i] = a[i] {op} b[i];
+}}
+"#
+    );
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, vec![a_p, b_p, o_p], [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+fn operand(arg: &str, ctx: &Ctx) -> Result<Operand> {
+    if let Some(&i) = ctx.index.get(arg) {
+        if ctx.streams.contains_key(arg) {
             return Ok(Operand::Stream(i));
         }
     }
@@ -165,206 +661,29 @@ fn operand(
     Ok(Operand::Lit(v))
 }
 
-fn stream_name(index: &HashMap<String, usize>, i: usize) -> Option<String> {
-    index.iter().find(|(_, v)| **v == i).map(|(k, _)| k.clone())
-}
-
-fn lower(ins: &BoundInstr, streams: &HashMap<String, StreamInfo>, index: &HashMap<String, usize>) -> Result<Lowered> {
+fn matmul(ins: &BoundInstr, ctx: &Ctx, kind: CKind) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let a_ord = ctx.ordinal(&ins.args[0])?;
+    let b_ord = ctx.ordinal(&ins.args[1])?;
     let out = ins
         .outs
         .first()
         .ok_or_else(|| Error::asm(format!("Vulkan: {} has no output", ins.mn)))?;
-    let out_idx = index[out];
-    let out_n = elems(&streams[out], out)?;
+    let out_ord = ctx.ordinal(out)?;
 
-    match ins.mn.as_str() {
-        "ADD" => binary(ins, streams, index, out_idx, out_n, CKind::F, "+"),
-        "SUB" => binary(ins, streams, index, out_idx, out_n, CKind::F, "-"),
-        "MUL" => binary(ins, streams, index, out_idx, out_n, CKind::F, "*"),
-        "DIV" => binary(ins, streams, index, out_idx, out_n, CKind::F, "/"),
-        "IADD" => binary(ins, streams, index, out_idx, out_n, CKind::I, "+"),
-        "ISUB" => binary(ins, streams, index, out_idx, out_n, CKind::I, "-"),
-        "IMUL" => binary(ins, streams, index, out_idx, out_n, CKind::I, "*"),
-        "RELU" => unary(ins, streams, index, out_idx, out_n, "max(a[i], 0.0)"),
-        "SIGMOID" => unary(
-            ins,
-            streams,
-            index,
-            out_idx,
-            out_n,
-            "1.0 / (1.0 + exp(-a[i]))",
-        ),
-        "SQRT" => unary(ins, streams, index, out_idx, out_n, "sqrt(a[i])"),
-        "SQUARE" => unary(ins, streams, index, out_idx, out_n, "a[i] * a[i]"),
-        "MATMUL" => matmul(ins, streams, index, CKind::F),
-        "IMATMUL" => matmul(ins, streams, index, CKind::I),
-        other => Err(Error::unimplemented(format!(
-            "Vulkan backend: no lowering for {other} yet"
-        ))),
-    }
-}
-
-fn check_operand(
-    arg: &str,
-    o: &Operand,
-    ins: &BoundInstr,
-    streams: &HashMap<String, StreamInfo>,
-    index: &HashMap<String, usize>,
-    out_n: usize,
-    kind: CKind,
-) -> Result<()> {
-    if let Operand::Stream(i) = o {
-        if let Some(name) = stream_name(index, *i) {
-            let s = &streams[&name];
-            let n = elems(s, &name)?;
-            if n != out_n {
-                return Err(Error::unimplemented(format!(
-                    "Vulkan: {} with mismatched element counts ({name}={n}, out={out_n}); \
-                     broadcasting is not implemented yet",
-                    ins.mn
-                )));
-            }
-            if s.kind != kind {
-                return Err(Error::asm(format!(
-                    "Vulkan: {} mixes stream kinds at {name}",
-                    ins.mn
-                )));
-            }
-        }
-    }
-    let _ = arg;
-    Ok(())
-}
-
-fn ty_of(kind: CKind) -> &'static str {
-    if kind == CKind::I {
-        "int64_t"
-    } else {
-        "float"
-    }
-}
-
-fn ext_of(kind: CKind) -> &'static str {
-    if kind == CKind::I {
-        "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n"
-    } else {
-        ""
-    }
-}
-
-fn literal(v: f64, kind: CKind) -> String {
-    if kind == CKind::I {
-        format!("int64_t({}L)", v as i64)
-    } else {
-        format!("{v:?}")
-    }
-}
-
-fn binary(
-    ins: &BoundInstr,
-    streams: &HashMap<String, StreamInfo>,
-    index: &HashMap<String, usize>,
-    out_idx: usize,
-    out_n: usize,
-    kind: CKind,
-    op: &str,
-) -> Result<Lowered> {
-    if ins.args.len() != 2 {
-        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
-    }
-    let a = operand(&ins.args[0], streams, index)?;
-    let b = operand(&ins.args[1], streams, index)?;
-    check_operand(&ins.args[0], &a, ins, streams, index, out_n, kind)?;
-    check_operand(&ins.args[1], &b, ins, streams, index, out_n, kind)?;
-
-    let ty = ty_of(kind);
-    let mut decl = String::new();
-    let mut bufs = Vec::new();
-    let mut next = 0usize;
-
-    match &a {
-        Operand::Stream(i) => {
-            decl.push_str(&format!(
-                "layout(std430, binding = {next}) readonly buffer InA {{ {ty} a[]; }};\n"
-            ));
-            bufs.push(*i);
-            next += 1;
-        }
-        Operand::Lit(_) => {}
-    }
-    match &b {
-        Operand::Stream(i) => {
-            decl.push_str(&format!(
-                "layout(std430, binding = {next}) readonly buffer InB {{ {ty} b[]; }};\n"
-            ));
-            bufs.push(*i);
-            next += 1;
-        }
-        Operand::Lit(_) => {}
-    }
-    decl.push_str(&format!(
-        "layout(std430, binding = {next}) buffer Out {{ {ty} c[]; }};\n"
-    ));
-    bufs.push(out_idx);
-
-    let lhs = match &a {
-        Operand::Stream(_) => "a[i]".to_string(),
-        Operand::Lit(v) => literal(*v, kind),
-    };
-    let rhs = match &b {
-        Operand::Stream(_) => "b[i]".to_string(),
-        Operand::Lit(v) => literal(*v, kind),
-    };
-
-    let src = format!(
-        "#version 450\n{ext}layout(local_size_x = {LOCAL_SIZE}) in;\n{decl}\
-layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
-void main() {{\n  uint i = gl_GlobalInvocationID.x;\n  if (i >= pc.n) return;\n  c[i] = {lhs} {op} {rhs};\n}}\n",
-        ext = ext_of(kind),
-        decl = decl,
-        lhs = lhs,
-        op = op,
-        rhs = rhs,
-    );
-
-    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
-    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
-}
-
-fn matmul(
-    ins: &BoundInstr,
-    streams: &HashMap<String, StreamInfo>,
-    index: &HashMap<String, usize>,
-    kind: CKind,
-) -> Result<Lowered> {
-    if ins.args.len() != 2 {
-        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
-    }
-    let a_name = &ins.args[0];
-    let b_name = &ins.args[1];
-    let a_idx = *index
-        .get(a_name)
-        .ok_or_else(|| Error::asm(format!("Vulkan: {} lhs is not a stream", ins.mn)))?;
-    let b_idx = *index
-        .get(b_name)
-        .ok_or_else(|| Error::asm(format!("Vulkan: {} rhs is not a stream", ins.mn)))?;
-    let out = ins
-        .outs
-        .first()
-        .ok_or_else(|| Error::asm(format!("Vulkan: {} has no output", ins.mn)))?;
-    let out_idx = index[out];
-
-    for n in [a_name, b_name] {
-        let k = streams[n].kind;
-        if k != kind {
+    for ord in [a_ord, b_ord] {
+        if ctx.info(ord)?.kind != kind {
             return Err(Error::asm(format!(
-                "Vulkan: {} operand {n} has the wrong kind",
-                ins.mn
+                "Vulkan: {} operand {} has the wrong kind",
+                ins.mn,
+                ctx.name(ord)
             )));
         }
     }
-    let a_sh = streams[a_name].static_shape(a_name)?;
-    let b_sh = streams[b_name].static_shape(b_name)?;
+    let a_sh = ctx.info(a_ord)?.static_shape(&ctx.name(a_ord))?;
+    let b_sh = ctx.info(b_ord)?.static_shape(&ctx.name(b_ord))?;
     if a_sh.len() != 2 || b_sh.len() != 2 {
         return Err(Error::unimplemented(format!(
             "Vulkan: {} supports rank-2 only (got {:?} x {:?})",
@@ -380,83 +699,43 @@ fn matmul(
     }
     let n = b_sh[1];
 
-    let ty = ty_of(kind);
-    let ext = ext_of(kind);
-    let decl = format!(
-        "layout(std430, binding = 0) readonly buffer A {{ {ty} a[]; }};\n\
-layout(std430, binding = 1) readonly buffer B {{ {ty} b[]; }};\n\
-layout(std430, binding = 2) buffer C {{ {ty} c[]; }};\n"
-    );
+    let (ty, ext) = if kind == CKind::I {
+        ("int64_t", "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n")
+    } else {
+        ("float", "")
+    };
+    let a_p = ctx.plane_of(a_ord, Comp::V)?;
+    let b_p = ctx.plane_of(b_ord, Comp::V)?;
+    let o_p = ctx.plane_of(out_ord, Comp::V)?;
+
     let src = format!(
-        "#version 450\n{ext}layout(local_size_x = 16, local_size_y = 16) in;\n{decl}\
-layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
-void main() {{\n\
-  uint M = pc.n; uint N = pc.p0; uint K = pc.p1;\n\
-  uint r = gl_GlobalInvocationID.y;\n\
-  uint col = gl_GlobalInvocationID.x;\n\
-  if (r >= M || col >= N) return;\n\
-  {ty} acc = {ty}(0);\n\
-  for (uint kk = 0; kk < K; ++kk)\n\
-    acc = acc + a[r * K + kk] * b[kk * N + col];\n\
-  c[r * N + col] = acc;\n\
-}}\n"
+        r#"#version 450
+{ext}layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer A {{ {ty} a[]; }};
+layout(std430, binding = 1) readonly buffer B {{ {ty} b[]; }};
+layout(std430, binding = 2) buffer C {{ {ty} c[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+void main() {{
+  uint M = pc.n; uint N = pc.p0; uint K = pc.p1;
+  uint r = gl_GlobalInvocationID.y;
+  uint col = gl_GlobalInvocationID.x;
+  if (r >= M || col >= N) return;
+  {ty} acc = {ty}(0);
+  for (uint kk = 0; kk < K; ++kk)
+    acc = acc + a[r * K + kk] * b[kk * N + col];
+  c[r * N + col] = acc;
+}}
+"#
     );
 
-    let groups = [
-        div_ceil(n, 16) as u32,
-        div_ceil(m, 16) as u32,
-        1,
-    ];
+    let groups = [div_ceil(n, 16) as u32, div_ceil(m, 16) as u32, 1];
     Ok((
         src,
-        vec![a_idx, b_idx, out_idx],
+        vec![a_p, b_p, o_p],
         [m as u32, n as u32, k as u32, 0],
         groups,
         [16, 16, 1],
     ))
-}
-
-fn unary(
-    ins: &BoundInstr,
-    streams: &HashMap<String, StreamInfo>,
-    index: &HashMap<String, usize>,
-    out_idx: usize,
-    out_n: usize,
-    expr: &str,
-) -> Result<Lowered> {
-    if ins.args.len() != 1 {
-        return Err(Error::asm(format!("Vulkan: {} expects 1 operand", ins.mn)));
-    }
-    let a = operand(&ins.args[0], streams, index)?;
-    check_operand(&ins.args[0], &a, ins, streams, index, out_n, CKind::F)?;
-
-    let ty = "float";
-    let mut decl = String::new();
-    let mut bufs = Vec::new();
-    let mut next = 0usize;
-    match &a {
-        Operand::Stream(i) => {
-            decl.push_str(&format!(
-                "layout(std430, binding = {next}) readonly buffer InA {{ {ty} a[]; }};\n"
-            ));
-            bufs.push(*i);
-            next += 1;
-        }
-        Operand::Lit(_) => {}
-    }
-    decl.push_str(&format!(
-        "layout(std430, binding = {next}) buffer Out {{ {ty} c[]; }};\n"
-    ));
-    bufs.push(out_idx);
-
-    let src = format!(
-        "#version 450\nlayout(local_size_x = {LOCAL_SIZE}) in;\n{decl}\
-layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
-void main() {{\n  uint i = gl_GlobalInvocationID.x;\n  if (i >= pc.n) return;\n  c[i] = {expr};\n}}\n"
-    );
-
-    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
-    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
 }
 
 fn div_ceil(a: usize, b: usize) -> usize {
@@ -489,47 +768,72 @@ fn glslc(src: &str, idx: usize) -> Result<Vec<u8>> {
 
 fn emit_c(
     order: &[String],
-    streams: &HashMap<String, StreamInfo>,
+    planes: &[(usize, Comp)],
+    ctx: &Ctx,
+    tabs: &Tables,
     dispatches: &[Dispatch],
     spirv: &[Vec<u8>],
     inputs: &[String],
     outputs: &[String],
 ) -> Result<String> {
-    let name_of = |i: usize| order[i].as_str();
-    let idx = |name: &str| -> Result<usize> {
-        order
-            .iter()
-            .position(|n| n == name)
-            .ok_or_else(|| Error::asm(format!("Vulkan: stream '{name}' not in table")))
-    };
-
     let mut c = String::new();
     c.push_str(HOST_PRELUDE);
 
-    c.push_str(&format!("\n#define N_STREAMS {}\n", order.len()));
-    c.push_str("static const char *kNames[N_STREAMS] = {\n");
-    for n in order {
-        c.push_str(&format!("  \"{n}\",\n"));
+    // plane table
+    c.push_str(&format!("\n#define N_PLANE {}\n", planes.len()));
+    c.push_str("static const char *kPlaneName[N_PLANE] = {\n");
+    for (ord, comp) in planes {
+        let suffix = match comp {
+            Comp::V => "",
+            Comp::S => ".s",
+            Comp::E => ".e",
+            Comp::Z => ".z",
+        };
+        c.push_str(&format!("  \"{}{suffix}\",\n", order[*ord]));
     }
-    c.push_str("};\nstatic const uint64_t kBytes[N_STREAMS] = {\n");
-    for n in order {
-        let s = &streams[n];
-        let width = if s.kind == CKind::I { 8 } else { 4 };
-        c.push_str(&format!("  {},\n", elems(s, n)? * width));
+    c.push_str("};\nstatic const uint64_t kPlaneCount[N_PLANE] = {\n");
+    for (ord, _) in planes {
+        c.push_str(&format!("  {},\n", ctx.elems(*ord)?));
     }
-    c.push_str("};\nstatic const int kIsI64[N_STREAMS] = {\n");
-    for n in order {
-        c.push_str(&format!(
-            "  {},\n",
-            if streams[n].kind == CKind::I { 1 } else { 0 }
-        ));
+    c.push_str("};\nstatic const int kPlaneElem[N_PLANE] = {\n");
+    for (ord, comp) in planes {
+        let e = match elem_for(ctx.info(*ord)?.kind, *comp) {
+            Elem::I8 => 0,
+            Elem::U8 => 1,
+            Elem::I32 => 2,
+            Elem::I64 => 3,
+            Elem::F32 => 4,
+        };
+        c.push_str(&format!("  {e},\n"));
     }
     c.push_str("};\n");
 
-    c.push_str(&format!("\n#define N_SHADER {}\n", spirv.len()));
-    c.push_str("static const uint32_t kSpvWords[N_SHADER] = {");
-    for bytes in spirv {
-        c.push_str(&format!(" {},", bytes.len() / 4));
+    c.push_str(&format!("\n#define N_TABLE {}\n", tabs.data.len()));
+    c.push_str("#define N_BUF (N_PLANE + N_TABLE)\n");
+    for (i, t) in tabs.data.iter().enumerate() {
+        let vals: Vec<String> = t.iter().map(|v| format!("{v}LL")).collect();
+        c.push_str(&format!(
+            "static const int64_t kTable{i}[] = {{\n  {}\n}};\n",
+            vals.join(", ")
+        ));
+    }
+    let nt = tabs.data.len().max(1);
+    c.push_str(&format!("static const int64_t *kTablePtr[{nt}] = {{"));
+    if tabs.data.is_empty() {
+        c.push_str(" 0,");
+    } else {
+        for i in 0..tabs.data.len() {
+            c.push_str(&format!(" kTable{i},"));
+        }
+    }
+    c.push_str(" };\n");
+    c.push_str(&format!("static const uint32_t kTableN[{nt}] = {{"));
+    if tabs.data.is_empty() {
+        c.push_str(" 0,");
+    } else {
+        for t in &tabs.data {
+            c.push_str(&format!(" {},", t.len()));
+        }
     }
     c.push_str(" };\n");
 
@@ -543,6 +847,12 @@ fn emit_c(
             words.join(", ")
         ));
     }
+    c.push_str(&format!("\n#define N_SHADER {}\n", spirv.len()));
+    c.push_str("static const uint32_t kSpvWords[N_SHADER] = {");
+    for bytes in spirv {
+        c.push_str(&format!(" {},", bytes.len() / 4));
+    }
+    c.push_str(" };\n");
 
     c.push_str(&format!("\n#define N_DISPATCH {}\n", dispatches.len()));
     c.push_str("static const Dispatch kDisp[N_DISPATCH] = {\n");
@@ -565,29 +875,47 @@ fn emit_c(
     }
     c.push_str("};\n");
 
-    c.push_str(&format!("\n#define N_IN {}\n", inputs.len()));
-    c.push_str("static const int kInStream[N_IN] = {");
-    for n in inputs {
-        c.push_str(&format!(" {},", idx(n)?));
+    // flattened input/output plane + argv maps
+    let mut in_pairs: Vec<(usize, usize)> = Vec::new();
+    let mut argv = 1usize;
+    for name in inputs {
+        let ord = ctx.ordinal(name)?;
+        for &comp in comps_for(ctx.info(ord)?.kind) {
+            in_pairs.push((ctx.plane_of(ord, comp)?, argv));
+            argv += 1;
+        }
+    }
+    let mut out_pairs: Vec<(usize, usize)> = Vec::new();
+    for name in outputs {
+        let ord = ctx.ordinal(name)?;
+        for &comp in comps_for(ctx.info(ord)?.kind) {
+            out_pairs.push((ctx.plane_of(ord, comp)?, argv));
+            argv += 1;
+        }
+    }
+
+    c.push_str(&format!("\n#define N_IN {}\n", in_pairs.len()));
+    c.push_str("static const int kInPlane[N_IN] = {");
+    for (p, _) in &in_pairs {
+        c.push_str(&format!(" {p},"));
     }
     c.push_str(" };\nstatic const int kInArgv[N_IN] = {");
-    for i in 0..inputs.len() {
-        c.push_str(&format!(" {},", i + 1));
+    for (_, a) in &in_pairs {
+        c.push_str(&format!(" {a},"));
     }
     c.push_str(" };\n");
 
-    c.push_str(&format!("\n#define N_OUT {}\n", outputs.len()));
-    c.push_str("static const int kOutStream[N_OUT] = {");
-    for n in outputs {
-        c.push_str(&format!(" {},", idx(n)?));
+    c.push_str(&format!("\n#define N_OUT {}\n", out_pairs.len()));
+    c.push_str("static const int kOutPlane[N_OUT] = {");
+    for (p, _) in &out_pairs {
+        c.push_str(&format!(" {p},"));
     }
     c.push_str(" };\nstatic const int kOutArgv[N_OUT] = {");
-    for i in 0..outputs.len() {
-        c.push_str(&format!(" {},", inputs.len() + i + 1));
+    for (_, a) in &out_pairs {
+        c.push_str(&format!(" {a},"));
     }
     c.push_str(" };\n");
 
-    let _ = name_of;
     c.push_str(HOST_MAIN);
     Ok(c)
 }
@@ -626,11 +954,13 @@ const HOST_PRELUDE: &str = r#"/* generated by jotnar: Vulkan compute backend */
 #define CK(x) do { VkResult _r = (x); if (_r != VK_SUCCESS) { \
   fprintf(stderr, "vk error %d at line %d\n", (int)_r, __LINE__); return 7; } } while (0)
 
+enum { E_I8 = 0, E_U8 = 1, E_I32 = 2, E_I64 = 3, E_F32 = 4 };
+
 typedef struct {
   const uint32_t *code;
   uint32_t words;
   int nbuf;
-  int buf[3];
+  int buf[16];
   uint32_t p[4];
   uint32_t g[3];
   uint32_t l[3];
@@ -646,13 +976,16 @@ static VkQueue g_queue;
 static uint32_t g_qfam;
 static VkCommandPool g_cpool;
 static VkDescriptorPool g_dpool;
-static VkBuffer g_buf[N_STREAMS];
-static VkDeviceMemory g_mem[N_STREAMS];
-static void *g_map[N_STREAMS];
+static VkBuffer g_buf[N_BUF];
+static VkDeviceMemory g_mem[N_BUF];
+static void *g_map[N_BUF];
+static VkDeviceSize g_size[N_BUF];
 static VkDescriptorSetLayout g_dsl[N_DISPATCH];
 static VkPipelineLayout g_pl[N_DISPATCH];
 static VkPipeline g_pipe[N_DISPATCH];
 static VkDescriptorSet g_ds[N_DISPATCH];
+static const char *g_argv_in[N_IN];
+static const char *g_argv_out[N_OUT];
 
 static uint32_t mem_type(uint32_t bits, VkMemoryPropertyFlags want)
 {
@@ -662,6 +995,15 @@ static uint32_t mem_type(uint32_t bits, VkMemoryPropertyFlags want)
     if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want)
       return i;
   return UINT32_MAX;
+}
+
+static VkDeviceSize buf_bytes(int p)
+{
+  if (p >= N_PLANE)
+    return (VkDeviceSize)kTableN[p - N_PLANE] * 8;
+  int elem = kPlaneElem[p];
+  VkDeviceSize w = (elem == E_I64) ? 8 : 4;
+  return kPlaneCount[p] * w;
 }
 
 static int init_vk(void)
@@ -731,10 +1073,11 @@ static int init_vk(void)
 
 static int make_buffers(void)
 {
-  for (int i = 0; i < N_STREAMS; ++i) {
-    VkDeviceSize size = kBytes[i] ? (VkDeviceSize)kBytes[i] : 4;
+  for (int i = 0; i < N_BUF; ++i) {
+    g_size[i] = buf_bytes(i);
+    if (g_size[i] == 0) g_size[i] = 4;
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    bi.size = size;
+    bi.size = g_size[i];
     bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     CK(vkCreateBuffer(g_dev, &bi, NULL, &g_buf[i]));
@@ -749,30 +1092,87 @@ static int make_buffers(void)
     CK(vkAllocateMemory(g_dev, &ma, NULL, &g_mem[i]));
     CK(vkBindBufferMemory(g_dev, g_buf[i], g_mem[i], 0));
     CK(vkMapMemory(g_dev, g_mem[i], 0, VK_WHOLE_SIZE, 0, &g_map[i]));
-    memset(g_map[i], 0, (size_t)size);
+    memset(g_map[i], 0, (size_t)g_size[i]);
+    if (i >= N_PLANE)
+      memcpy(g_map[i], kTablePtr[i - N_PLANE], (size_t)g_size[i]);
   }
   return 0;
 }
 
-static int load_inputs(int argc, char **argv)
+/* Convert a host file plane into the 32/64-bit GPU plane. */
+static int load_plane(int plane, const char *path)
 {
-  (void)argc;
-  for (int i = 0; i < N_IN; ++i) {
-    const char *path = argv[kInArgv[i]];
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    int s = kInStream[i];
-    if ((uint64_t)sz > kBytes[s]) {
-      fprintf(stderr, "%s: %ld bytes exceeds stream %s (%llu)\n",
-              path, sz, kNames[s], (unsigned long long)kBytes[s]);
-      fclose(f);
-      return 2;
-    }
-    if (fread(g_map[s], 1, (size_t)sz, f) != (size_t)sz) { fclose(f); return 2; }
+  FILE *f = fopen(path, "rb");
+  if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  int elem = kPlaneElem[plane];
+  int fw = (elem == E_I8 || elem == E_U8) ? 1
+         : (elem == E_I64) ? 8 : 4;
+  uint64_t n = kPlaneCount[plane];
+  if ((uint64_t)sz != n * (uint64_t)fw) {
+    fprintf(stderr, "%s: %ld bytes, expected %llu x %d (%s)\n",
+            path, sz, (unsigned long long)n, fw, kPlaneName[plane]);
     fclose(f);
+    return 2;
+  }
+  unsigned char *tmp = malloc((size_t)sz);
+  if (fread(tmp, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(tmp); return 2; }
+  fclose(f);
+
+  for (uint64_t j = 0; j < n; ++j) {
+    switch (elem) {
+      case E_I8:  ((int32_t *)g_map[plane])[j] = (int32_t)((int8_t *)tmp)[j]; break;
+      case E_U8:  ((uint32_t *)g_map[plane])[j] = (uint32_t)((uint8_t *)tmp)[j]; break;
+      case E_I32: ((int32_t *)g_map[plane])[j] = ((int32_t *)tmp)[j]; break;
+      case E_I64: ((int64_t *)g_map[plane])[j] = ((int64_t *)tmp)[j]; break;
+      case E_F32: ((float *)g_map[plane])[j] = ((float *)tmp)[j]; break;
+    }
+  }
+  free(tmp);
+  return 0;
+}
+
+static int load_inputs(void)
+{
+  for (int i = 0; i < N_IN; ++i) {
+    int r = load_plane(kInPlane[i], g_argv_in[i]);
+    if (r) return r;
+  }
+  return 0;
+}
+
+static int store_plane(int plane, const char *path)
+{
+  int elem = kPlaneElem[plane];
+  int fw = (elem == E_I8 || elem == E_U8) ? 1
+         : (elem == E_I64) ? 8 : 4;
+  uint64_t n = kPlaneCount[plane];
+  unsigned char *tmp = malloc((size_t)(n * (uint64_t)fw));
+  if (!tmp) return 6;
+  for (uint64_t j = 0; j < n; ++j) {
+    switch (elem) {
+      case E_I8:  ((int8_t *)tmp)[j] = (int8_t)((int32_t *)g_map[plane])[j]; break;
+      case E_U8:  ((uint8_t *)tmp)[j] = (uint8_t)((uint32_t *)g_map[plane])[j]; break;
+      case E_I32: ((int32_t *)tmp)[j] = ((int32_t *)g_map[plane])[j]; break;
+      case E_I64: ((int64_t *)tmp)[j] = ((int64_t *)g_map[plane])[j]; break;
+      case E_F32: ((float *)tmp)[j] = ((float *)g_map[plane])[j]; break;
+    }
+  }
+  FILE *f = fopen(path, "wb");
+  if (!f) { free(tmp); return 6; }
+  int ok = fwrite(tmp, 1, (size_t)(n * (uint64_t)fw), f) == (size_t)(n * (uint64_t)fw);
+  fclose(f);
+  free(tmp);
+  return ok ? 0 : 6;
+}
+
+static int store_outputs(void)
+{
+  for (int i = 0; i < N_OUT; ++i) {
+    int r = store_plane(kOutPlane[i], g_argv_out[i]);
+    if (r) return r;
   }
   return 0;
 }
@@ -782,7 +1182,7 @@ static int build_pipelines(void)
   for (int d = 0; d < N_DISPATCH; ++d) {
     const Dispatch *dp = &kDisp[d];
 
-    VkDescriptorSetLayoutBinding binds[3];
+    VkDescriptorSetLayoutBinding binds[16];
     for (int k = 0; k < dp->nbuf; ++k) {
       binds[k].binding = (uint32_t)k;
       binds[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -877,35 +1277,23 @@ static int run(void)
   return 0;
 }
 
-static int write_outputs(int argc, char **argv)
-{
-  (void)argc;
-  for (int i = 0; i < N_OUT; ++i) {
-    int s = kOutStream[i];
-    FILE *f = fopen(argv[kOutArgv[i]], "wb");
-    if (!f) { fprintf(stderr, "cannot write %s\n", argv[kOutArgv[i]]); return 6; }
-    if (fwrite(g_map[s], 1, (size_t)kBytes[s], f) != (size_t)kBytes[s]) {
-      fclose(f);
-      return 6;
-    }
-    fclose(f);
-  }
-  return 0;
-}
-
 int main(int argc, char **argv)
 {
   if (argc != N_IN + N_OUT + 1) {
-    fprintf(stderr, "usage: needs %d file arguments\n", N_IN + N_OUT);
+    fprintf(stderr, "usage: needs %d file arguments (got %d)\n",
+            N_IN + N_OUT, argc - 1);
     return 9;
   }
+  for (int i = 0; i < N_IN; ++i) g_argv_in[i] = argv[kInArgv[i]];
+  for (int i = 0; i < N_OUT; ++i) g_argv_out[i] = argv[kOutArgv[i]];
+
   int r;
   if ((r = init_vk())) return r;
   if ((r = make_buffers())) return r;
-  if ((r = load_inputs(argc, argv))) return r;
+  if ((r = load_inputs())) return r;
   if ((r = build_pipelines())) return r;
   if ((r = run())) return r;
-  if ((r = write_outputs(argc, argv))) return r;
+  if ((r = store_outputs())) return r;
   return 0;
 }
 "#;
