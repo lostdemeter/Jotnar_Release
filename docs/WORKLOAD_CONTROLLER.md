@@ -454,10 +454,9 @@ control    head + 0.5 tracks the perturbed reference; differs by 6.65
 receipt    all five stages done, placement and hashes recorded
 ```
 
-The checkpoint is a deterministic fixture; the container, loader, graph,
-placement, and reference paths are real. A trained checkpoint can replace the
-fixture without changing the graph. A larger model and a decode loop are the
-next slices.
+In slice 2 the checkpoint is a deterministic fixture; the container, loader,
+graph, placement, and reference paths are real. Slice 3 replaces the fixture
+with a trained checkpoint without changing the graph and adds the decode loop.
 
 ### Model slice 3 — trained checkpoint, tokenizer, decode, measurement
 
@@ -470,7 +469,8 @@ checkpoint   jotnar.model.checkpoint/1, F32, 22 tensors, 464,128 bytes
 model        D=64, 2 blocks, H=4, Dh=16, inter=128, vocab=256, context=16
 tokenizer    byte-level (identity on 0..255)
 objective    next byte from a 16-byte context, CE on the last position
-corpus       110,491 bytes of in-repo README/docs (sha256 eb51498b...)
+corpus       110,491 bytes: the eight pre-slice-3, pre-Vulkan README/docs files
+             pinned in training.json (sha256 eb51498b...)
 training     2,500 steps, batch 64, AdamW lr 2e-3 cosine, seed 0, CPU F32
 loss         3.22 bits/byte train, 3.36 bits/byte val (uniform = 8.00)
 ```
@@ -578,8 +578,11 @@ split can be judged on model compute; that is the next slice.
   (`jotnar-noded`) stages are not wired into the bundle schema yet.
 - GPU `frames` and `count` are 1 in v1. Multi-frame results need an output
   naming rule before the ledger can store them.
-- GPU payloads cross the controller-to-runner hop as JSON. A large intermediate
-  can expand significantly; there is no binary payload/stream transport yet.
+- Bundle stage inputs cross the controller-to-runner hop as JSON; a large
+  intermediate can expand significantly. Results use binary descriptors and
+  bytes (`output_format: binary`), and the streaming path uses binary frames
+  (`payload_format: binary`, `output_u8`). There is no binary *input* transport
+  for bundle stages yet.
 - The controller sends every payload inline. It does not yet use the runner's
   `payload-put`/`payload_id` cache for repeated inputs.
 - Fleet telemetry, leases, priority, and admission control exist for GPU
