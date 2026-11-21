@@ -153,10 +153,10 @@ ops above.
 
 ## Parity gate
 
-`verify_backend.py` (kept outside the repo during the spike) builds a listing
-with a given target, replays the reference interpreter, and compares every
-output plane. T comparisons are exact; F comparisons honour the manifest
-dtype (`f32`) with a tolerance.
+`scripts/parity_vulkan.py` builds each case with a reference target and with
+Vulkan, runs both, and compares every output plane. T and T2 are compared
+against non-FPU and must be bit-identical; I is compared against C exactly; F
+is float32 on Vulkan and float64 on C, so it uses a tolerance.
 
 | listing | non-FPU | Vulkan |
 |---|---|---|
@@ -223,7 +223,8 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
    `TRANSPOSE`, `SLICE` — the rest of the Qwen block.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
-4. Move the parity harness into the repo as `scripts/parity_vulkan.py`.
+4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
+   repo and already gates the current op set.
 
 ## Reproduce
 
@@ -236,4 +237,7 @@ cd Jotnar_Release && cargo build --release
 ./target/release/jotnar build listing.asm --payload p.json \
     --target vulkan --outputs OUT --workdir /tmp/vk
 /tmp/vk/prog <input planes...> <output planes...>
+
+# parity gate (all cases)
+python3 scripts/parity_vulkan.py
 ```
