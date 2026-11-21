@@ -200,6 +200,8 @@ struct Ctx<'a> {
     f: i64,
     beta_b: f64,
     eps_rms: i64,
+    sample: &'a Feeds,
+    rope_base: f64,
 }
 
 impl<'a> Ctx<'a> {
@@ -335,6 +337,8 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         beta_b: bound
             .config
             .get_f64_or("beta_b", bound.config.get_f64_or("beta", 0.5)),
+        sample: &sample,
+        rope_base: bound.config.get_f64_or("rope_base", 10000.0),
         eps_rms: {
             let m_cov = bound.config.get_i64("m_cov").unwrap_or(33280);
             match bound.config.get_f64("eps_rms") {
@@ -460,6 +464,7 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         ("SILU", CKind::T) => silu(ins, ctx, tabs, out_ord),
         ("SOFTMAX_WIDE", CKind::T) => softmax_wide(ins, ctx, tabs, out_ord),
         ("RMSNORM", CKind::T) => rmsnorm(ins, ctx, tabs, out_ord),
+        ("ROTARY", CKind::T) => rotary(ins, ctx, tabs, out_ord),
         ("T2I", CKind::I) => t2i(ins, ctx, tabs, out_ord),
         ("TSHIFT", CKind::T) => tshift(ins, ctx, tabs, out_ord),
 
@@ -475,7 +480,7 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         // Ladder ops that need the fixed-point bridge / baked tables.
         ("DIV", CKind::T)
         | ("SOFTMAX", CKind::T) | ("GELU", CKind::T)
-        | ("ROTARY", CKind::T) | ("CONCAT", CKind::T)
+        | ("CONCAT", CKind::T)
         | ("IREDUCE_SUM", CKind::I) => {
             Err(Error::unimplemented(format!(
                 "Vulkan backend: {} on {out_kind:?} needs the ladder bridge/tables (next milestone)",
@@ -1974,6 +1979,199 @@ void main()
         src,
         vec![x_s, x_e, x_z, w_s, w_e, w_z, o_s, o_e, o_z, frac, coarse, fine],
         [rows as u32, cols as u32, ctx.m_cov as u32, ctx.eps_rms as u32],
+        groups,
+        [LOCAL_SIZE, 1, 1],
+    ))
+}
+
+/// ROTARY: pair-wise rotation with cos/sin tables baked from the payload's
+/// position stream, exactly as `rope_tables` + `lattice::encode` do it.
+fn rotary(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 ROTARY is not implemented yet (frozen T is)",
+        ));
+    }
+    if ins.args.len() != 2 {
+        return Err(Error::asm("Vulkan: ROTARY expects x and pos"));
+    }
+    let x_ord = ctx.ordinal(&ins.args[0])?;
+    let pos_ord = ctx.ordinal(&ins.args[1])?;
+    if ctx.info(pos_ord)?.kind != CKind::I {
+        return Err(Error::unimplemented("Vulkan: ROTARY needs an I position stream"));
+    }
+    let xshape = ctx.info(x_ord)?.static_shape(&ctx.name(x_ord))?;
+    if xshape.is_empty() || xshape[xshape.len() - 1] % 2 != 0 {
+        return Err(Error::asm("Vulkan: ROTARY head dim must be even"));
+    }
+    let d = xshape[xshape.len() - 1];
+    let half = d / 2;
+    let rows: usize = xshape[..xshape.len() - 1].iter().product();
+
+    // positions come from the payload; the table is sized by their maximum
+    let pos_name = &ins.args[1];
+    let pos_vals: Vec<i64> = match ctx.sample.get(pos_name) {
+        Some(crate::value::Value::I64(a)) => a.iter().copied().collect(),
+        _ => {
+            return Err(Error::unimplemented(format!(
+                "Vulkan: ROTARY needs real position values for '{pos_name}' (not a stub)"
+            )))
+        }
+    };
+    if pos_vals.is_empty() || pos_vals.iter().any(|p| *p < 0) {
+        return Err(Error::asm("Vulkan: ROTARY needs non-negative positions"));
+    }
+    let broadcast = pos_vals.len() == 1;
+    if !broadcast && pos_vals.len() != rows {
+        return Err(Error::asm(format!(
+            "Vulkan: ROTARY pos length {} not broadcastable to {rows} rows",
+            pos_vals.len()
+        )));
+    }
+    let pmax = *pos_vals.iter().max().unwrap() as usize + 1;
+    if pmax * half == 0 {
+        return Err(Error::asm("Vulkan: ROTARY empty tables"));
+    }
+
+    let base = ctx.rope_base;
+    let mut cos = vec![0f64; pmax * half];
+    let mut sin = vec![0f64; pmax * half];
+    for p in 0..pmax {
+        for i in 0..half {
+            let theta = base.powf(-2.0 * i as f64 / d as f64);
+            let ang = p as f64 * theta;
+            cos[p * half + i] = ang.cos();
+            sin[p * half + i] = ang.sin();
+        }
+    }
+    let enc = |v: Vec<f64>| -> Result<(Vec<i64>, Vec<i64>, Vec<i64>)> {
+        let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&[pmax, half]), v)
+            .map_err(|e| Error::asm(format!("Vulkan: ROTARY table shape: {e}")))?;
+        let t = phi_core::lattice::encode(&arr);
+        Ok((
+            t.s.iter().map(|&x| x as i64).collect(),
+            t.e.iter().map(|&x| x as i64).collect(),
+            t.z.iter().map(|&x| x as i64).collect(),
+        ))
+    };
+    let (cs, ce, cz) = enc(cos)?;
+    let (ss, se, sz) = enc(sin)?;
+
+    let (x_s, x_e, x_z) = (
+        ctx.plane_of(x_ord, Comp::S)?,
+        ctx.plane_of(x_ord, Comp::E)?,
+        ctx.plane_of(x_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let pos_p = ctx.plane_of(pos_ord, Comp::V)?;
+
+    // tables are per-instance, so give them unique names
+    let tag = format!("rotary{}x{}", rows, d);
+    let cs_p = tabs.push(format!("{tag}:cos:s"), cs);
+    let ce_p = tabs.push(format!("{tag}:cos:e"), ce);
+    let cz_p = tabs.push(format!("{tag}:cos:z"), cz);
+    let ss_p = tabs.push(format!("{tag}:sin:s"), ss);
+    let se_p = tabs.push(format!("{tag}:sin:e"), se);
+    let sz_p = tabs.push(format!("{tag}:sin:z"), sz);
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let pos_expr = if broadcast {
+        "int64_t(pos[0])".to_string()
+    } else {
+        "int64_t(pos[row])".to_string()
+    };
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer XS {{ int xs_[]; }};
+layout(std430, binding = 1) readonly buffer XE {{ int xe[]; }};
+layout(std430, binding = 2) readonly buffer XZ {{ uint xz[]; }};
+layout(std430, binding = 3) buffer OS {{ int os_[]; }};
+layout(std430, binding = 4) buffer OE {{ int oe[]; }};
+layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 6) readonly buffer CS {{ int64_t cs[]; }};
+layout(std430, binding = 7) readonly buffer CE {{ int64_t ce[]; }};
+layout(std430, binding = 8) readonly buffer CZ {{ int64_t cz[]; }};
+layout(std430, binding = 9) readonly buffer SS {{ int64_t ss[]; }};
+layout(std430, binding = 10) readonly buffer SE {{ int64_t se[]; }};
+layout(std430, binding = 11) readonly buffer SZ {{ int64_t sz[]; }};
+layout(std430, binding = 12) readonly buffer POS {{ int64_t pos[]; }};
+layout(std430, binding = 13) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 14) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 15) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+struct Lad {{ int s; int e; uint z; }};
+
+Lad lad_mul(Lad a, Lad b)
+{{
+  Lad r;
+  r.s = a.s * b.s;
+  int e = a.e + b.e - BIAS;
+  r.e = e < 0 ? 0 : (e > NLVL - 1 ? NLVL - 1 : e);
+  r.z = a.z | b.z;
+  return r;
+}}
+
+Lad lad_bin(Lad a, Lad b, int64_t m0, bool sub)
+{{
+  int64_t qa = to_fixed(a.s, a.e, a.z, m0);
+  int64_t qb = to_fixed(b.s, b.e, b.z, m0);
+  int64_t q = sub ? (qa - qb) : (qa + qb);
+  Ladder r = from_fixed(q, m0);
+  Lad o; o.s = r.s; o.e = r.e; o.z = r.z;
+  return o;
+}}
+
+void main()
+{{
+  uint k = gl_GlobalInvocationID.x;
+  uint total = pc.n * pc.p1;
+  if (k >= total) return;
+  uint hf = pc.p1;
+  uint d = pc.p0;
+  int64_t m0 = int64_t(pc.p2);
+  uint row = k / hf;
+  uint j = k - row * hf;
+
+  int64_t pp = {pos_expr};
+  int co = int(pp * int64_t(hf) + int64_t(j));
+
+  uint i0 = row * d + 2u * j;
+  uint i1 = i0 + 1u;
+
+  Lad a0; a0.s = xs_[i0]; a0.e = xe[i0]; a0.z = xz[i0];
+  Lad a1; a1.s = xs_[i1]; a1.e = xe[i1]; a1.z = xz[i1];
+  Lad c;  c.s = int(cs[co]);  c.e = int(ce[co]);  c.z = uint(cz[co]);
+  Lad s;  s.s = int(ss[co]);  s.e = int(se[co]);  s.z = uint(sz[co]);
+
+  Lad y0 = lad_bin(lad_mul(a0, c), lad_mul(a1, s), m0, true);
+  Lad y1 = lad_bin(lad_mul(a0, s), lad_mul(a1, c), m0, false);
+
+  os_[i0] = y0.s; oe[i0] = y0.e; oz[i0] = y0.z;
+  os_[i1] = y1.s; oe[i1] = y1.e; oz[i1] = y1.z;
+}}
+"#
+    );
+
+    let total = rows * half;
+    let groups = [div_ceil(total, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![
+            x_s, x_e, x_z, o_s, o_e, o_z, cs_p, ce_p, cz_p, ss_p, se_p, sz_p,
+            pos_p, frac, coarse, fine,
+        ],
+        [rows as u32, d as u32, half as u32, ctx.m_cov as u32],
         groups,
         [LOCAL_SIZE, 1, 1],
     ))

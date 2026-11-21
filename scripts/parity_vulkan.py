@@ -171,6 +171,22 @@ OUT = TBETA(A)
         True,
     ),
     (
+        "t_rotary",
+        """IN X AS T:*
+IN POS AS I:*
+OUT = ROTARY(X, POS)
+""",
+        lambda: {
+            "X": t3([1, 1, -1, 1, -1, 1, -1, 1],
+                    [32768, 33000, 32500, 32768, 34000, 33200, 32900, 33100],
+                    [0, 0, 0, 1, 0, 0, 0, 0], [2, 4]),
+            "POS": i64([0, 1], [2]),
+        },
+        {"kind": "T", "shape": [2, 4]},
+        "nonfpu",
+        True,
+    ),
+    (
         "t_silu",
         """IN A AS T:*
 OUT = SILU(A)
