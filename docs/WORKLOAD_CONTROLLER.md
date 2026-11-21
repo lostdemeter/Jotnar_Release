@@ -421,8 +421,41 @@ receipt    all four stages done, placement and output hashes recorded
 
 The block is not spatially partitionable (attention/reductions), so the
 distribution axis is stage/pipeline parallelism, not the `partitionable` grid.
-A real checkpoint, multi-head attention, and a full
-embedding->blocks->logits sentence are the next slices.
+
+### Model slice 2 — checkpoint, multi-head, full sentence
+
+A `jotnar.model.checkpoint/1` manifest and F32 tensor blobs live in the
+controller. `scripts/model_sentence_gate.py` writes a deterministic fixture,
+loads it back with hash checks, materializes the token embedding, and runs:
+
+```text
+tokens -> embedding -> attn-0 (CUDA) -> mlp-0 (HIP) -> attn-1 (CUDA)
+       -> mlp-1 (HIP) -> final RMSNorm + head (CUDA) -> logits [8,32]
+```
+
+`attn4.asm` slices Q/K/V into four 16-wide heads, runs per-head
+`Q·Kᵀ → softmax → A·V`, concatenates the heads with `CONCAT`, and applies the
+output projection. `head.asm` adds the final RMSNorm and logits matmul.
+
+```sh
+python3 scripts/model_sentence_gate.py --no-build --blocks 2
+```
+
+```text
+model      2 blocks, D=64, N=8, H=4, Dh=16, inter=128, V=32, F32
+checkpoint jotnar.model.checkpoint/1, 28 tensors, hash-verified
+CUDA       attn-0, attn-1, head
+HIP        mlp-0, mlp-1
+checks     block0/1 3.0e-8, logits 2.4e-7 max abs vs numpy
+repeat     logits and block outputs byte-identical
+control    head + 0.5 tracks the perturbed reference; differs by 6.65
+receipt    all five stages done, placement and hashes recorded
+```
+
+The checkpoint is a deterministic fixture; the container, loader, graph,
+placement, and reference paths are real. A trained checkpoint can replace the
+fixture without changing the graph. A larger model and a decode loop are the
+next slices.
 
 ## Limits
 

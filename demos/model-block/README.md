@@ -44,3 +44,31 @@ receipt     all stages done, outputs and hashes recorded
 
 `--blocks 1` is the minimal slice. A real checkpoint, multi-head attention,
 and a full embedding->blocks->logits sentence are the next steps.
+
+## Slice 2 — checkpoint, multi-head, full sentence
+
+`attn4.asm` slices Q/K/V into four 16-wide heads, runs per-head attention, and
+concatenates with `CONCAT`; `head.asm` is the final RMSNorm + logits matmul.
+`scripts/model_sentence_gate.py` writes a `jotnar.model.checkpoint/1` fixture
+(manifest + F32 tensor blobs), loads it back with hash checks, materializes the
+token embedding, and runs:
+
+```text
+tokens -> embedding -> attn-0 (CUDA) -> mlp-0 (HIP) -> attn-1 (CUDA)
+       -> mlp-1 (HIP) -> final RMSNorm + head (CUDA) -> logits [8,32]
+```
+
+```sh
+python3 scripts/model_sentence_gate.py --no-build --blocks 2 \
+  --out /tmp/opencode/model-sentence-gate
+```
+
+```text
+logits/block outputs  2.4e-7 / 3.0e-8 max abs vs numpy
+repeat                byte-identical
+control               head + 0.5 differs from the original by 6.65
+receipt               5 stages done, attn/head CUDA, mlp HIP
+```
+
+The checkpoint is a deterministic fixture; replace it with a trained F32
+checkpoint without changing the graph.
