@@ -142,8 +142,10 @@ widths.
 
 ```text
 T   (frozen): MUL SQUARE ADD SUB MATMUL TRANSPOSE SLICE TSHIFT TBETA
+              SILU SOFTMAX_WIDE RMSNORM
 T2  (CONFIG t2 M): MUL SQUARE ADD SUB MATMUL
 I:  IADD ISUB IMUL IMATMUL IGET
+T2I (T -> I)
 F:  MATMUL SLICE
 ```
 
@@ -191,6 +193,22 @@ init=9.6  buffers=12.7  load=7.1  pipelines=0.2  dispatch=3.4  store=4.0 ms
 ```
 
 - GPU dispatch is **3.4 ms**, faster than the CPU's entire 19.4 ms run.
+- LUT cost, measured before implementing the table-driven ops (64-element
+  payload):
+
+  | program | build | source | executable |
+  |---|---|---|---|
+  | `SILU` (sigx + sig tables) | 1.43 s | 4.86 MB | 5.06 MB |
+  | no-LUT (`MUL(A,A)`) | 0.36 s | 0.03 MB | 0.07 MB |
+
+  ~4.8 MB of generated C and ~1.1 s of build time. Same order as the T2 C
+  emitter, so tables stay as inline literals rather than a sidecar artifact.
+
+- **Emitter divergence found by the gate:** non-FPU `SOFTMAX_WIDE` gives
+  `e[4] = 27070` where the interpreter gives `27071` on the gate case.
+  Vulkan matches the interpreter on every plane. `parity_vulkan.py` supports
+  an `interp` reference for cases like this; the oracle wins over an emitter.
+
 - T2 vs frozen T, same listing and size, resident:
 
   | format | planes | time |
@@ -215,7 +233,7 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 - No reductions, norms, softmax, rotary, or image ops.
 - T2 covers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL` only; no T2 `TRANSPOSE`,
   `SLICE`, `TSHIFT`, `TBETA` or `T2I`.
-- No `RMSNORM`, `SILU`, `GELU`, `SOFTMAX(_WIDE)`, `ROTARY` or `CONCAT` yet.
+- No `GELU`, plain `SOFTMAX`, `ROTARY` or `CONCAT` yet.
 - No bounds-fault channel yet: over-range accumulators saturate instead of
   failing the run. The reference raises an error.
 - Host I/O is scalar conversion plus a copy; a real embedding would write
@@ -227,6 +245,7 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
    (`sig_lut` 1M entries, `exp_lut` 262k, `t2i_lut` 64k), so this is where
    emitted-artifact size and `cc` time should be measured.
 2. `ROTARY`, whose cos/sin tables depend on the payload's position range.
+   Then `GELU`, plain `SOFTMAX` and `CONCAT` if the Qwen listing needs them.
 3. The Qwen block listing as the acceptance gate.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
