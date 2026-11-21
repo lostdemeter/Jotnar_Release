@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 
-HERE = "/home/steamos/dev/Jotnar_Release/scripts"
+HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import qwen_gate as q  # noqa: E402
 

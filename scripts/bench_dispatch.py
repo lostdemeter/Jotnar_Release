@@ -11,7 +11,8 @@ import time
 N_ELEM = int(os.environ.get("N", "4096"))
 FRAMES = int(os.environ.get("FRAMES", "50"))
 CHAIN = [int(x) for x in os.environ.get("CHAIN", "1,4,8,16,32").split(",")]
-BIN = "/home/steamos/dev/Jotnar_Release/target/release/jotnar"
+BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "target", "release", "jotnar")
 
 
 def listing(n):

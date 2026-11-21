@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 
-SCRIPTS = "/home/steamos/dev/Jotnar_Release/scripts"
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS)
 import qwen_gate as q  # noqa: E402
 
@@ -60,7 +60,7 @@ def main():
     ppath = os.path.join(WORK, "payload.json")
     json.dump({"streams": streams}, open(ppath, "w"))
 
-    bin_path = "/home/steamos/dev/Jotnar_Release/target/release/jotnar"
+    bin_path = os.path.join(os.path.dirname(SCRIPTS), "target", "release", "jotnar")
     vk, vk_man = build(bin_path, listing, ppath, "vulkan", "vk")
     ref, ref_man = build(bin_path, listing, ppath, "nonfpu", "ref")
 
