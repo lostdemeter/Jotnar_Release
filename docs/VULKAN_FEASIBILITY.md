@@ -141,11 +141,16 @@ widths.
 ## Supported opcode set
 
 ```text
-T   (frozen): MUL SQUARE ADD SUB MATMUL
-T2  (CONFIG t2 M): MUL SQUARE ADD SUB
-I:  IADD ISUB IMUL IMATMUL
-F:  MATMUL
+T   (frozen): MUL SQUARE ADD SUB MATMUL TRANSPOSE SLICE TSHIFT TBETA
+T2  (CONFIG t2 M): MUL SQUARE ADD SUB MATMUL
+I:  IADD ISUB IMUL IMATMUL IGET
+F:  MATMUL SLICE
 ```
+
+`TRANSPOSE`, `SLICE` and `IGET` share one mechanism: a baked index table plus
+a gather shader that walks every plane with the same indices. `TSHIFT` uses
+`to_fixed_wide` at `m_acc` with a per-row maximum. `TBETA` encodes `beta_b`
+with `phi_core::lattice::encode` at emit time.
 
 Everything else refuses with a typed `Unimplemented` error. In particular T
 streams are accepted (unlike CUDA/HIP, which refuse them), but only for the
@@ -208,8 +213,9 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 - Rank-2 `MATMUL` only; no `BATCH_MATMUL`.
 - No broadcasting between different element counts.
 - No reductions, norms, softmax, rotary, or image ops.
-- T2 covers `MUL`/`SQUARE`/`ADD`/`SUB` only; no `T2I`/`IGET`, no
-  `ROTARY`/`TSHIFT`.
+- T2 covers `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL` only; no T2 `TRANSPOSE`,
+  `SLICE`, `TSHIFT`, `TBETA` or `T2I`.
+- No `RMSNORM`, `SILU`, `GELU`, `SOFTMAX(_WIDE)`, `ROTARY` or `CONCAT` yet.
 - No bounds-fault channel yet: over-range accumulators saturate instead of
   failing the run. The reference raises an error.
 - Host I/O is scalar conversion plus a copy; a real embedding would write
@@ -217,10 +223,11 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. T2 `MATMUL` (block-floating two-pass), which is the shape the Qwen block
-   needs; the bridge and mantissa arithmetic already exist.
-2. `RMSNORM`, `ROTARY`, `TSHIFT`, `TBETA`, `SOFTMAX_WIDE`, `SILU`,
-   `TRANSPOSE`, `SLICE` — the rest of the Qwen block.
+1. Batch B: `RMSNORM`, `SILU`, `SOFTMAX_WIDE`, `T2I`. These need baked LUTs
+   (`sig_lut` 1M entries, `exp_lut` 262k, `t2i_lut` 64k), so this is where
+   emitted-artifact size and `cc` time should be measured.
+2. `ROTARY`, whose cos/sin tables depend on the payload's position range.
+3. The Qwen block listing as the acceptance gate.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
 4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
