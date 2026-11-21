@@ -41,6 +41,18 @@ def f64(data, shape):
     return {"kind": "F64", "shape": shape, "data": data}
 
 
+def gen_t2(rows, cols, seed):
+    """Deterministic canonical T2 stream, including scattered zero terms."""
+    n = rows * cols
+    return t2(
+        [1 if (i * 7 + seed) % 3 else -1 for i in range(n)],
+        [32768 + ((i * 37 + seed * 11) % 900) for i in range(n)],
+        [((i * 911 + seed * 17) % 2000) - 1000 for i in range(n)],
+        [1 if (i * 13 + seed) % 17 == 0 else 0 for i in range(n)],
+        [rows, cols],
+    )
+
+
 # name, listing, input streams, output kind+shape, reference target, exact?
 CASES = [
     (
@@ -95,6 +107,18 @@ OUT = ADD(S, B)
                     [0, 0, 0, 0, 0, 0], [6]),
         },
         {"kind": "T", "shape": [6], "t2": True},
+        "nonfpu",
+        True,
+    ),
+    (
+        "t2_matmul",
+        """CONFIG t2 24
+IN A AS T:*
+IN B AS T:*
+OUT = MATMUL(A, B)
+""",
+        lambda: {"A": gen_t2(3, 5, 1), "B": gen_t2(5, 4, 2)},
+        {"kind": "T", "shape": [3, 4], "t2": True},
         "nonfpu",
         True,
     ),

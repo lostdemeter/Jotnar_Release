@@ -422,9 +422,7 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         }
         ("MATMUL", CKind::T) => {
             if ctx.t2.is_some() {
-                Err(Error::unimplemented(
-                    "Vulkan: T2 MATMUL is not implemented yet (T2 MUL/ADD/SUB are)",
-                ))
+                tmatmul2(ins, ctx, tabs)
             } else {
                 tmatmul(ins, ctx, tabs)
             }
@@ -1099,6 +1097,170 @@ void main()
 
     let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
     Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// T2 MATMUL: block-floating dot products, exactly as `matmul2_mt`.
+///
+/// Each output scans its terms for `emax`, then accumulates
+/// `(base * aa * bb + half) >> 2M` with `base = phi^(emax-ep) * 2^F`.
+/// The reference uses i128 here because `base*aa*bb` can reach ~2^73. With
+/// `emax` the maximum term exponent, `base` never exceeds `2^F`, so splitting
+/// `base` into 12-bit halves keeps every partial product under 2^62 and the
+/// result is exact in 64 bits.
+fn tmatmul2(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let m_bits = ctx.t2.expect("t2");
+    if m_bits != 24 || ctx.f != 24 {
+        return Err(Error::unimplemented(format!(
+            "Vulkan: T2 MATMUL is only analysed for M = F = 24 (got M={m_bits}, F={})",
+            ctx.f
+        )));
+    }
+    let a = ctx.ordinal(&ins.args[0])?;
+    let b = ctx.ordinal(&ins.args[1])?;
+    let out = ins
+        .outs
+        .first()
+        .ok_or_else(|| Error::asm(format!("Vulkan: {} has no output", ins.mn)))?;
+    let out_ord = ctx.ordinal(out)?;
+
+    for ord in [a, b] {
+        if ctx.info(ord)?.kind != CKind::T {
+            return Err(Error::asm("Vulkan: T2 MATMUL operand is not a ladder stream"));
+        }
+    }
+    let ash = ctx.info(a)?.static_shape(&ctx.name(a))?;
+    let bsh = ctx.info(b)?.static_shape(&ctx.name(b))?;
+    if ash.len() != 2 || bsh.len() != 2 {
+        return Err(Error::unimplemented(format!(
+            "Vulkan: T2 MATMUL supports rank-2 only (got {:?} x {:?})",
+            ash, bsh
+        )));
+    }
+    let (m, k) = (ash[0], ash[1]);
+    if bsh[0] != k {
+        return Err(Error::asm("Vulkan: T2 MATMUL inner dimensions differ"));
+    }
+    let n = bsh[1];
+
+    let planes = |ord: usize| -> Result<(usize, usize, usize, usize)> {
+        Ok((
+            ctx.plane_of(ord, Comp::S)?,
+            ctx.plane_of(ord, Comp::E)?,
+            ctx.plane_of(ord, Comp::M)?,
+            ctx.plane_of(ord, Comp::Z)?,
+        ))
+    };
+    let (a_s, a_e, a_m, a_z) = planes(a)?;
+    let (b_s, b_e, b_m, b_z) = planes(b)?;
+    let (o_s, o_e, o_m, o_z) = planes(out_ord)?;
+
+    let f = ctx.f;
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac_for(f));
+    let frachi = tabs.get("frachi", || phi_core::lattice::frac_hi_for(f));
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = ladder2_glsl(m_bits, f, true);
+
+    let bufs = vec![
+        a_s, a_e, a_m, a_z, b_s, b_e, b_m, b_z, o_s, o_e, o_m, o_z,
+        frac, frachi, coarse, fine,
+    ];
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AM {{ int am[]; }};
+layout(std430, binding = 3) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 4) readonly buffer BS {{ int bs[]; }};
+layout(std430, binding = 5) readonly buffer BE {{ int be[]; }};
+layout(std430, binding = 6) readonly buffer BM {{ int bm[]; }};
+layout(std430, binding = 7) readonly buffer BZ {{ uint bz[]; }};
+layout(std430, binding = 8) buffer OS {{ int os_[]; }};
+layout(std430, binding = 9) buffer OE {{ int oe[]; }};
+layout(std430, binding = 10) buffer OM {{ int om[]; }};
+layout(std430, binding = 11) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 12) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 13) readonly buffer FRACHI {{ int64_t frachi[]; }};
+layout(std430, binding = 14) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 15) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+/* exact (base * r + half) >> 2M with base <= 2^24 and r < 2^50 */
+uint64_t t2_mul_shift(uint64_t base, uint64_t r)
+{{
+  uint64_t hi = base >> 12;
+  uint64_t lo = base & 4095ul;
+  uint64_t A = hi * r;
+  uint64_t B = lo * r;
+  const int SH = 2 * T2M;
+  const int SL = SH - 12;
+  uint64_t mask = (uint64_t(1) << uint(SL)) - 1ul;
+  uint64_t halfv = uint64_t(1) << uint(SH - 1);
+  uint64_t low = ((A & mask) << 12) + B + halfv;
+  return (A >> uint(SL)) + (low >> uint(SH));
+}}
+
+void main()
+{{
+  uint M = pc.n;
+  uint N = pc.p0;
+  uint K = pc.p1;
+  uint r = gl_GlobalInvocationID.y;
+  uint col = gl_GlobalInvocationID.x;
+  if (r >= M || col >= N) return;
+
+  int64_t emax = 0;
+  bool any = false;
+  for (uint t = 0; t < K; ++t) {{
+    uint ai = r * K + t;
+    uint bi = t * N + col;
+    if (az[ai] != 0u || bz[bi] != 0u) continue;
+    int64_t ep = int64_t(ae[ai]) + int64_t(be[bi]) - int64_t(T2BIAS);
+    if (!any || ep > emax) {{ emax = ep; any = true; }}
+  }}
+
+  uint o = r * N + col;
+  if (!any) {{
+    os_[o] = 1; oe[o] = T2BIAS; om[o] = 0; oz[o] = 1u;
+    return;
+  }}
+
+  int64_t scale = int64_t(1) << T2M;
+  int64_t acc = int64_t(0);
+  for (uint t = 0; t < K; ++t) {{
+    uint ai = r * K + t;
+    uint bi = t * N + col;
+    if (az[ai] != 0u || bz[bi] != 0u) continue;
+    int64_t ep = int64_t(ae[ai]) + int64_t(be[bi]) - int64_t(T2BIAS);
+    int64_t base = t2_base(emax - ep);
+    if (base == 0) continue;
+    uint64_t aa = uint64_t(scale + int64_t(am[ai]));
+    uint64_t bb = uint64_t(scale + int64_t(bm[bi]));
+    uint64_t p = t2_mul_shift(uint64_t(base), aa * bb);
+    int sgn = as_[ai] * bs[bi];
+    acc += int64_t(sgn) * int64_t(p);
+  }}
+
+  T2 res = t2_from_fixed(acc, emax);
+  os_[o] = res.s; oe[o] = res.e; om[o] = res.m; oz[o] = res.z;
+}}
+"#
+    );
+
+    let groups = [div_ceil(n, 16) as u32, div_ceil(m, 16) as u32, 1];
+    Ok((
+        src,
+        bufs,
+        [m as u32, n as u32, k as u32, 0],
+        groups,
+        [16, 16, 1],
+    ))
 }
 
 fn int_bin(
