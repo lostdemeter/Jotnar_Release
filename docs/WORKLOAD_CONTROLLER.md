@@ -582,8 +582,9 @@ split can be judged on model compute; that is the next slice.
   can expand significantly; there is no binary payload/stream transport yet.
 - The controller sends every payload inline. It does not yet use the runner's
   `payload-put`/`payload_id` cache for repeated inputs.
-- There is no live executor telemetry, lease, priority, or admission control.
-  The contention gate measures the gap; it does not fix it.
+- Fleet telemetry, leases, priority, and admission control exist for GPU
+  targets and are advisory on the shared directory; see
+  [`FLEET_ADMISSION.md`](FLEET_ADMISSION.md).
 
 ## Streaming companion
 
