@@ -25,10 +25,10 @@ cargo build --release
 cargo test --workspace
 ```
 
-Targets: `c` (default), `nonfpu`, `cuda`, `hip`, `rust`. Add `--fp16` to CUDA
-or HIP builds to read F inputs from half-precision files (FP32 compute, smaller
-files). CUDA `CONV2D` uses cuDNN NHWC when available (set `JOTNAR_CUDNN=0` to
-force the im2col + cuBLAS fallback).
+Targets: `c` (default), `nonfpu`, `cuda`, `hip`, `rust`, `vulkan`. Add `--fp16`
+to CUDA or HIP builds to read F inputs from half-precision files (FP32 compute,
+smaller files). CUDA `CONV2D` uses cuDNN NHWC when available (set
+`JOTNAR_CUDNN=0` to force the im2col + cuBLAS fallback).
 `emit-rust` and `build --target rust` need `rustc` on PATH; they emit a
 self-contained std-only Rust program (F as f64, I as i64). Rust is an
 F/I subset: T (triple) streams are refused loudly — the emitter may
@@ -46,6 +46,11 @@ set `HIPCC` to override and `HIP_ARCH` (for example `gfx1100`) to pin the
 offload target. The HIP target is a correctness-first port of the 51-mnemonic
 CUDA slice as of `d98dfe2`; current CUDA has 65 mnemonics. See
 `docs/ROCM_FEASIBILITY.md` for the spike report and the 14-op gap list.
+The Vulkan build needs `glslc` on `PATH` and emits C with embedded SPIR-V that
+links `libvulkan`. It is a correctness-first φ-ladder subset (T; T2 for
+`MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL`; I; `T2I`; and F matmul); every other op
+refuses, and shapes must be static. See `docs/VULKAN_FEASIBILITY.md` for the
+supported-op table, numeric model, and known limits.
 
 ## Status and evidence
 
@@ -60,12 +65,13 @@ What works today:
   lattice triples, and `None` history.
 - The lattice substrate (`encode`/`decode`/fixed-point/LUTs) matching the
   Python formulas.
-- Five code generators: C99, integer-only C with a float trap, CUDA, HIP, and
+- Six code generators: C99, integer-only C with a float trap, CUDA, HIP,
   Rust (std-only; scalar-right ops + MATMUL/GELU/SOFTMAX/LAYERNORM/RELU/CONV/CONV2D/DECONV2D/RESIZE2D/TRANSPOSE/CONCAT
   over F/I; LAYERNORM eps comes from CONFIG eps_ln);
-  T refused, DECONV/INTERP/GATHER fail loud until the next slice). HIP ports
-  the 51-mnemonic CUDA slice as of `d98dfe2`; current CUDA has 65, and neither
-  is the full 105-mnemonic surface.
+  T refused, DECONV/INTERP/GATHER fail loud until the next slice), and Vulkan
+  (φ-ladder subset; see `docs/VULKAN_FEASIBILITY.md`). HIP ports the
+  51-mnemonic CUDA slice as of `d98dfe2`; current CUDA has 65, and none of
+  HIP, CUDA, or Vulkan is the full 105-mnemonic surface.
 - Differential parity:
 
 ```text
@@ -75,6 +81,7 @@ What works today:
 flagship + xf_block     scripts/parity_programs.py
 CUDA units/iext/…       scripts/parity_cuda.py
 HIP 32 cases (C vs HIP) scripts/parity_hip.py     # hipcc/AMD GPU, correctness only
+Vulkan 19 cases (T/T2 exact) scripts/parity_vulkan.py  # glslc + Vulkan device, correctness only
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py

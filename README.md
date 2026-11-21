@@ -8,8 +8,8 @@ into a graph, and ask a machine to realize that graph.
 
 The same graph can run in the reference interpreter, lower to portable C99,
 lower to integer-only C, lower to CUDA, lower to HIP (51-op CUDA slice from the
-`d98dfe2` base), emit Rust (F/I subset, T refused), become structural Verilog,
-or drive an RV32IM machine.
+`d98dfe2` base), lower to Vulkan (φ-ladder subset), emit Rust (F/I subset,
+T refused), become structural Verilog, or drive an RV32IM machine.
 
 That sounds like portability. The deeper idea is **trust**. A program is a
 claim. The machine is a witness. The result is not “it compiled” — it is a
@@ -245,6 +245,7 @@ The front door is deliberately short. The actual parts are here:
 32/32 emitter cases
 26/26 Rust parity (scripts/parity_rust.py)
 HIP 32/32 cases (C vs HIP) scripts/parity_hip.py
+Vulkan 19/19 cases (T/T2 exact) scripts/parity_vulkan.py
 Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
