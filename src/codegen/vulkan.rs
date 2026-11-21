@@ -462,7 +462,12 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         ("IGET", CKind::I) => iget(ins, ctx, tabs, out_ord),
         ("TBETA", CKind::T) => tbeta(ins, ctx, out_ord, out_n),
         ("SILU", CKind::T) => silu(ins, ctx, tabs, out_ord),
-        ("SOFTMAX_WIDE", CKind::T) => softmax_wide(ins, ctx, tabs, out_ord),
+        ("SOFTMAX_WIDE", CKind::T) => softmax_inner(ins, ctx, tabs, out_ord, true),
+        ("SOFTMAX", CKind::T) => softmax_inner(ins, ctx, tabs, out_ord, false),
+        ("GELU", CKind::T) => gelu(ins, ctx, tabs, out_ord),
+        ("CONCAT", CKind::T) | ("CONCAT", CKind::F) | ("CONCAT", CKind::I) => {
+            concat(ins, ctx, tabs, out_ord, out_kind)
+        }
         ("RMSNORM", CKind::T) => rmsnorm(ins, ctx, tabs, out_ord),
         ("ROTARY", CKind::T) => rotary(ins, ctx, tabs, out_ord),
         ("T2I", CKind::I) => t2i(ins, ctx, tabs, out_ord),
@@ -479,8 +484,6 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
 
         // Ladder ops that need the fixed-point bridge / baked tables.
         ("DIV", CKind::T)
-        | ("SOFTMAX", CKind::T) | ("GELU", CKind::T)
-        | ("CONCAT", CKind::T)
         | ("IREDUCE_SUM", CKind::I) => {
             Err(Error::unimplemented(format!(
                 "Vulkan backend: {} on {out_kind:?} needs the ladder bridge/tables (next milestone)",
@@ -1740,11 +1743,12 @@ void main() {{
 }
 
 /// SOFTMAX_WIDE: wide bridge at BIAS, exp table, truncating normalisation.
-fn softmax_wide(
+fn softmax_inner(
     ins: &BoundInstr,
     ctx: &Ctx,
     tabs: &mut Tables,
     out_ord: usize,
+    wide: bool,
 ) -> Result<Lowered> {
     if ctx.t2.is_some() {
         return Err(Error::unimplemented(
@@ -1766,6 +1770,7 @@ fn softmax_wide(
         ctx.plane_of(out_ord, Comp::E)?,
         ctx.plane_of(out_ord, Comp::Z)?,
     );
+    let wide_c = if wide { 1u32 } else { 0u32 };
     let exp = tabs.get("exp", || phi_core::lattice::exp_lut().to_vec());
     let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
     let frac_hi = tabs.get("frac_hi", || phi_core::lattice::frac_hi_lut().to_vec());
@@ -1784,6 +1789,7 @@ layout(std430, binding = 3) buffer OS {{ int os_[]; }};
 layout(std430, binding = 4) buffer OE {{ int oe[]; }};
 layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
 layout(std430, binding = 6) readonly buffer EXP {{ int64_t expo[]; }};
+const int USE_WIDE = {wide_c};
 layout(std430, binding = 7) readonly buffer FRAC {{ int64_t frac[]; }};
 layout(std430, binding = 8) readonly buffer FRACHI {{ int64_t frac_hi[]; }};
 layout(std430, binding = 9) readonly buffer COARSE {{ int64_t coarse[]; }};
@@ -1834,7 +1840,7 @@ void main()
   bool first = true;
   for (uint j = 0; j < c; ++j) {{
     uint i = r * c + j;
-    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t q = USE_WIDE != 0 ? to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS)) : to_fixed(as_[i], ae[i], az[i], int64_t(BIAS));
     int64_t s14 = tdiv64(q, int64_t(16));
     if (first || s14 > vmax) {{ vmax = s14; first = false; }}
   }}
@@ -1842,7 +1848,7 @@ void main()
   int64_t dsum = int64_t(0);
   for (uint j = 0; j < c; ++j) {{
     uint i = r * c + j;
-    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t q = USE_WIDE != 0 ? to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS)) : to_fixed(as_[i], ae[i], az[i], int64_t(BIAS));
     int64_t s14 = tdiv64(q, int64_t(16));
     dsum += exp_at(vmax - s14);
   }}
@@ -1850,7 +1856,7 @@ void main()
 
   for (uint j = 0; j < c; ++j) {{
     uint i = r * c + j;
-    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t q = USE_WIDE != 0 ? to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS)) : to_fixed(as_[i], ae[i], az[i], int64_t(BIAS));
     int64_t s14 = tdiv64(q, int64_t(16));
     int64_t num = exp_at(vmax - s14);
     int64_t c18 = tdiv64(num * (int64_t(1) << 18), den);
@@ -2175,6 +2181,209 @@ void main()
         groups,
         [LOCAL_SIZE, 1, 1],
     ))
+}
+
+/// GELU: sigx table, erf table, multiply and truncating divide, from_fixed.
+fn gelu(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 GELU is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let out_n = ctx.elems(out_ord)?;
+    if ctx.elems(in_ord)? != out_n {
+        return Err(Error::unimplemented("Vulkan: GELU shape mismatch"));
+    }
+    let (x_s, x_e, x_z) = (
+        ctx.plane_of(in_ord, Comp::S)?,
+        ctx.plane_of(in_ord, Comp::E)?,
+        ctx.plane_of(in_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let sigx = tabs.get("sigx", || phi_core::lattice::sigx_lut().to_vec());
+    let phi = tabs.get("phi", || phi_core::lattice::phi_lut().to_vec());
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer XS {{ int xs_[]; }};
+layout(std430, binding = 1) readonly buffer XE {{ int xe[]; }};
+layout(std430, binding = 2) readonly buffer XZ {{ uint xz[]; }};
+layout(std430, binding = 3) buffer OS {{ int os_[]; }};
+layout(std430, binding = 4) buffer OE {{ int oe[]; }};
+layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 6) readonly buffer SIGX {{ int64_t sigx[]; }};
+layout(std430, binding = 7) readonly buffer PHI {{ int64_t phi14[]; }};
+layout(std430, binding = 8) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 9) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 10) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+const int64_t SPAN = 262144;
+
+int64_t tdiv64(int64_t a, int64_t b)
+{{
+  if (b == 0) return 0;
+  int64_t q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+  return ((a < 0) != (b < 0)) ? -q : q;
+}}
+
+void main()
+{{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  int e = xe[i] < 0 ? 0 : (xe[i] > 65535 ? 65535 : xe[i]);
+  int64_t x14 = (xz[i] != 0u) ? int64_t(0) : int64_t(xs_[i]) * sigx[e];
+
+  int64_t p14;
+  if (x14 < -SPAN) p14 = 0;
+  else if (x14 > SPAN) p14 = 16384;
+  else p14 = phi14[int(x14 + SPAN)];
+
+  int64_t y14 = tdiv64(x14 * p14, int64_t(16384));
+  Ladder res = from_fixed(y14 * 16, int64_t(BIAS));
+  os_[i] = res.s; oe[i] = res.e; oz[i] = res.z;
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![x_s, x_e, x_z, o_s, o_e, o_z, sigx, phi, frac, coarse, fine],
+        [out_n as u32, 0, 0, 0],
+        groups,
+        [LOCAL_SIZE, 1, 1],
+    ))
+}
+
+/// CONCAT: join two streams along one axis using a selector table.
+fn concat(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+    kind: CKind,
+) -> Result<Lowered> {
+    if ins.args.len() != 3 {
+        return Err(Error::asm("Vulkan: CONCAT expects a, b, axis"));
+    }
+    let a_ord = ctx.ordinal(&ins.args[0])?;
+    let b_ord = ctx.ordinal(&ins.args[1])?;
+    let axis: usize = ins
+        .args[2]
+        .parse::<i64>()
+        .ok()
+        .and_then(|v| if v >= 0 { Some(v as usize) } else { None })
+        .ok_or_else(|| Error::asm("Vulkan: CONCAT axis must be a non-negative literal"))?;
+    let ash = ctx.info(a_ord)?.static_shape(&ctx.name(a_ord))?;
+    let bsh = ctx.info(b_ord)?.static_shape(&ctx.name(b_ord))?;
+    if ash.len() != bsh.len() || axis >= ash.len() {
+        return Err(Error::asm("Vulkan: CONCAT rank/axis mismatch"));
+    }
+    for d in 0..ash.len() {
+        if d != axis && ash[d] != bsh[d] {
+            return Err(Error::asm("Vulkan: CONCAT shapes differ off-axis"));
+        }
+    }
+    let mut oshape = ash.clone();
+    oshape[axis] = ash[axis] + bsh[axis];
+
+    let strides = |sh: &[usize]| -> Vec<usize> {
+        let mut st = vec![1usize; sh.len()];
+        for i in (0..sh.len().saturating_sub(1)).rev() {
+            st[i] = st[i + 1] * sh[i + 1];
+        }
+        st
+    };
+    let ast = strides(&ash);
+    let bst = strides(&bsh);
+    let ost = strides(&oshape);
+
+    let out_n = ctx.elems(out_ord)?;
+    let mut sel = Vec::with_capacity(out_n);
+    for lin in 0..out_n {
+        let mut rem = lin;
+        let mut a_idx = 0usize;
+        let mut b_idx = 0usize;
+        let mut from_b = false;
+        for d in 0..oshape.len() {
+            let coord = rem / ost[d];
+            rem %= ost[d];
+            if d == axis {
+                if coord < ash[axis] {
+                    a_idx += coord * ast[d];
+                } else {
+                    from_b = true;
+                    b_idx += (coord - ash[axis]) * bst[d];
+                }
+            } else {
+                a_idx += coord * ast[d];
+                b_idx += coord * bst[d];
+            }
+        }
+        sel.push(if from_b { -1 - (b_idx as i64) } else { a_idx as i64 });
+    }
+
+    let comps = comps_for(kind, ctx.t2);
+    let n = comps.len();
+    let mut bufs = Vec::new();
+    let mut decl = String::new();
+    for (i, &c) in comps.iter().enumerate() {
+        let t = plane_glsl_type(kind, c);
+        bufs.push(ctx.plane_of(a_ord, c)?);
+        decl.push_str(&format!(
+            "layout(std430, binding = {i}) readonly buffer A{i} {{ {t} a{i}[]; }};\n"
+        ));
+    }
+    for (i, &c) in comps.iter().enumerate() {
+        let t = plane_glsl_type(kind, c);
+        bufs.push(ctx.plane_of(b_ord, c)?);
+        decl.push_str(&format!(
+            "layout(std430, binding = {}) readonly buffer B{i} {{ {t} b{i}[]; }};\n",
+            n + i
+        ));
+    }
+    for (i, &c) in comps.iter().enumerate() {
+        let t = plane_glsl_type(kind, c);
+        bufs.push(ctx.plane_of(out_ord, c)?);
+        decl.push_str(&format!(
+            "layout(std430, binding = {}) buffer O{i} {{ {t} o{i}[]; }};\n",
+            2 * n + i
+        ));
+    }
+    bufs.push(tabs.push(format!("concat:{}:{out_n}", ash.len()), sel));
+    decl.push_str(&format!(
+        "layout(std430, binding = {}) readonly buffer SEL {{ int64_t sel[]; }};\n",
+        3 * n
+    ));
+
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!(
+            "  if (v >= 0) o{i}[k] = a{i}[int(v)]; else o{i}[k] = b{i}[int(-1 - v)];\n"
+        ));
+    }
+    let src = format!(
+        "#version 450\n#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n\
+layout(local_size_x = {LOCAL_SIZE}) in;\n{decl}\
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;\n\
+void main() {{\n  uint k = gl_GlobalInvocationID.x;\n  if (k >= pc.n) return;\n\
+  int64_t v = sel[k];\n{body}}}\n"
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
 }
 
 fn int_bin(
