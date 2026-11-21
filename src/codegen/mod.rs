@@ -7,6 +7,7 @@ pub mod hip;
 pub mod infer;
 pub mod nonfpu;
 pub mod rust;
+pub mod vulkan;
 pub(crate) mod warm;
 
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,7 @@ pub enum Target {
     Cuda,
     Hip,
     Rust,
+    Vulkan,
 }
 
 impl Target {
@@ -39,8 +41,9 @@ impl Target {
             "cuda" => Ok(Target::Cuda),
             "hip" => Ok(Target::Hip),
             "rust" => Ok(Target::Rust),
+            "vulkan" => Ok(Target::Vulkan),
             other => Err(Error::unimplemented(format!(
-                "no '{other}' backend yet (have: c, nonfpu, cuda, hip, rust)"
+                "no '{other}' backend yet (have: c, nonfpu, cuda, hip, rust, vulkan)"
             ))),
         }
     }
@@ -52,13 +55,14 @@ impl Target {
             Target::Cuda => "cuda",
             Target::Hip => "hip",
             Target::Rust => "rust",
+            Target::Vulkan => "vulkan",
         }
     }
 
     /// Storage type read by the emitted program's argv files.
     pub fn dtype(self) -> &'static str {
         match self {
-            Target::Cuda | Target::Hip => "f32",
+            Target::Cuda | Target::Hip | Target::Vulkan => "f32",
             Target::NonFpu => "u64",
             Target::C | Target::Rust => "f64",
         }
@@ -361,6 +365,9 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     if opts.target == Target::Rust {
         return rust::compile_rust(text, opts, sample);
     }
+    if opts.target == Target::Vulkan {
+        return vulkan::compile_vulkan(text, opts, sample);
+    }
     let nonfpu = opts.target == Target::NonFpu;
     let source_inputs: Vec<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
     let source_outputs = opts.outputs.clone();
@@ -611,6 +618,9 @@ pub fn build(source: &str, workdir: &Path, name: &str, target: Target) -> Result
     }
     if target == Target::Rust {
         return build_rust(source, workdir, name);
+    }
+    if target == Target::Vulkan {
+        return vulkan::build_vulkan(source, workdir, name);
     }
     std::fs::create_dir_all(workdir)?;
     let src = workdir.join(format!("{name}.c"));
