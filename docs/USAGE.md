@@ -85,7 +85,7 @@ Vulkan 19 cases (T/T2 exact) scripts/parity_vulkan.py  # glslc + Vulkan device, 
 Futhark 118/118         scripts/parity_futhark.py
 protocol test suite      cargo test --test protocol
 DOOM frame 1 / frame 2   scripts/parity_doom_native.py
-workspace tests          416/416
+workspace tests          487/487
 ```
 
 The GPU parity gates fail if `nvcc`/`hipcc` is unavailable. Set `NVCC`/`HIPCC`

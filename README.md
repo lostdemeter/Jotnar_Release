@@ -268,7 +268,7 @@ Futhark 118/118 words
 DOOM frame 1 exact vs C native
 DOOM frame 2 exact vs GPU checkpoint
 exact T2 kernels: 1/4/16 threads, repeats, concurrent jobs
-416/416 workspace tests
+487/487 workspace tests
 12/12 arena soak fixtures (interpreter vs arena)
 ```
 

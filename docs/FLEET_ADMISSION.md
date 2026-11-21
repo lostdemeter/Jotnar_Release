@@ -215,6 +215,6 @@ Without `--fleet-dir`, behavior is unchanged (best effort).
 - CPU stages are not yet admitted through the lease table; the current
   interactive competitor is GPU-only.
 
-See [`PROPOSAL.md`](../artifacts/jotnar-fleet/PROPOSAL.md) for the design
-decision record and [`RESULTS.md`](../artifacts/jotnar-fleet/RESULTS.md) for
-measurements.
+See the phase artifacts (`PROPOSAL.md` and `RESULTS.md` under
+`artifacts/jotnar-fleet/`) for the design decision record and measurements.
+Those files live with the phase evidence, outside this repository.
