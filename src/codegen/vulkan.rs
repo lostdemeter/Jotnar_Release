@@ -2825,10 +2825,12 @@ static VkQueue g_queue;
 static uint32_t g_qfam;
 static VkCommandPool g_cpool;
 static VkDescriptorPool g_dpool;
-static VkBuffer g_buf[N_BUF];
-static VkDeviceMemory g_mem[N_BUF];
-static void *g_map[N_BUF];
+static VkBuffer g_arena;
+static VkDeviceMemory g_arena_mem;
+static unsigned char *g_arena_map;
+static VkDeviceSize g_off[N_BUF];
 static VkDeviceSize g_size[N_BUF];
+static VkDeviceSize g_align = 1;
 static VkDescriptorSetLayout g_dsl[N_DISPATCH];
 static VkPipelineLayout g_pl[N_DISPATCH];
 static VkPipeline g_pipe[N_DISPATCH];
@@ -2903,6 +2905,12 @@ static int init_vk(void)
   dci.pEnabledFeatures = &enabled;
   CK(vkCreateDevice(g_phys, &dci, NULL, &g_dev));
   vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+  {
+    VkPhysicalDeviceProperties pr;
+    vkGetPhysicalDeviceProperties(g_phys, &pr);
+    g_align = pr.limits.minStorageBufferOffsetAlignment;
+    if (g_align == 0) g_align = 1;
+  }
 
   VkCommandPoolCreateInfo cp = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
   cp.queueFamilyIndex = g_qfam;
@@ -2923,35 +2931,40 @@ static int init_vk(void)
 
 static int make_buffers(void)
 {
+  VkDeviceSize total = 0;
   for (int i = 0; i < N_BUF; ++i) {
     g_size[i] = buf_bytes(i);
     if (g_size[i] == 0) g_size[i] = 4;
-    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    bi.size = g_size[i];
-    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    CK(vkCreateBuffer(g_dev, &bi, NULL, &g_buf[i]));
-    VkMemoryRequirements mr;
-    vkGetBufferMemoryRequirements(g_dev, g_buf[i], &mr);
-    /* Prefer host-cached coherent memory: reading results straight out of
-       write-combined memory is dramatically slower than the compute. */
-    uint32_t mt = mem_type(mr.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-        VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-    if (mt == UINT32_MAX)
-      mt = mem_type(mr.memoryTypeBits,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (mt == UINT32_MAX) { fprintf(stderr, "no host-visible memory\n"); return 5; }
-    VkMemoryAllocateInfo ma = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    ma.allocationSize = mr.size;
-    ma.memoryTypeIndex = mt;
-    CK(vkAllocateMemory(g_dev, &ma, NULL, &g_mem[i]));
-    CK(vkBindBufferMemory(g_dev, g_buf[i], g_mem[i], 0));
-    CK(vkMapMemory(g_dev, g_mem[i], 0, VK_WHOLE_SIZE, 0, &g_map[i]));
-    memset(g_map[i], 0, (size_t)g_size[i]);
-    if (i >= N_PLANE)
-      memcpy(g_map[i], kTablePtr[i - N_PLANE], (size_t)g_size[i]);
+    g_off[i] = (total + g_align - 1) / g_align * g_align;
+    total = g_off[i] + g_size[i];
   }
+
+  VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+  bi.size = total;
+  bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  CK(vkCreateBuffer(g_dev, &bi, NULL, &g_arena));
+
+  VkMemoryRequirements mr;
+  vkGetBufferMemoryRequirements(g_dev, g_arena, &mr);
+  uint32_t mt = mem_type(mr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+      VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+  if (mt == UINT32_MAX)
+    mt = mem_type(mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (mt == UINT32_MAX) { fprintf(stderr, "no host-visible memory\n"); return 5; }
+
+  VkMemoryAllocateInfo ma = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+  ma.allocationSize = mr.size;
+  ma.memoryTypeIndex = mt;
+  CK(vkAllocateMemory(g_dev, &ma, NULL, &g_arena_mem));
+  CK(vkBindBufferMemory(g_dev, g_arena, g_arena_mem, 0));
+  CK(vkMapMemory(g_dev, g_arena_mem, 0, VK_WHOLE_SIZE, 0, (void **)&g_arena_map));
+  memset(g_arena_map, 0, (size_t)total);
+
+  for (int i = N_PLANE; i < N_BUF; ++i)
+    memcpy(g_arena_map + g_off[i], kTablePtr[i - N_PLANE], (size_t)g_size[i]);
   return 0;
 }
 
@@ -2970,20 +2983,22 @@ static int read_plane(FILE *f, int plane)
   int fw = plane_file_width(plane);
   uint64_t n = kPlaneCount[plane];
   size_t want = (size_t)(n * (uint64_t)fw);
+  unsigned char *dst = g_arena_map + g_off[plane];
+
+  if (elem == E_I32 || elem == E_I64 || elem == E_F32) {
+    size_t got = fread(dst, 1, want, f);
+    if (got == 0 && want > 0) return 1;
+    return got == want ? 0 : 2;
+  }
+
   unsigned char *tmp = malloc(want ? want : 1);
   if (!tmp) return 2;
   size_t got = fread(tmp, 1, want, f);
   if (got == 0 && want > 0) { free(tmp); return 1; }
   if (got != want) { free(tmp); return 2; }
-
   for (uint64_t j = 0; j < n; ++j) {
-    switch (elem) {
-      case E_I8:  ((int32_t *)g_map[plane])[j] = (int32_t)((int8_t *)tmp)[j]; break;
-      case E_U8:  ((uint32_t *)g_map[plane])[j] = (uint32_t)((uint8_t *)tmp)[j]; break;
-      case E_I32: ((int32_t *)g_map[plane])[j] = ((int32_t *)tmp)[j]; break;
-      case E_I64: ((int64_t *)g_map[plane])[j] = ((int64_t *)tmp)[j]; break;
-      case E_F32: ((float *)g_map[plane])[j] = ((float *)tmp)[j]; break;
-    }
+    if (elem == E_I8) ((int32_t *)dst)[j] = (int32_t)((int8_t *)tmp)[j];
+    else              ((uint32_t *)dst)[j] = (uint32_t)((uint8_t *)tmp)[j];
   }
   free(tmp);
   return 0;
@@ -2995,16 +3010,16 @@ static int write_plane(FILE *f, int plane)
   int fw = plane_file_width(plane);
   uint64_t n = kPlaneCount[plane];
   size_t want = (size_t)(n * (uint64_t)fw);
+  const unsigned char *src = g_arena_map + g_off[plane];
+
+  if (elem == E_I32 || elem == E_I64 || elem == E_F32)
+    return fwrite(src, 1, want, f) == want ? 0 : 6;
+
   unsigned char *tmp = malloc(want ? want : 1);
   if (!tmp) return 6;
   for (uint64_t j = 0; j < n; ++j) {
-    switch (elem) {
-      case E_I8:  ((int8_t *)tmp)[j] = (int8_t)((int32_t *)g_map[plane])[j]; break;
-      case E_U8:  ((uint8_t *)tmp)[j] = (uint8_t)((uint32_t *)g_map[plane])[j]; break;
-      case E_I32: ((int32_t *)tmp)[j] = ((int32_t *)g_map[plane])[j]; break;
-      case E_I64: ((int64_t *)tmp)[j] = ((int64_t *)g_map[plane])[j]; break;
-      case E_F32: ((float *)tmp)[j] = ((float *)g_map[plane])[j]; break;
-    }
+    if (elem == E_I8) ((int8_t *)tmp)[j] = (int8_t)((int32_t *)src)[j];
+    else              ((uint8_t *)tmp)[j] = (uint8_t)((uint32_t *)src)[j];
   }
   int ok = fwrite(tmp, 1, want, f) == want;
   free(tmp);
@@ -3114,8 +3129,9 @@ static int build_pipelines(void)
     CK(vkAllocateDescriptorSets(g_dev, &ai, &g_ds[d]));
 
     for (int k = 0; k < dp->nbuf; ++k) {
-      VkDescriptorBufferInfo bi = { .buffer = g_buf[dp->buf[k]], .offset = 0,
-                                    .range = VK_WHOLE_SIZE };
+      VkDescriptorBufferInfo bi = { .buffer = g_arena,
+                                    .offset = g_off[dp->buf[k]],
+                                    .range = g_size[dp->buf[k]] };
       VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
       w.dstSet = g_ds[d];
       w.dstBinding = (uint32_t)k;
