@@ -20,8 +20,9 @@ integration.
 
 This spike did **not**:
 
-- implement T2 beyond `MUL`/`SQUARE`/`ADD`/`SUB` (no T2 `MATMUL`, norms,
-  softmax, or image ops);
+- implement T2 beyond `MUL`/`SQUARE`/`ADD`/`SUB`/`MATMUL` (no T2
+  `TRANSPOSE`, `SLICE`, `TSHIFT`, `TBETA`, `SILU`, `GELU`, softmax, norms,
+  rotary, or `T2I`);
 - implement batched matmul, broadcasting, reductions, norms, softmax,
   rotary, or the image ops;
 - support T streams in the CUDA/HIP emitters (unchanged) or change any
@@ -30,8 +31,7 @@ This spike did **not**:
 - add CI;
 - push or merge any branch.
 
-Branch state: three commits on `vulkan-backend` (`8147d22`, `32172cd`,
-`4d33d2b`, `4444340`).
+Branch state: 25 commits on `vulkan-backend`, based on `main` at `5cbc157`.
 
 ## Host and device verification
 
@@ -175,6 +175,10 @@ is float32 on Vulkan and float64 on C, so it uses a tolerance.
 | `IADD`/`IMUL`, `IMATMUL`, `MATMUL` (F) | PASS | PASS |
 | T2 `MUL` then `ADD` (all four planes) | PASS | PASS (bit-identical) |
 
+Bit-identical comparisons hold inside the reference's numeric bounds.
+Over-range accumulators saturate instead of raising, because there is no
+bounds-fault channel yet; see Known limits.
+
 ## Qwen block acceptance gate
 
 `scripts/qwen_gate.py` builds the block from `docs/LADDER_OPS.md` section 4
@@ -184,7 +188,7 @@ outputs) and compares all 37 streams (91 planes) against the interpreter.
 | target | planes exact | result |
 |---|---|---|
 | Vulkan | **91/91** | PASS |
-| non-FPU | 77/91 | FAIL, from `qwen_pr` onward |
+| non-FPU | **91/91** | PASS (after the `SOFTMAX_WIDE` fix) |
 
 `CONFIG serve_input`/`serve_output` take comma-separated stream names, so the
 whole block runs resident: `serve_input tokens,pos`,
@@ -201,11 +205,11 @@ Vulkan is nearly flat (~3 ms fixed for 30 dispatches with barriers) while the
 C binary scales with tokens; the crossover is around 64-128 tokens. Serve
 output is byte-identical to the one-shot run at every size.
 
-`qwen_pr` is the `SOFTMAX_WIDE` output. The non-FPU emitter disagrees with
-the interpreter there by a rung on some elements, and the difference
-propagates through attention, the residual, both norms and the MLP. This is
-the same divergence the small parity case exposed; the block gate confirms it
-at scale. Vulkan matches the oracle at every stage.
+`qwen_pr` is the `SOFTMAX_WIDE` output. Before the fix, the non-FPU emitter
+disagreed with the interpreter there by a rung on some elements, and the
+difference propagated through attention, the residual, both norms and the
+MLP. The `Fix non-FPU SOFTMAX_WIDE` commit corrects the division to `tdiv`;
+both targets now match the oracle at every stage.
 
 ## Dispatch fusion: evaluated, not implemented
 
