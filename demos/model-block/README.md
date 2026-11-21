@@ -78,13 +78,13 @@ trained F32 checkpoint without changing the graph.
 `trained/` is a real trained F32 checkpoint (22 tensors, 464,128 bytes) for the
 same graph. It is a tiny byte-level next-byte model: D=64, 2 blocks, 4 heads,
 context 16, vocab 256, learned position embedding. It was trained from scratch
-on the eight documentation files recorded in `training.json` — the pre-slice-3,
-pre-Vulkan corpus (110,491 bytes; `corpus_sha256 eb51498b…`) — at 2,500 steps
-and 8 threads. The current docs differ from those hashes, so retraining from
-this checkout yields a different checkpoint; `trained/README.md` records the
-exact flags and the historical corpus. Losses are 3.22 train / 3.36 val bits
-per byte (uniform is 8.00). It is not a chat model; the generated sample is
-reported honestly.
+on the eight documentation files shipped as `trained/corpus.tar.gz` — the
+pre-slice-3, pre-Vulkan corpus (110,491 bytes; `corpus_sha256 eb51498b…`) — at
+2,500 steps and 8 threads. The snapshot is checked in, so extracting it and
+passing `--corpus-root` reproduces the checked-in manifest exactly; training
+on the current docs yields a different checkpoint. `trained/README.md` records
+the exact flags. Losses are 3.22 train / 3.36 val bits per byte (uniform is
+8.00). It is not a chat model; the generated sample is reported honestly.
 
 `scripts/model_decode_gate.py` owns the checkpoint, byte tokenizer, prompt, and
 greedy policy in the controller, materializes `tok_embed + pos_embed`, and runs

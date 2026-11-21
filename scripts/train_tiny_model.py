@@ -21,6 +21,8 @@ trained model, not a chat model; the report must say so.
 Usage:
   python3 scripts/train_tiny_model.py --out demos/model-block/trained
   python3 scripts/train_tiny_model.py --steps 3000 --device cuda --out /tmp/tiny
+  python3 scripts/train_tiny_model.py --corpus-root demos/model-block/trained/corpus \
+      --steps 2500 --threads 8 --out /tmp/repro
 """
 from __future__ import annotations
 
@@ -135,11 +137,11 @@ class Tiny(torch.nn.Module):
         return x @ self.HEAD
 
 
-def load_corpus() -> tuple[bytes, list[dict]]:
+def load_corpus(root: Path = ROOT) -> tuple[bytes, list[dict]]:
     chunks = []
     files = []
     for rel in CORPUS_FILES:
-        path = ROOT / rel
+        path = Path(root) / rel
         data = path.read_bytes()
         chunks.append(data)
         files.append(
@@ -262,6 +264,11 @@ def export(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument(
+        "--corpus-root",
+        default=str(ROOT),
+        help="directory holding the eight corpus files (default: repository root)",
+    )
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--context", type=int, default=16)
     ap.add_argument("--batch", type=int, default=64)
@@ -280,7 +287,7 @@ def main() -> int:
     torch.use_deterministic_algorithms(True)
     device = torch.device(args.device)
 
-    corpus, files = load_corpus()
+    corpus, files = load_corpus(Path(args.corpus_root))
     corpus_sha = hashlib.sha256(corpus).hexdigest()
     data = torch.tensor(list(corpus), dtype=torch.long)
     split = int(len(corpus) * 0.9)

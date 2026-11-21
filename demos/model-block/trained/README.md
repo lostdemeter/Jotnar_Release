@@ -11,11 +11,12 @@ architecture D=64, 2 blocks, 4 heads, head_dim=16, inter=128, vocab=256
 context      16 bytes, learned position embedding
 tokenizer    byte-level (identity on 0..255)
 objective    next byte from a 16-byte context (CE on the last position)
-corpus       110,491 bytes: the eight pre-slice-3 docs pinned per file in
-             training.json (README.md + docs/{USAGE,WORKLOAD_CONTROLLER,
-             STREAMING,EXECUTOR_CONTRACT,LADDER_OPS,FLEET_ADMISSION,
-             DOOM_TWO_NODE}.md)
+corpus       110,491 bytes uncompressed, shipped as corpus.tar.gz (40,464 B);
+             the eight pre-slice-3 docs: README.md + docs/{USAGE,
+             WORKLOAD_CONTROLLER,STREAMING,EXECUTOR_CONTRACT,LADDER_OPS,
+             FLEET_ADMISSION,DOOM_TWO_NODE}.md
              corpus sha256 eb51498b55d742009b093d9a231e9739df49f80bf48da039949b940b126bf0a7
+             per-file/archive hashes in corpus.manifest.json
 split        99,441 train / 11,050 val bytes
 training     2,500 steps, batch 64, AdamW lr 2e-3 cosine, seed 0, CPU F32
              torch 2.14.1+cu130, 8 threads
@@ -52,34 +53,37 @@ manifest.json           checkpoint manifest, tensor hashes, provenance
 tensors/*.bin           little-endian F32 tensor blobs
 prompt.json             16-byte prompt fixture + true continuation
 training.json           training configuration, losses, greedy sample
+corpus.tar.gz           exact historical corpus (40,464 B; see corpus.README.md)
+corpus.manifest.json    corpus, archive, and per-file sha256
+corpus.README.md        extraction + reproduction notes
 ```
 
 ## Regenerate
 
-The checkpoint was trained on the eight documentation files recorded in
-`training.json` (110,491 bytes, `corpus_sha256 eb51498b…`, with a per-file
-sha256 for each entry). That corpus is the documentation tree **before the
-slice-3 edits and before the Vulkan rebase**; the current checkout differs from
-the recorded per-file hashes, so retraining from it yields a different
+The checkpoint was trained on the eight documentation files in
+`corpus.tar.gz` (110,491 bytes uncompressed, `corpus_sha256 eb51498b…`;
+archive and per-file hashes in `corpus.manifest.json`). That corpus is the
+documentation tree **before the slice-3 edits and before the Vulkan rebase**;
+the current checkout differs, so training on the live docs yields a different
 checkpoint (different corpus hash and manifest).
 
-To reproduce the checked-in bytes, train on that historical corpus with the
+To reproduce the checked-in bytes, extract the snapshot and train with the
 recorded flags:
 
 ```sh
-git worktree add /tmp/jotnar-pre-slice3 0f016c9
-cp scripts/train_tiny_model.py /tmp/jotnar-pre-slice3/scripts/
-cd /tmp/jotnar-pre-slice3
-python3 scripts/train_tiny_model.py --steps 2500 --threads 8 --out /tmp/repro
+mkdir -p /tmp/jotnar-corpus
+tar -xzf demos/model-block/trained/corpus.tar.gz -C /tmp/jotnar-corpus
+python3 scripts/train_tiny_model.py \
+  --corpus-root /tmp/jotnar-corpus \
+  --steps 2500 --threads 8 --out /tmp/repro
 sha256sum /tmp/repro/manifest.json
 # 01b128cea5b4d2d12297503f2742186825d235ad4e432a0313ed60c7e9d0a4c4
 ```
 
-`0f016c9` is the pre-rebase staging head of the workload branch, which is not
-on `origin` (the branch was rebased; no pushed commit carries the exact
-pre-Vulkan corpus). The per-file hashes in `training.json` are the portable
-contract for reconstructing that corpus elsewhere. The script is deterministic
-for the pinned torch/CPU stack (seed 0, CPU, F32,
+`--corpus-root` reads the eight files from the extracted directory; no
+checkout of the historical commit is needed. The snapshot is the portable
+contract, and `0f016c9` is recorded as its provenance. The script is
+deterministic for the pinned torch/CPU stack (seed 0, CPU, F32,
 `torch.use_deterministic_algorithms(True)`). The checked-in checkpoint is the
 artifact the gates load; its manifest hash is recorded in every gate summary.
 
@@ -89,5 +93,5 @@ artifact the gates load; its manifest hash is recorded in every gate summary.
 - 16-byte context, no causal LM objective, no KV cache.
 - The listing `demos/model-block/attn4.asm` fixes D=64 and four 16-wide heads;
   the checkpoint must keep that shape.
-- The corpus is in-repo documentation. It is a provenance choice, pinned by
-  hash in `training.json`, not a claim that the model generalizes beyond it.
+- The corpus is the in-repo snapshot `corpus.tar.gz`, pinned by hash; it is a
+  provenance choice, not a claim that the model generalizes beyond it.

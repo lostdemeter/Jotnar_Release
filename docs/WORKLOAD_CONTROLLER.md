@@ -470,8 +470,11 @@ model        D=64, 2 blocks, H=4, Dh=16, inter=128, vocab=256, context=16
 tokenizer    byte-level (identity on 0..255)
 objective    next byte from a 16-byte context, CE on the last position
 corpus       110,491 bytes: the eight pre-slice-3, pre-Vulkan README/docs files
-             pinned in training.json (sha256 eb51498b...)
+             shipped as demos/model-block/trained/corpus.tar.gz
+             (sha256 eb51498b...; archive/per-file hashes in
+             corpus.manifest.json)
 training     2,500 steps, batch 64, AdamW lr 2e-3 cosine, seed 0, CPU F32
+             8 threads
 loss         3.22 bits/byte train, 3.36 bits/byte val (uniform = 8.00)
 ```
 
