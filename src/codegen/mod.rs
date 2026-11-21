@@ -351,9 +351,12 @@ pub fn compile_program(text: &str, opts: &CompileOptions, sample: Feeds) -> Resu
     let mut bound = asm::assemble(text, &opts.asm)?;
     let (t2_cfg, _f_bits) =
         phi_core::t2::check_widths(bound.config.get_i64("t2"), bound.config.get_i64("bridge_f"))?;
-    if t2_cfg.is_some() && opts.target != Target::NonFpu {
+    if t2_cfg.is_some()
+        && opts.target != Target::NonFpu
+        && opts.target != Target::Vulkan
+    {
         return Err(Error::unimplemented(
-            "T2 requires --target nonfpu (no silent mantissa drop)",
+            "T2 requires --target nonfpu or vulkan (no silent mantissa drop)",
         ));
     }
     if opts.target == Target::Cuda {

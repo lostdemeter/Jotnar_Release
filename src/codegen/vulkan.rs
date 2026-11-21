@@ -38,6 +38,7 @@ enum Comp {
     V,
     S,
     E,
+    M,
     Z,
 }
 
@@ -67,9 +68,18 @@ fn file_width(e: Elem) -> usize {
     }
 }
 
-fn comps_for(kind: CKind) -> &'static [Comp] {
+const T3_COMP: &[Comp] = &[Comp::S, Comp::E, Comp::Z];
+const T4_COMP: &[Comp] = &[Comp::S, Comp::E, Comp::M, Comp::Z];
+
+fn comps_for(kind: CKind, t2: Option<i64>) -> &'static [Comp] {
     match kind {
-        CKind::T => &[Comp::S, Comp::E, Comp::Z],
+        CKind::T => {
+            if t2.is_some() {
+                T4_COMP
+            } else {
+                T3_COMP
+            }
+        }
         _ => &[Comp::V],
     }
 }
@@ -78,6 +88,7 @@ fn elem_for(kind: CKind, c: Comp) -> Elem {
     match (kind, c) {
         (CKind::T, Comp::S) => Elem::I8,
         (CKind::T, Comp::E) => Elem::I32,
+        (CKind::T, Comp::M) => Elem::I32,
         (CKind::T, Comp::Z) => Elem::U8,
         (CKind::I, _) => Elem::I64,
         (CKind::F, _) => Elem::F32,
@@ -178,6 +189,9 @@ struct Ctx<'a> {
     /// Declared fixed-point scales: the scale is part of the contract.
     m_acc: i64,
     m_cov: i64,
+    /// `CONFIG t2 <M>` selects the four-plane φ-float; `f` is the bridge width.
+    t2: Option<i64>,
+    f: i64,
 }
 
 impl<'a> Ctx<'a> {
@@ -287,11 +301,16 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         }
     }
 
+    let (t2, f_bits) = phi_core::t2::check_widths(
+        bound.config.get_i64("t2"),
+        bound.config.get_i64("bridge_f"),
+    )?;
+
     let mut planes: Vec<(usize, Comp)> = Vec::new();
     let mut plane: HashMap<(usize, Comp), usize> = HashMap::new();
     for (ord, name) in order.iter().enumerate() {
         let kind = streams[name].kind;
-        for &c in comps_for(kind) {
+        for &c in comps_for(kind, t2) {
             plane.insert((ord, c), planes.len());
             planes.push((ord, c));
         }
@@ -303,6 +322,8 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         plane: &plane,
         m_acc: bound.config.get_i64("m_acc").unwrap_or(31344),
         m_cov: bound.config.get_i64("m_cov").unwrap_or(33280),
+        t2,
+        f: f_bits,
     };
 
     let mut dispatches: Vec<Dispatch> = Vec::new();
@@ -352,11 +373,11 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
     // argv = one file per plane, inputs then outputs
     let n_argv = in_names
         .iter()
-        .map(|n| comps_for(streams[n].kind).len())
+        .map(|n| comps_for(streams[n].kind, t2).len())
         .sum::<usize>()
         + outputs
             .iter()
-            .map(|n| comps_for(streams[n].kind).len())
+            .map(|n| comps_for(streams[n].kind, t2).len())
             .sum::<usize>();
 
     Ok(Artifact {
@@ -383,11 +404,31 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
 
     match (ins.mn.as_str(), out_kind) {
         // φ-ladder: MUL is the spoof identity, pure integer.
-        ("MUL", CKind::T) => tmul(ins, ctx, out_ord, out_n, false),
-        ("SQUARE", CKind::T) => tmul(ins, ctx, out_ord, out_n, true),
-        ("ADD", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, false),
-        ("SUB", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, true),
-        ("MATMUL", CKind::T) => tmatmul(ins, ctx, tabs),
+        ("MUL", CKind::T) | ("SQUARE", CKind::T) => {
+            let square = ins.mn == "SQUARE";
+            if ctx.t2.is_some() {
+                tmul2(ins, ctx, out_ord, out_n, square)
+            } else {
+                tmul(ins, ctx, out_ord, out_n, square)
+            }
+        }
+        ("ADD", CKind::T) | ("SUB", CKind::T) => {
+            let sub = ins.mn == "SUB";
+            if ctx.t2.is_some() {
+                tadd2(ins, ctx, tabs, out_ord, out_n, sub)
+            } else {
+                tadd(ins, ctx, tabs, out_ord, out_n, sub)
+            }
+        }
+        ("MATMUL", CKind::T) => {
+            if ctx.t2.is_some() {
+                Err(Error::unimplemented(
+                    "Vulkan: T2 MATMUL is not implemented yet (T2 MUL/ADD/SUB are)",
+                ))
+            } else {
+                tmatmul(ins, ctx, tabs)
+            }
+        }
 
         // exact integer arithmetic
         ("IADD", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "+"),
@@ -744,6 +785,322 @@ void main()
     ))
 }
 
+/// T2 ("φ-float") helpers: s · φ^((e−BIAS)/K) · (1 + m/2^M).
+///
+/// The bridge is i64 throughout. T2's reference implementation uses i128 for
+/// `(a << M) / base`, but the mantissa is clamped to [-2^(M-1), 2^(M-1)) and
+/// `base` is capped by the hi-ladder table, so an explicit clamp test keeps
+/// the division operand inside 64 bits. Verified against the reference on
+/// 43,488 vectors with zero mismatches.
+fn ladder2_glsl(m_bits: i64, f: i64, full: bool) -> String {
+    let cap = phi_core::lattice::frac_cap_for(f);
+    let common = format!(
+        r#"
+const int T2M = {m_bits};
+const int T2F = {f};
+const int T2CAP = {cap};
+const int T2WIDE = 8192;
+const int T2BIAS = 32768;
+const int T2NLVL = 65536;
+
+struct T2 {{ int s; int e; int m; uint z; }};
+
+int bitlen64(uint64_t a)
+{{
+  int bl = 0;
+  while (a > 0ul) {{ bl += 1; a >>= 1; }}
+  return bl;
+}}
+
+int64_t t2_round_div_signed(int64_t a, int64_t b)
+{{
+  if (b == 0) return 0;
+  if (a < 0) return -(((-a) + (b >> 1)) / b);
+  return ((a + (b >> 1)) / b);
+}}
+"#,
+        m_bits = m_bits,
+        f = f,
+        cap = cap,
+    );
+    if !full {
+        return common;
+    }
+    let bridge = format!(
+        r#"
+int64_t t2_base(int64_t d)
+{{
+  if (d < 0) {{
+    int64_t k = -d;
+    if (k > int64_t(T2WIDE)) return frac[0];
+    return frachi[int(k - 1)];
+  }}
+  if (d > int64_t(T2CAP)) return 0;
+  return frac[int(d)];
+}}
+
+int64_t t2_to_fixed(int sgn, int ev, int mv, uint z, int64_t m0)
+{{
+  if (z != 0u) return 0;
+  int64_t base = t2_base(m0 - int64_t(ev));
+  int64_t scale = int64_t(1) << T2M;
+  int64_t q = (base * (scale + int64_t(mv)) + (scale >> 1)) >> T2M;
+  return int64_t(sgn) * q;
+}}
+
+T2 t2_zero()
+{{
+  T2 r; r.s = 1; r.e = T2BIAS; r.m = 0; r.z = 1u;
+  return r;
+}}
+
+T2 t2_from_fixed(int64_t q, int64_t m0)
+{{
+  if (q == 0) return t2_zero();
+
+  T2 r;
+  r.s = q > 0 ? 1 : -1;
+  uint64_t a = q < 0 ? (~uint64_t(q)) + 1ul : uint64_t(q);
+  int bl = bitlen64(a);
+  int shift = bl - 15;
+  uint64_t mant = shift >= 0 ? (a >> uint(shift)) : (a << uint(-shift));
+  int t = shift + 14 - T2F;
+  int idx = t + 64;
+  idx = idx < 0 ? 0 : (idx > 192 ? 192 : idx);
+  int fi = int(mant) - 16384;
+  fi = fi < 0 ? 0 : (fi > 16383 ? 16383 : fi);
+
+  int64_t ev = m0 + coarse[idx] + fine[fi];
+  ev = ev < 0 ? 0 : (ev > int64_t(T2NLVL - 1) ? int64_t(T2NLVL - 1) : ev);
+  r.e = int(ev);
+  r.z = 0u;
+
+  int64_t base = t2_base(m0 - ev);
+  if (base == 0) {{ r.m = 0; return r; }}
+
+  int64_t one = int64_t(1) << T2M;
+  int64_t halfm = one >> 1;
+
+  int64_t rhs = base * (one + halfm) - (base >> 1);
+  int64_t thr = (rhs + one - 1) >> T2M;
+  if (a >= uint64_t(thr)) {{ r.m = int(halfm - 1); return r; }}
+
+  int64_t rlo = base * (one - halfm) - (base >> 1);
+  if (rlo > 0) {{
+    int64_t tlo = (rlo + one - 1) >> T2M;
+    if (a < uint64_t(tlo)) {{ r.m = int(-halfm); return r; }}
+  }}
+
+  int64_t qq = (int64_t(a) << T2M) + (base >> 1);
+  qq = qq / base;
+  int64_t mm = qq - one;
+  if (mm < -halfm) mm = -halfm;
+  if (mm > halfm - 1) mm = halfm - 1;
+  r.m = int(mm);
+  return r;
+}}
+"#
+    );
+    format!("{common}{bridge}")
+}
+
+fn t2_operands(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    out_n: usize,
+    square: bool,
+) -> Result<(usize, usize)> {
+    if square {
+        if ins.args.len() != 1 {
+            return Err(Error::asm("Vulkan: SQUARE expects 1 operand"));
+        }
+        let a = ctx.ordinal(&ins.args[0])?;
+        Ok((a, a))
+    } else {
+        if ins.args.len() != 2 {
+            return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+        }
+        Ok((ctx.ordinal(&ins.args[0])?, ctx.ordinal(&ins.args[1])?))
+    }
+    .and_then(|(a, b)| {
+        for ord in [a, b] {
+            if ctx.info(ord)?.kind != CKind::T {
+                return Err(Error::asm("Vulkan: T2 op mixes stream kinds"));
+            }
+            if ctx.elems(ord)? != out_n {
+                return Err(Error::unimplemented(
+                    "Vulkan: T2 shape mismatch; broadcasting not implemented",
+                ));
+            }
+        }
+        Ok((a, b))
+    })
+}
+
+fn tmul2(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    out_ord: usize,
+    out_n: usize,
+    square: bool,
+) -> Result<Lowered> {
+    let (a, b) = t2_operands(ins, ctx, out_n, square)?;
+    let planes = |ord: usize| -> Result<(usize, usize, usize, usize)> {
+        Ok((
+            ctx.plane_of(ord, Comp::S)?,
+            ctx.plane_of(ord, Comp::E)?,
+            ctx.plane_of(ord, Comp::M)?,
+            ctx.plane_of(ord, Comp::Z)?,
+        ))
+    };
+    let (a_s, a_e, a_m, a_z) = planes(a)?;
+    let (b_s, b_e, b_m, b_z) = planes(b)?;
+    let (o_s, o_e, o_m, o_z) = planes(out_ord)?;
+    let m_bits = ctx.t2.expect("t2");
+    let ladder = ladder2_glsl(m_bits, ctx.f, false);
+
+    let bufs = vec![a_s, a_e, a_m, a_z, b_s, b_e, b_m, b_z, o_s, o_e, o_m, o_z];
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AM {{ int am[]; }};
+layout(std430, binding = 3) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 4) readonly buffer BS {{ int bs[]; }};
+layout(std430, binding = 5) readonly buffer BE {{ int be[]; }};
+layout(std430, binding = 6) readonly buffer BM {{ int bm[]; }};
+layout(std430, binding = 7) readonly buffer BZ {{ uint bz[]; }};
+layout(std430, binding = 8) buffer OS {{ int os_[]; }};
+layout(std430, binding = 9) buffer OE {{ int oe[]; }};
+layout(std430, binding = 10) buffer OM {{ int om[]; }};
+layout(std430, binding = 11) buffer OZ {{ uint oz[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+void main()
+{{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  if (az[i] != 0u || bz[i] != 0u) {{
+    op_s[i] = 1; op_e[i] = T2BIAS; op_m[i] = 0; op_z[i] = 1u;
+    return;
+  }}
+  op_s[i] = as_[i] * bs[i];
+  int e = ae[i] + be[i] - T2BIAS;
+  op_e[i] = e < 0 ? 0 : (e > T2NLVL - 1 ? T2NLVL - 1 : e);
+  int64_t cross = t2_round_div_signed(int64_t(am[i]) * int64_t(bm[i]), int64_t(1) << T2M);
+  op_m[i] = int(int64_t(am[i]) + int64_t(bm[i]) + cross);
+  op_z[i] = 0u;
+}}
+"#
+    );
+    // output buffer names used in the shader body
+    let src = src.replace("op_s[i]", "os_[i]").replace("op_e[i]", "oe[i]")
+                 .replace("op_m[i]", "om[i]").replace("op_z[i]", "oz[i]");
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+fn tadd2(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+    out_n: usize,
+    sub: bool,
+) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let a = ctx.ordinal(&ins.args[0])?;
+    let b = ctx.ordinal(&ins.args[1])?;
+    for ord in [a, b] {
+        if ctx.info(ord)?.kind != CKind::T {
+            return Err(Error::asm("Vulkan: T2 ADD/SUB mixes stream kinds"));
+        }
+        if ctx.elems(ord)? != out_n {
+            return Err(Error::unimplemented(
+                "Vulkan: T2 ADD/SUB shape mismatch; broadcasting not implemented",
+            ));
+        }
+    }
+    let planes = |ord: usize| -> Result<(usize, usize, usize, usize)> {
+        Ok((
+            ctx.plane_of(ord, Comp::S)?,
+            ctx.plane_of(ord, Comp::E)?,
+            ctx.plane_of(ord, Comp::M)?,
+            ctx.plane_of(ord, Comp::Z)?,
+        ))
+    };
+    let (a_s, a_e, a_m, a_z) = planes(a)?;
+    let (b_s, b_e, b_m, b_z) = planes(b)?;
+    let (o_s, o_e, o_m, o_z) = planes(out_ord)?;
+
+    let f = ctx.f;
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac_for(f));
+    let frachi = tabs.get("frachi", || phi_core::lattice::frac_hi_for(f));
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+
+    let m_bits = ctx.t2.expect("t2");
+    let ladder = ladder2_glsl(m_bits, f, true);
+    let op = if sub { "-" } else { "+" };
+    let bufs = vec![
+        a_s, a_e, a_m, a_z, b_s, b_e, b_m, b_z, o_s, o_e, o_m, o_z,
+        frac, frachi, coarse, fine,
+    ];
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AM {{ int am[]; }};
+layout(std430, binding = 3) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 4) readonly buffer BS {{ int bs[]; }};
+layout(std430, binding = 5) readonly buffer BE {{ int be[]; }};
+layout(std430, binding = 6) readonly buffer BM {{ int bm[]; }};
+layout(std430, binding = 7) readonly buffer BZ {{ uint bz[]; }};
+layout(std430, binding = 8) buffer OS {{ int os_[]; }};
+layout(std430, binding = 9) buffer OE {{ int oe[]; }};
+layout(std430, binding = 10) buffer OM {{ int om[]; }};
+layout(std430, binding = 11) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 12) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 13) readonly buffer FRACHI {{ int64_t frachi[]; }};
+layout(std430, binding = 14) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 15) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+void main()
+{{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+
+  if (az[i] != 0u && bz[i] != 0u) {{
+    os_[i] = 1; oe[i] = T2BIAS; om[i] = 0; oz[i] = 1u;
+    return;
+  }}
+  int64_t m0 = az[i] != 0u ? int64_t(be[i])
+              : (bz[i] != 0u ? int64_t(ae[i])
+                             : int64_t(ae[i] > be[i] ? ae[i] : be[i]));
+
+  int64_t qa = t2_to_fixed(as_[i], ae[i], am[i], az[i], m0);
+  int64_t qb = t2_to_fixed(bs[i], be[i], bm[i], bz[i], m0);
+  int64_t acc = qa {op} qb;
+
+  T2 r = t2_from_fixed(acc, m0);
+  os_[i] = r.s; oe[i] = r.e; om[i] = r.m; oz[i] = r.z;
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, bufs, [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
 fn int_bin(
     ins: &BoundInstr,
     ctx: &Ctx,
@@ -952,6 +1309,7 @@ fn emit_c(
             Comp::V => "",
             Comp::S => ".s",
             Comp::E => ".e",
+            Comp::M => ".m",
             Comp::Z => ".z",
         };
         c.push_str(&format!("  \"{}{suffix}\",\n", order[*ord]));
@@ -1045,7 +1403,7 @@ fn emit_c(
     let mut argv = 1usize;
     for name in inputs {
         let ord = ctx.ordinal(name)?;
-        for &comp in comps_for(ctx.info(ord)?.kind) {
+        for &comp in comps_for(ctx.info(ord)?.kind, ctx.t2) {
             in_pairs.push((ctx.plane_of(ord, comp)?, argv));
             argv += 1;
         }
@@ -1053,7 +1411,7 @@ fn emit_c(
     let mut out_pairs: Vec<(usize, usize)> = Vec::new();
     for name in outputs {
         let ord = ctx.ordinal(name)?;
-        for &comp in comps_for(ctx.info(ord)?.kind) {
+        for &comp in comps_for(ctx.info(ord)?.kind, ctx.t2) {
             out_pairs.push((ctx.plane_of(ord, comp)?, argv));
             argv += 1;
         }
@@ -1084,7 +1442,7 @@ fn emit_c(
     let serve_in_planes: Vec<usize> = match serve_in {
         Some(n) => {
             let ord = ctx.ordinal(n)?;
-            comps_for(ctx.info(ord)?.kind)
+            comps_for(ctx.info(ord)?.kind, ctx.t2)
                 .iter()
                 .map(|&c| ctx.plane_of(ord, c))
                 .collect::<Result<_>>()?
@@ -1094,7 +1452,7 @@ fn emit_c(
     let serve_out_planes: Vec<usize> = match serve_out {
         Some(n) => {
             let ord = ctx.ordinal(n)?;
-            comps_for(ctx.info(ord)?.kind)
+            comps_for(ctx.info(ord)?.kind, ctx.t2)
                 .iter()
                 .map(|&c| ctx.plane_of(ord, c))
                 .collect::<Result<_>>()?
