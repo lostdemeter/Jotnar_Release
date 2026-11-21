@@ -207,9 +207,7 @@ OUT = SOFTMAX_WIDE(A)
                          [32768, 33000, 32500, 32768, 34000, 33200, 32900, 33100],
                          [0, 0, 0, 1, 0, 0, 0, 0], [2, 4])},
         {"kind": "T", "shape": [2, 4]},
-        # non-FPU is off by one rung on element 4 of this case; the
-        # interpreter is the oracle, so gate against it.
-        "interp",
+        "nonfpu",
         True,
     ),
     (
