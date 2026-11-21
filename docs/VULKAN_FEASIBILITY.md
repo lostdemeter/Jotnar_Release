@@ -175,6 +175,23 @@ is float32 on Vulkan and float64 on C, so it uses a tolerance.
 | `IADD`/`IMUL`, `IMATMUL`, `MATMUL` (F) | PASS | PASS |
 | T2 `MUL` then `ADD` (all four planes) | PASS | PASS (bit-identical) |
 
+## Qwen block acceptance gate
+
+`scripts/qwen_gate.py` builds the block from `docs/LADDER_OPS.md` section 4
+with a deterministic payload (8 tokens, `D=32`, 16-wide SwiGLU, 9 latent
+outputs) and compares all 37 streams (91 planes) against the interpreter.
+
+| target | planes exact | result |
+|---|---|---|
+| Vulkan | **91/91** | PASS |
+| non-FPU | 77/91 | FAIL, from `qwen_pr` onward |
+
+`qwen_pr` is the `SOFTMAX_WIDE` output. The non-FPU emitter disagrees with
+the interpreter there by a rung on some elements, and the difference
+propagates through attention, the residual, both norms and the MLP. This is
+the same divergence the small parity case exposed; the block gate confirms it
+at scale. Vulkan matches the oracle at every stage.
+
 ## Measurements
 
 1,048,576 elements, `S = MUL(A,B)` then `OUT = ADD(S,B)`, three-plane T
@@ -242,10 +259,14 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. The Qwen block listing as the acceptance gate: build it for Vulkan,
-   non-FPU and the interpreter, and compare plane-for-plane.
+1. The non-FPU `SOFTMAX_WIDE` divergence, which is a bug in that emitter
+   rather than in Vulkan (the interpreter is the oracle).
 2. `GELU`, plain `SOFTMAX` and `CONCAT` only if something beyond the Qwen
    block needs them.
+3. Performance: the current ladder path is correctness-first (one dispatch
+   per op, barrier between, host-visible buffers). The resident loop is
+   already 2.4x the CPU reference; batching and device-local staging are the
+   next levers.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
 4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
