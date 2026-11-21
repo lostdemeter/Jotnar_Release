@@ -186,6 +186,21 @@ outputs) and compares all 37 streams (91 planes) against the interpreter.
 | Vulkan | **91/91** | PASS |
 | non-FPU | 77/91 | FAIL, from `qwen_pr` onward |
 
+`CONFIG serve_input`/`serve_output` take comma-separated stream names, so the
+whole block runs resident: `serve_input tokens,pos`,
+`serve_output h0_0,...,h0_8`. Resident Vulkan against the emitted C binary
+invoked per call:
+
+| tokens | resident Vulkan | C binary per run | ratio |
+|---|---|---|---|
+| 8 | 3.06 ms/frame | 1.77 ms | 0.58x |
+| 64 | 4.32 ms/frame | 3.56 ms | 0.82x |
+| 256 | 8.33 ms/frame | 32.32 ms | **3.88x** |
+
+Vulkan is nearly flat (~3 ms fixed for 30 dispatches with barriers) while the
+C binary scales with tokens; the crossover is around 64-128 tokens. Serve
+output is byte-identical to the one-shot run at every size.
+
 `qwen_pr` is the `SOFTMAX_WIDE` output. The non-FPU emitter disagrees with
 the interpreter there by a rung on some elements, and the difference
 propagates through attention, the residual, both norms and the MLP. This is
@@ -271,12 +286,11 @@ Build times: Vulkan 0.78 s, non-FPU 0.37 s (shader compilation + `cc`).
 
 ## Next
 
-1. A resident mode for multi-stream graphs, so setup is paid once for
-   blocks like Qwen rather than per run.
-2. Device-local buffers with staging, and dispatch fusion for elementwise
-   chains — the remaining correctness-first costs.
-3. T2 coverage for the ops that still refuse: `TRANSPOSE`, `SLICE`, `TSHIFT`,
-   `TBETA`, `SILU`, `T2I`.
+1. Device-local buffers with staging, and dispatch fusion for elementwise
+   chains — the remaining correctness-first costs. Most of the 3 ms fixed
+   cost in the Qwen block is one barrier per dispatch.
+2. T2 coverage for the ops that still refuse: `TRANSPOSE`, `SLICE`, `TSHIFT`,
+   `TBETA`, `SILU`, `GELU`, `SOFTMAX(_WIDE)`, `RMSNORM`, `ROTARY`, `T2I`.
 3. The Qwen block listing as the acceptance gate, plane-for-plane against
    non-FPU.
 4. Extend `scripts/parity_vulkan.py` as new ops land; the harness is in the
