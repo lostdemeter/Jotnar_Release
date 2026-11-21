@@ -1,0 +1,64 @@
+{
+  "argv": 2,
+  "bytes_in": 2764800,
+  "bytes_out": 11059200,
+  "compiler": {
+    "runtime": "0.1.0+8515db5f5873",
+    "version": "0.1.0"
+  },
+  "determinism": "float-agreement",
+  "inputs": {
+    "X": {
+      "bytes": 2764800,
+      "kind": "F32",
+      "shape": [
+        360,
+        640,
+        3
+      ]
+    }
+  },
+  "kind": "F32",
+  "listing_sha256": "6bb2a44b0e3bffb1a719b9548e01721263707ae7a26a9bc51c2a763611f20b3d",
+  "name": "wall-stage",
+  "ops": [
+    "INTERP"
+  ],
+  "outputs": {
+    "OUT": {
+      "bytes": 11059200,
+      "kind": "F32",
+      "shape": [
+        720,
+        1280,
+        3
+      ]
+    }
+  },
+  "parallelism": "spatial",
+  "partitionable": {
+    "axes": [
+      {
+        "axis": "rows",
+        "index": 0,
+        "max": 360,
+        "min": 16,
+        "overlap": 1
+      },
+      {
+        "axis": "columns",
+        "index": 1,
+        "max": 640,
+        "min": 16,
+        "overlap": 1
+      }
+    ]
+  },
+  "role_hint": "data-parallel",
+  "schema": "jotnar.stage/1",
+  "state_bytes": 0,
+  "targets": [
+    "cuda"
+  ],
+  "warm_frame": true
+}

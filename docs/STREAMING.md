@@ -111,8 +111,22 @@ The compiler now emits a partition claim for `INTERP` and elementwise stages:
 
 The stream controller loads the referenced `jotnar.stage/1` document, checks the
 listing hash and target subset, and validates that the tile size is within
-`min..=max` and the halo is at least the claimed overlap. It does not yet
-derive the grid from the claim; the 2x2 grid is still a descriptor decision.
+`min..=max` and the halo is at least the claimed overlap.
+
+If the descriptor omits `tiles`, the controller derives the grid (C2): the
+number of tiles is the placement slot count, `rows*cols` must divide the source,
+both tile dimensions must fit the claim, and the tile aspect ratio closest to
+the source wins (ties: wider tiles). `halo` is the largest claimed overlap. If
+no legal factorization exists, the controller fails with the slots, source, and
+claim constraints rather than inventing a shape. `summary.json` records
+`grid.derived`, the slots, the claim, the derived tiles, and the reason. A
+declared `tiles` block still takes the validation path; the wall gate runs the
+derived path and keeps a `--declared-grid` control.
+
+The camera and frames wall descriptors omit `tiles` and reference the checked-in
+`demos/video-wall/wall-stage.json` claim. The derived grid is 2x2 tiles of
+320x180 with halo 1, identical to the previous declared grid, so the gate stays
+byte-identical.
 
 The same tiled plan runs on one CUDA node as the reference. The distributed run
 places one tile on CUDA and three on HIP. Because both runs use the same tiler,

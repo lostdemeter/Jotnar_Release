@@ -686,12 +686,12 @@ fn real_main() -> Result<(), String> {
             descriptor: args.stage_descriptor,
             targets: vec!["cuda".to_string(), "hip".to_string()],
         },
-        tiles: TileSpec {
+        tiles: Some(TileSpec {
             rows: 1,
             cols: 2,
             halo: 1,
             bezel: 0,
-        },
+        }),
         split: Some(ColumnSplit {
             left_cols: args.left_cols,
             right_cols: FB_W - args.left_cols,

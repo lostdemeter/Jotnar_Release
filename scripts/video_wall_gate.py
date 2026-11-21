@@ -124,6 +124,7 @@ def describe(
     deadline_ms: int,
     placement: dict[str, int],
     stage_descriptor: Path,
+    derive_grid: bool = True,
 ) -> Path:
     descriptor = {
         "schema": "jotnar.stream/1",
@@ -142,7 +143,6 @@ def describe(
             "descriptor": str(stage_descriptor),
             "targets": ["cuda", "hip"],
         },
-        "tiles": {"rows": 2, "cols": 2, "halo": 1, "bezel": 0},
         "placement": placement,
         "sink": {"kind": "frames", "dir": str(out / "reference")},
         "merge": "tile-grid",
@@ -150,6 +150,8 @@ def describe(
         "determinism": "exact",
         "receipt": {"kind": "every-frame", "dir": str(out / "reference-receipt")},
     }
+    if not derive_grid:
+        descriptor["tiles"] = {"rows": 2, "cols": 2, "halo": 1, "bezel": 0}
     path = out / "wall.json"
     path.write_text(json.dumps(descriptor, indent=2) + "\n")
     return path
@@ -211,6 +213,11 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--deadline-ms", type=int, default=66)
     ap.add_argument("--clip", default=None, help="existing frames-dir; generated if omitted")
+    ap.add_argument(
+        "--declared-grid",
+        action="store_true",
+        help="declare tiles 2x2 instead of deriving them from the partition claim",
+    )
     ap.add_argument("--out", default="/tmp/opencode/wall-gate")
     ap.add_argument("--no-build", action="store_true")
     args = ap.parse_args()
@@ -251,6 +258,7 @@ def main() -> int:
         deadline_ms,
         {"cuda": 1, "hip": 3},
         stage_descriptor,
+        derive_grid=not args.declared_grid,
     )
     fleet = out / "fleet"
     fleet.mkdir()
@@ -356,6 +364,22 @@ def main() -> int:
     )
     p99_ok = p99 <= deadline_ms
     max_ok = max_ms <= deadline_ms * 2
+    grid = dist_summary.get("grid") or {}
+    expected_grid = {"rows": 2, "cols": 2, "halo": 1, "bezel": 0}
+    if args.declared_grid:
+        grid_ok = bool(
+            grid.get("derived") is False
+            and dist_summary.get("tiles") == expected_grid
+        )
+    else:
+        grid_ok = bool(
+            grid.get("derived") is True
+            and grid.get("slots") == 4
+            and dist_summary.get("tiles") == expected_grid
+            and grid.get("claim")
+            and grid.get("reason")
+            and (ref_summary.get("grid") or {}).get("derived") is True
+        )
     ok = bool(
         frames_ok
         and wall_ok
@@ -365,6 +389,7 @@ def main() -> int:
         and tile_counts == {4}
         and targets == {"cuda", "hip"}
         and job_ids_ok
+        and grid_ok
         and dist_summary.get("descriptor_sha256")
         and (dist_summary.get("stage_descriptor") or {}).get("sha256")
         and failover_ok
@@ -383,6 +408,14 @@ def main() -> int:
             "deadline_ms": deadline_ms,
             "fps": round(1000 / deadline_ms),
             "clip_frames": args.frames,
+        },
+        "grid": {
+            "derived": grid.get("derived"),
+            "slots": grid.get("slots"),
+            "expected": expected_grid,
+            "actual": dist_summary.get("tiles"),
+            "reason": grid.get("reason"),
+            "claim": grid.get("claim"),
         },
         "descriptor": {
             "path": str(descriptor),
@@ -422,6 +455,7 @@ def main() -> int:
             "four_tiles": tile_counts == {4},
             "both_targets": targets == {"cuda", "hip"},
             "job_ids": job_ids_ok,
+            "grid": grid_ok,
         },
         "evidence": {
             "clip": str(clip),

@@ -192,7 +192,10 @@ pub struct StreamDescriptor {
     pub clock: StreamClock,
     pub source: StreamSourceSpec,
     pub stage: StreamStageSpec,
-    pub tiles: TileSpec,
+    /// Tile grid. Omit it to derive rows/cols from the stage `partitionable`
+    /// claim and the placement slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiles: Option<TileSpec>,
     /// Optional 1D column split for the DOOM shape. Requires merge="columns".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<ColumnSplit>,
@@ -282,17 +285,43 @@ impl StreamDescriptor {
             "doom" => {}
             other => return Err(format!("unknown source kind {other:?}")),
         }
-        if self.tiles.rows == 0 || self.tiles.cols == 0 || self.tiles.halo == 0 {
-            return Err("tile grid needs rows, cols, halo > 0".to_string());
-        }
-        if self.source.width % self.tiles.cols != 0 || self.source.height % self.tiles.rows != 0 {
-            return Err(format!(
-                "source {}x{} is not divisible into {}x{} tiles",
-                self.source.width, self.source.height, self.tiles.cols, self.tiles.rows
-            ));
-        }
-        if self.tiles.bezel > 0 && self.merge != "tile-grid" {
-            return Err("bezel is only supported for tile-grid".to_string());
+        match &self.tiles {
+            Some(tiles) => {
+                if tiles.rows == 0 || tiles.cols == 0 {
+                    return Err("tile grid needs rows and cols > 0".to_string());
+                }
+                if self.source.width % tiles.cols != 0
+                    || self.source.height % tiles.rows != 0
+                {
+                    return Err(format!(
+                        "source {}x{} is not divisible into {}x{} tiles",
+                        self.source.width, self.source.height, tiles.cols, tiles.rows
+                    ));
+                }
+                if tiles.bezel > 0 && self.merge != "tile-grid" {
+                    return Err("bezel is only supported for tile-grid".to_string());
+                }
+            }
+            None => {
+                if self.merge != "tile-grid" {
+                    return Err(
+                        "tiles omitted; only tile-grid can derive a grid from the stage claim"
+                            .to_string(),
+                    );
+                }
+                if self.split.is_some() {
+                    return Err(
+                        "tiles omitted for a column split; declare tiles or use the split path"
+                            .to_string(),
+                    );
+                }
+                if self.stage.descriptor.is_none() {
+                    return Err(
+                        "tiles omitted but the stage has no descriptor claim to derive from"
+                            .to_string(),
+                    );
+                }
+            }
         }
         if let Some(split) = &self.split {
             if self.merge != "columns" {
@@ -1595,7 +1624,156 @@ pub struct StreamSummary {
     pub mismatches: Option<u64>,
 }
 
-fn validate_partition_claim(claim: &Json, descriptor: &StreamDescriptor) -> Result<(), String> {
+#[derive(Clone, Copy, Debug)]
+struct AxisClaim {
+    min: usize,
+    max: usize,
+    overlap: usize,
+}
+
+fn axis_claim(claim: &Json, name: &str) -> Result<Option<AxisClaim>, String> {
+    let Some(axes) = claim.get("axes").and_then(|x| x.as_array()) else {
+        return Ok(None);
+    };
+    for axis in axes {
+        if axis.get("axis").and_then(|x| x.as_str()) != Some(name) {
+            continue;
+        }
+        let min = axis
+            .get("min")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| format!("partition axis {name} needs min"))? as usize;
+        let max = axis
+            .get("max")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| format!("partition axis {name} needs max"))? as usize;
+        let overlap = axis
+            .get("overlap")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as usize;
+        if min == 0 || max < min {
+            return Err(format!(
+                "partition axis {name} has invalid bounds {min}..={max}"
+            ));
+        }
+        return Ok(Some(AxisClaim { min, max, overlap }));
+    }
+    Ok(None)
+}
+
+/// A grid derived from the compiler's partition claim and the controller's
+/// placement slots.
+struct DerivedGrid {
+    tiles: TileSpec,
+    slots: usize,
+    reason: String,
+}
+
+/// Derive rows/cols from the claim and the number of placement slots.
+///
+/// The claim bounds which tile sizes are legal; it does not say how many tiles
+/// to use. The controller's placement slots decide the count. A factorization
+/// is legal only when it divides the source and both tile dimensions fit the
+/// claim. The tile aspect ratio closest to the source wins (ties: wider tiles).
+fn derive_tile_grid(
+    partitionable: &Json,
+    source_w: usize,
+    source_h: usize,
+    slots: usize,
+) -> Result<DerivedGrid, String> {
+    if slots == 0 {
+        return Err("cannot derive a grid: no placement slots".to_string());
+    }
+    if partitionable.is_null() {
+        return Err(
+            "cannot derive a grid: the stage descriptor has no partitionable claim".to_string(),
+        );
+    }
+    let rows_claim = axis_claim(partitionable, "rows")?;
+    let cols_claim = axis_claim(partitionable, "columns")?;
+    if rows_claim.is_none() && cols_claim.is_none() {
+        return Err("cannot derive a grid: the claim has no rows or columns axis".to_string());
+    }
+    let source_aspect = source_w as f64 / source_h as f64;
+    let mut best: Option<(f64, usize, usize, usize, usize)> = None;
+    for rows in 1..=slots {
+        if slots % rows != 0 {
+            continue;
+        }
+        let cols = slots / rows;
+        if source_h % rows != 0 || source_w % cols != 0 {
+            continue;
+        }
+        let tile_h = source_h / rows;
+        let tile_w = source_w / cols;
+        if let Some(claim) = rows_claim {
+            if tile_h < claim.min || tile_h > claim.max {
+                continue;
+            }
+        } else if rows != 1 {
+            continue;
+        }
+        if let Some(claim) = cols_claim {
+            if tile_w < claim.min || tile_w > claim.max {
+                continue;
+            }
+        } else if cols != 1 {
+            continue;
+        }
+        let aspect = tile_w as f64 / tile_h as f64;
+        let score = (aspect.ln() - source_aspect.ln()).abs();
+        let better = match best {
+            None => true,
+            Some((best_score, _, best_cols, _, _)) => {
+                score < best_score - 1e-9
+                    || ((score - best_score).abs() <= 1e-9 && cols > best_cols)
+            }
+        };
+        if better {
+            best = Some((score, rows, cols, tile_h, tile_w));
+        }
+    }
+    let Some((_, rows, cols, tile_h, tile_w)) = best else {
+        let describe = |claim: Option<AxisClaim>| match claim {
+            Some(claim) => format!(
+                "{}..={} overlap {}",
+                claim.min, claim.max, claim.overlap
+            ),
+            None => "absent".to_string(),
+        };
+        return Err(format!(
+            "cannot derive a grid: {slots} placement slot(s), source {source_w}x{source_h}, \
+             rows {}, columns {}; no rows*cols={slots} factorization both divides the source \
+             and fits the claim",
+            describe(rows_claim),
+            describe(cols_claim)
+        ));
+    };
+    let halo = rows_claim
+        .map(|claim| claim.overlap)
+        .unwrap_or(0)
+        .max(cols_claim.map(|claim| claim.overlap).unwrap_or(0));
+    let aspect = tile_w as f64 / tile_h as f64;
+    Ok(DerivedGrid {
+        tiles: TileSpec {
+            rows,
+            cols,
+            halo,
+            bezel: 0,
+        },
+        slots,
+        reason: format!(
+            "{slots} placement slot(s); chose {rows}x{cols} tiles of {tile_w}x{tile_h} \
+             (aspect {aspect:.3} vs source {source_aspect:.3}); halo {halo} from claim overlap"
+        ),
+    })
+}
+
+fn validate_partition_claim(
+    claim: &Json,
+    descriptor: &StreamDescriptor,
+    tiles: &TileSpec,
+) -> Result<(), String> {
     if claim.is_null() {
         return Ok(());
     }
@@ -1654,8 +1832,8 @@ fn validate_partition_claim(claim: &Json, descriptor: &StreamDescriptor) -> Resu
             .ok_or("partition axis needs max")?;
         let overlap = axis.get("overlap").and_then(|x| x.as_u64()).unwrap_or(0);
         let base = match name {
-            "rows" => descriptor.source.height / descriptor.tiles.rows,
-            "columns" => descriptor.source.width / descriptor.tiles.cols,
+            "rows" => descriptor.source.height / tiles.rows,
+            "columns" => descriptor.source.width / tiles.cols,
             _ => continue,
         } as u64;
         if base < min || base > max {
@@ -1663,21 +1841,26 @@ fn validate_partition_claim(claim: &Json, descriptor: &StreamDescriptor) -> Resu
                 "partition {name} size {base} is outside the compiler claim {min}..={max}"
             ));
         }
-        if (descriptor.tiles.halo as u64) < overlap {
+        if (tiles.halo as u64) < overlap {
             return Err(format!(
                 "partition {name} needs overlap {overlap}, but the tile halo is {}",
-                descriptor.tiles.halo
+                tiles.halo
             ));
         }
     }
     Ok(())
 }
 
-fn stage_claim(
+struct StageClaim {
+    summary: Json,
+    partitionable: Json,
+}
+
+fn load_stage_claim(
     path: &Path,
     listing_sha256: &str,
     descriptor: &StreamDescriptor,
-) -> Result<Json, String> {
+) -> Result<StageClaim, String> {
     let bytes =
         fs::read(path).map_err(|e| format!("read stage descriptor {}: {e}", path.display()))?;
     let value: Json = serde_json::from_slice(&bytes)
@@ -1717,13 +1900,15 @@ fn stage_claim(
         ));
     }
     let partitionable = value.get("partitionable").cloned().unwrap_or(Json::Null);
-    validate_partition_claim(&partitionable, descriptor)?;
-    Ok(json!({
-        "path": path.display().to_string(),
-        "sha256": sha256_hex(&bytes),
-        "targets": targets,
-        "partitionable": partitionable,
-    }))
+    Ok(StageClaim {
+        summary: json!({
+            "path": path.display().to_string(),
+            "sha256": sha256_hex(&bytes),
+            "targets": targets,
+            "partitionable": partitionable,
+        }),
+        partitionable,
+    })
 }
 
 pub fn run_stream(
@@ -1824,10 +2009,55 @@ pub fn run_stream_with(
     if placement.is_empty() {
         return Err("stream placement is empty".to_string());
     }
+    let listing = fs::read_to_string(&descriptor.stage.listing)
+        .map_err(|e| format!("read listing {}: {e}", descriptor.stage.listing.display()))?;
+    let listing_sha256 = sha256_hex(listing.as_bytes());
+    let claim = match &descriptor.stage.descriptor {
+        Some(path) => Some(load_stage_claim(path, &listing_sha256, descriptor)?),
+        None => None,
+    };
+    let (tiles, grid) = match &descriptor.tiles {
+        Some(tiles) => (
+            tiles.clone(),
+            json!({
+                "derived": false,
+                "tiles": tiles,
+            }),
+        ),
+        None => {
+            let claim = claim.as_ref().ok_or(
+                "tiles omitted but the stage has no descriptor claim to derive from",
+            )?;
+            let derived = derive_tile_grid(
+                &claim.partitionable,
+                descriptor.source.width,
+                descriptor.source.height,
+                placement.len(),
+            )?;
+            (
+                derived.tiles.clone(),
+                json!({
+                    "derived": true,
+                    "slots": derived.slots,
+                    "source": [descriptor.source.width, descriptor.source.height],
+                    "tiles": derived.tiles,
+                    "claim": claim.partitionable.clone(),
+                    "reason": derived.reason,
+                }),
+            )
+        }
+    };
+    if let Some(claim) = &claim {
+        validate_partition_claim(&claim.partitionable, descriptor, &tiles)?;
+    }
+    let claim_summary = claim
+        .as_ref()
+        .map(|claim| claim.summary.clone())
+        .unwrap_or(Json::Null);
     let tile_count = if descriptor.split.is_some() {
         2
     } else {
-        descriptor.tiles.rows * descriptor.tiles.cols
+        tiles.rows * tiles.cols
     };
     let planned_targets: Vec<usize> = if cfg.all_first_target {
         vec![0; tile_count]
@@ -1867,13 +2097,6 @@ pub fn run_stream_with(
             ))
         })
         .collect();
-    let listing = fs::read_to_string(&descriptor.stage.listing)
-        .map_err(|e| format!("read listing {}: {e}", descriptor.stage.listing.display()))?;
-    let listing_sha256 = sha256_hex(listing.as_bytes());
-    let claim = match &descriptor.stage.descriptor {
-        Some(path) => stage_claim(path, &listing_sha256, descriptor)?,
-        None => Json::Null,
-    };
     // The tiled stage is a 2x upscale per tile, so the wall is 2x the source
     // in each dimension.
     let wall_w = descriptor.source.width * 2;
@@ -1939,14 +2162,14 @@ pub fn run_stream_with(
         match split {
             Some(split) if col == 0 => split.left_cols,
             Some(split) => split.right_cols,
-            None => descriptor.source.width / descriptor.tiles.cols,
+            None => descriptor.source.width / tiles.cols,
         }
     };
     let result_index = |split: &Option<ColumnSplit>, row: usize, col: usize| -> usize {
         if split.is_some() {
             col
         } else {
-            row * descriptor.tiles.cols + col
+            row * tiles.cols + col
         }
     };
     loop {
@@ -1978,10 +2201,10 @@ pub fn run_stream_with(
                         let mut candidate = descriptor.clone();
                         candidate.split = Some(outcome.split.clone());
                         let partitionable = claim
-                            .get("partitionable")
-                            .cloned()
+                            .as_ref()
+                            .map(|claim| claim.partitionable.clone())
                             .unwrap_or(Json::Null);
-                        match validate_partition_claim(&partitionable, &candidate) {
+                        match validate_partition_claim(&partitionable, &candidate, &tiles) {
                             Ok(()) => active_split = Some(outcome.split),
                             Err(e) => {
                                 calibration["ok"] = json!(false);
@@ -2003,7 +2226,7 @@ pub fn run_stream_with(
             let warm_tiles = if let Some(split) = &active_split {
                 column_tiles(&frame, split)?
             } else {
-                tile_frame(&frame, &descriptor.tiles)?
+                tile_frame(&frame, &tiles)?
             };
             let request_timeout =
                 Duration::from_millis(cfg.request_timeout_ms.max(1));
@@ -2034,17 +2257,17 @@ pub fn run_stream_with(
                 lease.renew(cfg.lease_ms)?;
             }
         }
-        let tiles = if let Some(split) = &active_split {
+        let tile_inputs = if let Some(split) = &active_split {
             column_tiles(&frame, split)?
         } else {
-            tile_frame(&frame, &descriptor.tiles)?
+            tile_frame(&frame, &tiles)?
         };
-        let mut results = Vec::with_capacity(tiles.len());
+        let mut results = Vec::with_capacity(tile_inputs.len());
         let mut tile_meta: BTreeMap<(usize, usize), (u32, Option<String>, Vec<Json>)> =
             BTreeMap::new();
-        let mut handles = Vec::with_capacity(tiles.len());
+        let mut handles = Vec::with_capacity(tile_inputs.len());
         let mut used = vec![0usize; endpoints.len()];
-        for (i, tile) in tiles.into_iter().enumerate() {
+        for (i, tile) in tile_inputs.into_iter().enumerate() {
             let planned = *planned_targets
                 .get(i)
                 .ok_or_else(|| format!("tile {i} has no planned target"))?;
@@ -2101,7 +2324,7 @@ pub fn run_stream_with(
             composite(
                 descriptor.source.width,
                 descriptor.source.height,
-                &descriptor.tiles,
+                &tiles,
                 &results,
             )?
         };
@@ -2316,7 +2539,8 @@ pub fn run_stream_with(
         "source": source.describe(),
         "sink": sink.describe(),
         "clock": descriptor.clock,
-        "tiles": descriptor.tiles,
+        "tiles": &tiles,
+        "grid": grid,
         "mode": if active_split.is_some() {
             "columns"
         } else {
@@ -2326,7 +2550,7 @@ pub fn run_stream_with(
         "calibration": calibration,
         "placement": descriptor.placement,
         "determinism": descriptor.determinism,
-        "stage_descriptor": claim,
+        "stage_descriptor": claim_summary,
         "controller": {
             "process": format!("jotnar-stream:{}", std::process::id()),
             "source_owner": "controller",
@@ -2489,12 +2713,12 @@ mod tests {
                 descriptor: None,
                 targets: vec!["cuda".to_string()],
             },
-            tiles: TileSpec {
+            tiles: Some(TileSpec {
                 rows: 2,
                 cols: 2,
                 halo: 1,
                 bezel: 0,
-            },
+            }),
             split: None,
             calibration: None,
             sink: StreamSinkSpec {
@@ -2515,7 +2739,7 @@ mod tests {
     #[test]
     fn descriptor_rejects_bad_geometry() {
         let mut descriptor = descriptor();
-        descriptor.tiles.rows = 7;
+        descriptor.tiles.as_mut().unwrap().rows = 7;
         assert!(descriptor.validate().is_err());
     }
 
@@ -2553,6 +2777,97 @@ mod tests {
             max_cols: 288,
             rebalance: true,
         });
+        assert!(descriptor.validate().is_err());
+    }
+
+    fn claim(
+        rows: (usize, usize, usize),
+        cols: (usize, usize, usize),
+    ) -> Json {
+        json!({
+            "axes": [
+                {"axis": "rows", "index": 0, "min": rows.0, "max": rows.1, "overlap": rows.2},
+                {"axis": "columns", "index": 1, "min": cols.0, "max": cols.1, "overlap": cols.2},
+            ]
+        })
+    }
+
+    #[test]
+    fn derives_the_wall_grid_from_the_claim_and_slots() {
+        let derived =
+            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 4).unwrap();
+        assert_eq!(derived.tiles.rows, 2);
+        assert_eq!(derived.tiles.cols, 2);
+        assert_eq!(derived.tiles.halo, 1);
+        assert_eq!(derived.tiles.bezel, 0);
+        assert_eq!(derived.slots, 4);
+        assert!(derived.reason.contains("320x180"));
+    }
+
+    #[test]
+    fn derivation_prefers_the_source_aspect_then_wider_tiles() {
+        // 2 slots on a 16:9 source: 1x2 and 2x1 tie on log-distance; prefer
+        // wider tiles (more columns).
+        let derived =
+            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 2).unwrap();
+        assert_eq!((derived.tiles.rows, derived.tiles.cols), (1, 2));
+
+        // 4 slots where 2x2 is too tall: 4x1 is the only legal shape.
+        let derived =
+            derive_tile_grid(&claim((16, 100, 1), (16, 640, 1)), 640, 360, 4).unwrap();
+        assert_eq!((derived.tiles.rows, derived.tiles.cols), (4, 1));
+
+        // 6 slots: (2,3) does not divide 640; (3,2) does.
+        let derived =
+            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 6).unwrap();
+        assert_eq!((derived.tiles.rows, derived.tiles.cols), (3, 2));
+    }
+
+    #[test]
+    fn derivation_honors_a_single_claimed_axis_and_zero_overlap() {
+        let rows_only = json!({
+            "axes": [{"axis": "rows", "index": 0, "min": 16, "max": 360, "overlap": 1}]
+        });
+        let derived = derive_tile_grid(&rows_only, 640, 360, 4).unwrap();
+        assert_eq!((derived.tiles.rows, derived.tiles.cols), (4, 1));
+        assert_eq!(derived.tiles.halo, 1);
+
+        let elementwise = claim((16, 360, 0), (16, 640, 0));
+        let derived = derive_tile_grid(&elementwise, 640, 360, 4).unwrap();
+        assert_eq!(derived.tiles.halo, 0);
+    }
+
+    #[test]
+    fn derivation_fails_closed_when_no_factor_fits() {
+        // 7 is prime and divides neither 640 nor 360.
+        let err = derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 7)
+            .err()
+            .unwrap();
+        assert!(err.contains("no rows*cols=7"), "{err}");
+        // Claim bounds exclude every legal shape.
+        let err = derive_tile_grid(&claim((16, 50, 1), (16, 640, 1)), 640, 360, 4)
+            .err()
+            .unwrap();
+        assert!(err.contains("cannot derive a grid"), "{err}");
+    }
+
+    #[test]
+    fn descriptor_can_omit_tiles_only_for_a_claimed_tile_grid() {
+        let mut descriptor = descriptor();
+        descriptor.tiles = None;
+        descriptor.stage.descriptor = Some(PathBuf::from("claim.json"));
+        assert!(descriptor.validate().is_ok());
+
+        descriptor.stage.descriptor = None;
+        assert!(descriptor.validate().is_err());
+
+        descriptor.stage.descriptor = Some(PathBuf::from("claim.json"));
+        descriptor.split = Some(ColumnSplit {
+            left_cols: 320,
+            right_cols: 320,
+            overlap: 1,
+        });
+        descriptor.merge = "columns".to_string();
         assert!(descriptor.validate().is_err());
     }
 }
