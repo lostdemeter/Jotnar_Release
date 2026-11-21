@@ -85,6 +85,53 @@ fn elem_for(kind: CKind, c: Comp) -> Elem {
     }
 }
 
+const LADDER_GLSL: &str = r#"
+/// Shared ladder helpers. Shaders must declare bindings 9/10/11 as FRAC,
+/// COARSE and FINE (int64_t) before including this text.
+const int FRAC_CAP = 13312;
+const int FIXED_F = 18;
+const int BIAS = 32768;
+const int NLVL = 65536;
+
+struct Ladder { int s; int e; uint z; };
+
+int64_t to_fixed(int sgn, int ev, uint z, int64_t m0)
+{
+  if (z != 0u) return 0;
+  int64_t d = m0 - int64_t(ev);
+  if (d < 0) return int64_t(sgn) * frac[0];
+  if (d > int64_t(FRAC_CAP)) return 0;
+  return int64_t(sgn) * frac[int(d)];
+}
+
+int bitlen64(uint64_t a)
+{
+  int bl = 0;
+  while (a > 0ul) { bl += 1; a >>= 1; }
+  return bl;
+}
+
+Ladder from_fixed(int64_t q, int64_t m0)
+{
+  Ladder r;
+  int sgn = q > 0 ? 1 : -1;
+  uint64_t uq = q < 0 ? (~uint64_t(q)) + 1ul : uint64_t(q);
+  if (uq >= (1ul << 53)) uq = (1ul << 53) - 1ul;
+  int bl = bitlen64(uq);
+  int shift = bl - 15;
+  uint64_t mant = shift >= 0 ? (uq >> uint(shift)) : (uq << uint(-shift));
+  int t = shift + 14 - FIXED_F;
+  int idx = t + 64;
+  idx = idx < 0 ? 0 : (idx > 192 ? 192 : idx);
+  int fi = int(mant) - 16384;
+  fi = fi < 0 ? 0 : (fi > 16383 ? 16383 : fi);
+  int64_t ev = m0 + coarse[idx] + fine[fi];
+  ev = ev < 0 ? 0 : (ev > int64_t(NLVL - 1) ? int64_t(NLVL - 1) : ev);
+  r.s = sgn; r.e = int(ev); r.z = (q == 0) ? 1u : 0u;
+  return r;
+}
+"#;
+
 enum Operand {
     Stream(usize),
     Lit(f64),
@@ -196,6 +243,24 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
     }
     let in_names: Vec<String> = bound.inputs.iter().map(|d| d.name.clone()).collect();
 
+    let serve_in = bound.config.get("serve_input").map(str::to_string);
+    let serve_out = bound.config.get("serve_output").map(str::to_string);
+    if serve_in.is_some() != serve_out.is_some() {
+        return Err(Error::asm(
+            "Vulkan serve mode needs both CONFIG serve_input and CONFIG serve_output",
+        ));
+    }
+    if let Some(n) = &serve_in {
+        if !in_names.contains(n) {
+            return Err(Error::asm("Vulkan serve_input must be an IN stream"));
+        }
+    }
+    if let Some(n) = &serve_out {
+        if !outputs.contains(n) {
+            return Err(Error::asm("Vulkan serve_output must be an output"));
+        }
+    }
+
     // Streams (ordinals), then planes (GPU buffers).
     let mut order: Vec<String> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -278,7 +343,11 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         .map(|(i, src)| glslc(src, i))
         .collect::<Result<_>>()?;
 
-    let source = emit_c(&order, &planes, &ctx, &tabs, &dispatches, &spirv, &in_names, &outputs)?;
+    let source = emit_c(
+        &order, &planes, &ctx, &tabs, &dispatches, &spirv,
+        &in_names, &outputs,
+        serve_in.as_deref(), serve_out.as_deref(),
+    )?;
 
     // argv = one file per plane, inputs then outputs
     let n_argv = in_names
@@ -318,6 +387,7 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         ("SQUARE", CKind::T) => tmul(ins, ctx, out_ord, out_n, true),
         ("ADD", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, false),
         ("SUB", CKind::T) => tadd(ins, ctx, tabs, out_ord, out_n, true),
+        ("MATMUL", CKind::T) => tmatmul(ins, ctx, tabs),
 
         // exact integer arithmetic
         ("IADD", CKind::I) => int_bin(ins, ctx, out_ord, out_n, "+"),
@@ -330,7 +400,7 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
 
         // Ladder ops that need the fixed-point bridge / baked tables.
         ("DIV", CKind::T)
-        | ("MATMUL", CKind::T) | ("RMSNORM", CKind::T) | ("SOFTMAX", CKind::T)
+        | ("RMSNORM", CKind::T) | ("SOFTMAX", CKind::T)
         | ("SOFTMAX_WIDE", CKind::T) | ("SILU", CKind::T) | ("GELU", CKind::T)
         | ("ROTARY", CKind::T) | ("TSHIFT", CKind::T) | ("TBETA", CKind::T)
         | ("TRANSPOSE", CKind::T) | ("SLICE", CKind::T) | ("CONCAT", CKind::T)
@@ -499,6 +569,7 @@ fn tadd(
     let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
 
     let op = if sub { "-" } else { "+" };
+    let ladder = LADDER_GLSL;
     let bufs = vec![a_s, a_e, a_z, b_s, b_e, b_z, o_s, o_e, o_z, frac, coarse, fine];
 
     let src = format!(
@@ -518,28 +589,7 @@ layout(std430, binding = 9) readonly buffer FRAC {{ int64_t frac[]; }};
 layout(std430, binding = 10) readonly buffer COARSE {{ int64_t coarse[]; }};
 layout(std430, binding = 11) readonly buffer FINE {{ int64_t fine[]; }};
 layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
-
-const int FRAC_CAP = {FRAC_CAP};
-const int FIXED_F = {FIXED_F};
-const int BIAS = {BIAS};
-const int NLVL = {NLVL};
-
-int64_t to_fixed(int sgn, int ev, uint z, int64_t m0)
-{{
-  if (z != 0u) return 0;
-  int64_t d = m0 - int64_t(ev);
-  if (d < 0) return int64_t(sgn) * frac[0];
-  if (d > int64_t(FRAC_CAP)) return 0;
-  return int64_t(sgn) * frac[int(d)];
-}}
-
-int bitlen64(uint64_t a)
-{{
-  int bl = 0;
-  while (a > 0ul) {{ bl += 1; a >>= 1; }}
-  return bl;
-}}
-
+{ladder}
 void main()
 {{
   uint i = gl_GlobalInvocationID.x;
@@ -552,33 +602,146 @@ void main()
   int64_t qb = to_fixed(bs[i], be[i], bz[i], m0);
   int64_t q = qa {op} qb;
 
-  int sgn = q > 0 ? 1 : -1;
-  uint64_t uq = q < 0 ? (~uint64_t(q)) + 1ul : uint64_t(q);
-
-  /* reference asserts |q| < 2^53; we saturate instead of trapping */
-  if (uq >= (1ul << 53)) uq = (1ul << 53) - 1ul;
-
-  int bl = bitlen64(uq);
-  int shift = bl - 15;
-  uint64_t mant = shift >= 0 ? (uq >> uint(shift)) : (uq << uint(-shift));
-  int t = shift + 14 - FIXED_F;
-  int idx = t + 64;
-  idx = idx < 0 ? 0 : (idx > 192 ? 192 : idx);
-  int fi = int(mant) - 16384;
-  fi = fi < 0 ? 0 : (fi > 16383 ? 16383 : fi);
-
-  int64_t ev = m0 + coarse[idx] + fine[fi];
-  ev = ev < 0 ? 0 : (ev > int64_t(NLVL - 1) ? int64_t(NLVL - 1) : ev);
-
-  os_[i] = sgn;
-  oe[i] = int(ev);
-  oz[i] = (q == 0) ? 1u : 0u;
+  Ladder r = from_fixed(q, m0);
+  os_[i] = r.s;
+  oe[i] = r.e;
+  oz[i] = r.z;
 }}
 "#
     );
 
     let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
     Ok((src, bufs, [out_n as u32, ctx.m_cov as u32, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// T = A @ B at the declared m_acc scale.
+///
+/// The reference sums `to_fixed(ladder_product_term, m_acc)` per term and
+/// converts the accumulated integer once, which is not the same as
+/// `to_fixed(a) * to_fixed(b)`.
+fn tmatmul(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
+    if ins.args.len() != 2 {
+        return Err(Error::asm(format!("Vulkan: {} expects 2 operands", ins.mn)));
+    }
+    let a = ctx.ordinal(&ins.args[0])?;
+    let b = ctx.ordinal(&ins.args[1])?;
+    let out = ins
+        .outs
+        .first()
+        .ok_or_else(|| Error::asm(format!("Vulkan: {} has no output", ins.mn)))?;
+    let out_ord = ctx.ordinal(out)?;
+
+    for ord in [a, b] {
+        if ctx.info(ord)?.kind != CKind::T {
+            return Err(Error::asm(format!(
+                "Vulkan: {} operand {} is not a ladder stream",
+                ins.mn,
+                ctx.name(ord)
+            )));
+        }
+    }
+    let ash = ctx.info(a)?.static_shape(&ctx.name(a))?;
+    let bsh = ctx.info(b)?.static_shape(&ctx.name(b))?;
+    if ash.len() != 2 || bsh.len() != 2 {
+        return Err(Error::unimplemented(format!(
+            "Vulkan: {} supports rank-2 only (got {:?} x {:?}); \
+             batched matmul is a later milestone",
+            ins.mn, ash, bsh
+        )));
+    }
+    let (m, k) = (ash[0], ash[1]);
+    if bsh[0] != k {
+        return Err(Error::asm(format!(
+            "Vulkan: {} inner dimensions differ ({}x{} @ {}x{})",
+            ins.mn, m, k, bsh[0], bsh[1]
+        )));
+    }
+    let n = bsh[1];
+    if ctx.elems(out_ord)? != m * n {
+        return Err(Error::asm(format!(
+            "Vulkan: {} output shape mismatch",
+            ins.mn
+        )));
+    }
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(a, Comp::S)?,
+        ctx.plane_of(a, Comp::E)?,
+        ctx.plane_of(a, Comp::Z)?,
+    );
+    let (b_s, b_e, b_z) = (
+        ctx.plane_of(b, Comp::S)?,
+        ctx.plane_of(b, Comp::E)?,
+        ctx.plane_of(b, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let bufs = vec![a_s, a_e, a_z, b_s, b_e, b_z, o_s, o_e, o_z, frac, coarse, fine];
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) readonly buffer BS {{ int bs[]; }};
+layout(std430, binding = 4) readonly buffer BE {{ int be[]; }};
+layout(std430, binding = 5) readonly buffer BZ {{ uint bz[]; }};
+layout(std430, binding = 6) buffer OS {{ int os_[]; }};
+layout(std430, binding = 7) buffer OE {{ int oe[]; }};
+layout(std430, binding = 8) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 9) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 10) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 11) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+void main()
+{{
+  uint M = pc.n;
+  uint N = pc.p0;
+  uint K = pc.p1;
+  int64_t m0 = int64_t(pc.p2);
+
+  uint r = gl_GlobalInvocationID.y;
+  uint col = gl_GlobalInvocationID.x;
+  if (r >= M || col >= N) return;
+
+  int64_t acc = int64_t(0);
+  for (uint kk = 0; kk < K; ++kk) {{
+    uint ai = r * K + kk;
+    uint bj = kk * N + col;
+    int ps = as_[ai] * bs[bj];
+    int pe = ae[ai] + be[bj] - BIAS;
+    pe = pe < 0 ? 0 : (pe > NLVL - 1 ? NLVL - 1 : pe);
+    uint z = az[ai] | bz[bj];
+    acc += to_fixed(ps, pe, z, m0);
+  }}
+
+  Ladder res = from_fixed(acc, m0);
+  os_[r * N + col] = res.s;
+  oe[r * N + col] = res.e;
+  oz[r * N + col] = res.z;
+}}
+"#
+    );
+
+    let groups = [div_ceil(n, 16) as u32, div_ceil(m, 16) as u32, 1];
+    Ok((
+        src,
+        bufs,
+        [m as u32, n as u32, k as u32, ctx.m_acc as u32],
+        groups,
+        [16, 16, 1],
+    ))
 }
 
 fn int_bin(
@@ -775,6 +938,8 @@ fn emit_c(
     spirv: &[Vec<u8>],
     inputs: &[String],
     outputs: &[String],
+    serve_in: Option<&str>,
+    serve_out: Option<&str>,
 ) -> Result<String> {
     let mut c = String::new();
     c.push_str(HOST_PRELUDE);
@@ -914,6 +1079,38 @@ fn emit_c(
     for (_, a) in &out_pairs {
         c.push_str(&format!(" {a},"));
     }
+    c.push_str(" };\n");
+
+    let serve_in_planes: Vec<usize> = match serve_in {
+        Some(n) => {
+            let ord = ctx.ordinal(n)?;
+            comps_for(ctx.info(ord)?.kind)
+                .iter()
+                .map(|&c| ctx.plane_of(ord, c))
+                .collect::<Result<_>>()?
+        }
+        None => Vec::new(),
+    };
+    let serve_out_planes: Vec<usize> = match serve_out {
+        Some(n) => {
+            let ord = ctx.ordinal(n)?;
+            comps_for(ctx.info(ord)?.kind)
+                .iter()
+                .map(|&c| ctx.plane_of(ord, c))
+                .collect::<Result<_>>()?
+        }
+        None => Vec::new(),
+    };
+    c.push_str(&format!("\n#define SERVE_MODE {}\n", serve_in.is_some() as u8));
+    c.push_str(&format!("#define N_SERVE_IN {}\n", serve_in_planes.len()));
+    c.push_str("static const int kServeIn[N_SERVE_IN > 0 ? N_SERVE_IN : 1] = {");
+    for p in &serve_in_planes { c.push_str(&format!(" {p},")); }
+    if serve_in_planes.is_empty() { c.push_str(" 0,"); }
+    c.push_str(" };\n");
+    c.push_str(&format!("#define N_SERVE_OUT {}\n", serve_out_planes.len()));
+    c.push_str("static const int kServeOut[N_SERVE_OUT > 0 ? N_SERVE_OUT : 1] = {");
+    for p in &serve_out_planes { c.push_str(&format!(" {p},")); }
+    if serve_out_planes.is_empty() { c.push_str(" 0,"); }
     c.push_str(" };\n");
 
     c.push_str(HOST_MAIN);
@@ -1066,6 +1263,7 @@ static int init_vk(void)
 
   VkCommandPoolCreateInfo cp = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
   cp.queueFamilyIndex = g_qfam;
+  cp.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   CK(vkCreateCommandPool(g_dev, &cp, NULL, &g_cpool));
 
   int total_bindings = 0;
@@ -1114,27 +1312,26 @@ static int make_buffers(void)
   return 0;
 }
 
-/* Convert a host file plane into the 32/64-bit GPU plane. */
-static int load_plane(int plane, const char *path)
+/* ---- plane I/O: files for one-shot runs, stdin/stdout for serve ---- */
+
+static int plane_file_width(int plane)
 {
-  FILE *f = fopen(path, "rb");
-  if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
   int elem = kPlaneElem[plane];
-  int fw = (elem == E_I8 || elem == E_U8) ? 1
-         : (elem == E_I64) ? 8 : 4;
+  return (elem == E_I8 || elem == E_U8) ? 1 : (elem == E_I64) ? 8 : 4;
+}
+
+/* returns 0 ok, 1 clean EOF before any byte, 2 error */
+static int read_plane(FILE *f, int plane)
+{
+  int elem = kPlaneElem[plane];
+  int fw = plane_file_width(plane);
   uint64_t n = kPlaneCount[plane];
-  if ((uint64_t)sz != n * (uint64_t)fw) {
-    fprintf(stderr, "%s: %ld bytes, expected %llu x %d (%s)\n",
-            path, sz, (unsigned long long)n, fw, kPlaneName[plane]);
-    fclose(f);
-    return 2;
-  }
-  unsigned char *tmp = malloc((size_t)sz);
-  if (fread(tmp, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(tmp); return 2; }
-  fclose(f);
+  size_t want = (size_t)(n * (uint64_t)fw);
+  unsigned char *tmp = malloc(want ? want : 1);
+  if (!tmp) return 2;
+  size_t got = fread(tmp, 1, want, f);
+  if (got == 0 && want > 0) { free(tmp); return 1; }
+  if (got != want) { free(tmp); return 2; }
 
   for (uint64_t j = 0; j < n; ++j) {
     switch (elem) {
@@ -1149,22 +1346,13 @@ static int load_plane(int plane, const char *path)
   return 0;
 }
 
-static int load_inputs(void)
-{
-  for (int i = 0; i < N_IN; ++i) {
-    int r = load_plane(kInPlane[i], g_argv_in[i]);
-    if (r) return r;
-  }
-  return 0;
-}
-
-static int store_plane(int plane, const char *path)
+static int write_plane(FILE *f, int plane)
 {
   int elem = kPlaneElem[plane];
-  int fw = (elem == E_I8 || elem == E_U8) ? 1
-         : (elem == E_I64) ? 8 : 4;
+  int fw = plane_file_width(plane);
   uint64_t n = kPlaneCount[plane];
-  unsigned char *tmp = malloc((size_t)(n * (uint64_t)fw));
+  size_t want = (size_t)(n * (uint64_t)fw);
+  unsigned char *tmp = malloc(want ? want : 1);
   if (!tmp) return 6;
   for (uint64_t j = 0; j < n; ++j) {
     switch (elem) {
@@ -1175,22 +1363,64 @@ static int store_plane(int plane, const char *path)
       case E_F32: ((float *)tmp)[j] = ((float *)g_map[plane])[j]; break;
     }
   }
-  FILE *f = fopen(path, "wb");
-  if (!f) { free(tmp); return 6; }
-  int ok = fwrite(tmp, 1, (size_t)(n * (uint64_t)fw), f) == (size_t)(n * (uint64_t)fw);
-  fclose(f);
+  int ok = fwrite(tmp, 1, want, f) == want;
   free(tmp);
   return ok ? 0 : 6;
+}
+
+static int load_inputs(void)
+{
+  for (int i = 0; i < N_IN; ++i) {
+    FILE *f = fopen(g_argv_in[i], "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", g_argv_in[i]); return 1; }
+    int r = read_plane(f, kInPlane[i]);
+    fclose(f);
+    if (r) {
+      fprintf(stderr, "%s: bad plane %s\n", g_argv_in[i], kPlaneName[kInPlane[i]]);
+      return 2;
+    }
+  }
+  return 0;
 }
 
 static int store_outputs(void)
 {
   for (int i = 0; i < N_OUT; ++i) {
-    int r = store_plane(kOutPlane[i], g_argv_out[i]);
+    FILE *f = fopen(g_argv_out[i], "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", g_argv_out[i]); return 6; }
+    int r = write_plane(f, kOutPlane[i]);
+    fclose(f);
     if (r) return r;
   }
   return 0;
 }
+
+static int run(void);
+
+#if SERVE_MODE
+/* Resident loop: raw frames on stdin, raw frames on stdout. One frame is
+   the serve stream's planes concatenated in argv order. */
+static int serve_loop(void)
+{
+  for (;;) {
+    int eof = 0;
+    for (int i = 0; i < N_SERVE_IN; ++i) {
+      int r = read_plane(stdin, kServeIn[i]);
+      if (r == 1) { eof = 1; break; }
+      if (r) { fprintf(stderr, "serve: short input frame\n"); return r; }
+    }
+    if (eof) break;
+    int r = run();
+    if (r) return r;
+    for (int i = 0; i < N_SERVE_OUT; ++i) {
+      r = write_plane(stdout, kServeOut[i]);
+      if (r) return r;
+    }
+    fflush(stdout);
+  }
+  return 0;
+}
+#endif
 
 static int build_pipelines(void)
 {
@@ -1257,12 +1487,16 @@ static int build_pipelines(void)
 
 static int run(void)
 {
-  VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-  ai.commandPool = g_cpool;
-  ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  ai.commandBufferCount = 1;
-  VkCommandBuffer cmd;
-  CK(vkAllocateCommandBuffers(g_dev, &ai, &cmd));
+  static VkCommandBuffer cmd = VK_NULL_HANDLE;
+  if (cmd == VK_NULL_HANDLE) {
+    VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = g_cpool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    CK(vkAllocateCommandBuffers(g_dev, &ai, &cmd));
+  } else {
+    CK(vkResetCommandBuffer(cmd, 0));
+  }
 
   VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
   CK(vkBeginCommandBuffer(cmd, &bi));
@@ -1308,14 +1542,19 @@ int main(int argc, char **argv)
   t1 = now_ms();
   if ((r = make_buffers())) return r;
   t2 = now_ms();
-  if ((r = load_inputs())) return r;
-  t3 = now_ms();
   if ((r = build_pipelines())) return r;
+  t3 = now_ms();
+  if ((r = load_inputs())) return r;
   t4 = now_ms();
+#if SERVE_MODE
+  if ((r = serve_loop())) return r;
+  t5 = t6 = now_ms();
+#else
   if ((r = run())) return r;
   t5 = now_ms();
   if ((r = store_outputs())) return r;
   t6 = now_ms();
+#endif
   if (getenv("JOTNAR_VK_TIME"))
     fprintf(stderr,
             "phases ms: init=%.2f buffers=%.2f load=%.2f pipelines=%.2f "
