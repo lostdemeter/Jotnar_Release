@@ -341,7 +341,7 @@ correctness reference, not the SLO target.
 ## Commands
 
 ```sh
-cd /home/balrog/Documents/OpenCode/jotnar-hip-release
+cd /path/to/Jotnar_Release   # this checkout
 cargo build --release -p jotnar-node-tools --bin jotnar-stream
 
 # live camera + viewer (one command)

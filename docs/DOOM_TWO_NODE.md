@@ -237,8 +237,8 @@ poster.png      annotated first frame
 contact.png     six-frame contact sheet
 ```
 
-The checked evidence is copied to
-`/home/balrog/Documents/OpenCode/jotnaros/artifacts/doom-two-nodes/`:
+The checked evidence lives in the phase artifacts directory (outside this
+repository); it is not required to run the demo:
 
 ```text
 run.json, frames.jsonl, hardware.json, poster.png, contact.png

@@ -21,7 +21,7 @@ recorded clip so its reference is deterministic.
 One command (starts the SDL viewer as a child; requires `DISPLAY`):
 
 ```sh
-cd /home/balrog/Documents/OpenCode/jotnar-hip-release
+cd /path/to/Jotnar_Release   # this checkout
 ./target/release/jotnar-stream --descriptor demos/video-wall/camera-wall.json \
   --cuda 192.168.1.116:9997 --hip 192.168.1.195:9997 --token test --viewer
 ```
