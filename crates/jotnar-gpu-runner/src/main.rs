@@ -704,12 +704,7 @@ fn handle_one(stream: &mut TcpStream, cfg: &Config) -> Result<(), String> {
     if let Some(want) = &cfg.token {
         let got = header.get("auth").and_then(|x| x.as_str()).unwrap_or("");
         if want.trim().is_empty() || got != want.as_str() {
-            return send_error(
-                stream,
-                &id,
-                "unauthorized",
-                "bad or missing auth token",
-            );
+            return send_error(stream, &id, "unauthorized", "bad or missing auth token");
         }
     }
     match header.get("type").and_then(|x| x.as_str()).unwrap_or("") {

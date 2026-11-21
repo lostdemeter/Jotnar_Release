@@ -304,11 +304,7 @@ fn hud_frame(frame: &Frame, meta: &FrameMeta) -> Result<(usize, usize, Vec<u8>),
         note: meta.note.clone(),
     };
     let body = render_hud(&frame.data, frame.width, frame.height, &info)?;
-    Ok((
-        frame.width,
-        frame.height + HUD_TOP + HUD_BOTTOM,
-        body,
-    ))
+    Ok((frame.width, frame.height + HUD_TOP + HUD_BOTTOM, body))
 }
 
 impl FrameSink for DoomSink {
@@ -648,9 +644,7 @@ fn real_main() -> Result<(), String> {
         }
         "frames" => {
             if args.hud {
-                Box::new(HudDirSink::new(
-                    args.out.as_ref().ok_or("--out needed")?,
-                )?)
+                Box::new(HudDirSink::new(args.out.as_ref().ok_or("--out needed")?)?)
             } else {
                 Box::new(FrameDirSink::new(
                     args.out.as_deref().ok_or("--out needed")?,

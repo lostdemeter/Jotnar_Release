@@ -290,9 +290,7 @@ impl StreamDescriptor {
                 if tiles.rows == 0 || tiles.cols == 0 {
                     return Err("tile grid needs rows and cols > 0".to_string());
                 }
-                if self.source.width % tiles.cols != 0
-                    || self.source.height % tiles.rows != 0
-                {
+                if self.source.width % tiles.cols != 0 || self.source.height % tiles.rows != 0 {
                     return Err(format!(
                         "source {}x{} is not divisible into {}x{} tiles",
                         self.source.width, self.source.height, tiles.cols, tiles.rows
@@ -806,7 +804,10 @@ impl FrameSink for TcpFrameSink {
                     col: tile.col,
                     target: tile.target.clone(),
                     cols: tile.cols,
-                    ms: tile.worker_ms.filter(|ms| *ms > 0).unwrap_or(tile.latency_ms),
+                    ms: tile
+                        .worker_ms
+                        .filter(|ms| *ms > 0)
+                        .unwrap_or(tile.latency_ms),
                     attempts: tile.attempts,
                     failover_from: tile.failover_from.clone(),
                 })
@@ -1288,7 +1289,9 @@ impl SplitPolicy {
                 .get(planned)
                 .and_then(|pool| pool.get(slot))
                 .cloned()
-                .ok_or_else(|| format!("calibration has no executor slot {slot} for target {planned}"))?;
+                .ok_or_else(|| {
+                    format!("calibration has no executor slot {slot} for target {planned}")
+                })?;
             let endpoint = endpoints
                 .get(planned)
                 .ok_or_else(|| format!("calibration target {planned} has no endpoint"))?;
@@ -1299,24 +1302,20 @@ impl SplitPolicy {
                 tile,
             ));
         }
-        let run = |(executor, target, addr, tile): (
-            Arc<RemoteExecutor>,
-            String,
-            String,
-            TileInput,
-        )| {
-            let started = Instant::now();
-            run_tile(
-                executor,
-                target,
-                addr,
-                listing.to_string(),
-                tile,
-                timeout_ms,
-                request_timeout,
-            )
-            .map(|result| (started.elapsed().as_millis() as u64, result.worker_ms))
-        };
+        let run =
+            |(executor, target, addr, tile): (Arc<RemoteExecutor>, String, String, TileInput)| {
+                let started = Instant::now();
+                run_tile(
+                    executor,
+                    target,
+                    addr,
+                    listing.to_string(),
+                    tile,
+                    timeout_ms,
+                    request_timeout,
+                )
+                .map(|result| (started.elapsed().as_millis() as u64, result.worker_ms))
+            };
         let left_side = sides.remove(0);
         let right_side = sides.pop().expect("two sides");
         let (left, right) = thread::scope(|scope| {
@@ -1464,13 +1463,8 @@ impl SplitPolicy {
         };
         let left_p50 = percentile(&left_samples, 50);
         let right_p50 = percentile(&right_samples, 50);
-        let (left_cols, right_cols) = choose_columns(
-            width,
-            left_p50,
-            right_p50,
-            self.min_cols,
-            self.max_cols,
-        );
+        let (left_cols, right_cols) =
+            choose_columns(width, left_p50, right_p50, self.min_cols, self.max_cols);
         let mut split = ColumnSplit {
             left_cols,
             right_cols,
@@ -1515,13 +1509,8 @@ impl SplitPolicy {
                     let half = (width / 2) as u64;
                     let left_norm = left_p50 * half / split.left_cols.max(1) as u64;
                     let right_norm = right_p50 * half / split.right_cols.max(1) as u64;
-                    let (next_left, next_right) = choose_columns(
-                        width,
-                        left_norm,
-                        right_norm,
-                        self.min_cols,
-                        self.max_cols,
-                    );
+                    let (next_left, next_right) =
+                        choose_columns(width, left_norm, right_norm, self.min_cols, self.max_cols);
                     let before = SplitMeta::from_split(&split);
                     let mut changed = next_left.abs_diff(split.left_cols) >= 4;
                     let mut warmup = Json::Null;
@@ -1647,10 +1636,7 @@ fn axis_claim(claim: &Json, name: &str) -> Result<Option<AxisClaim>, String> {
             .get("max")
             .and_then(|x| x.as_u64())
             .ok_or_else(|| format!("partition axis {name} needs max"))? as usize;
-        let overlap = axis
-            .get("overlap")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as usize;
+        let overlap = axis.get("overlap").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         if min == 0 || max < min {
             return Err(format!(
                 "partition axis {name} has invalid bounds {min}..={max}"
@@ -1735,10 +1721,7 @@ fn derive_tile_grid(
     }
     let Some((_, rows, cols, tile_h, tile_w)) = best else {
         let describe = |claim: Option<AxisClaim>| match claim {
-            Some(claim) => format!(
-                "{}..={} overlap {}",
-                claim.min, claim.max, claim.overlap
-            ),
+            Some(claim) => format!("{}..={} overlap {}", claim.min, claim.max, claim.overlap),
             None => "absent".to_string(),
         };
         return Err(format!(
@@ -2025,9 +2008,9 @@ pub fn run_stream_with(
             }),
         ),
         None => {
-            let claim = claim.as_ref().ok_or(
-                "tiles omitted but the stage has no descriptor claim to derive from",
-            )?;
+            let claim = claim
+                .as_ref()
+                .ok_or("tiles omitted but the stage has no descriptor claim to derive from")?;
             let derived = derive_tile_grid(
                 &claim.partitionable,
                 descriptor.source.width,
@@ -2228,8 +2211,7 @@ pub fn run_stream_with(
             } else {
                 tile_frame(&frame, &tiles)?
             };
-            let request_timeout =
-                Duration::from_millis(cfg.request_timeout_ms.max(1));
+            let request_timeout = Duration::from_millis(cfg.request_timeout_ms.max(1));
             for (i, tile) in warm_tiles.into_iter().enumerate() {
                 let planned = *planned_targets
                     .get(i)
@@ -2354,10 +2336,7 @@ pub fn run_stream_with(
                 down_until.remove(target);
             }
         }
-        let frame_failovers = tile_meta
-            .values()
-            .filter(|m| m.1.is_some())
-            .count() as u64;
+        let frame_failovers = tile_meta.values().filter(|m| m.1.is_some()).count() as u64;
         failover_count += frame_failovers;
         recovery_count += recovered.len() as u64;
 
@@ -2780,10 +2759,7 @@ mod tests {
         assert!(descriptor.validate().is_err());
     }
 
-    fn claim(
-        rows: (usize, usize, usize),
-        cols: (usize, usize, usize),
-    ) -> Json {
+    fn claim(rows: (usize, usize, usize), cols: (usize, usize, usize)) -> Json {
         json!({
             "axes": [
                 {"axis": "rows", "index": 0, "min": rows.0, "max": rows.1, "overlap": rows.2},
@@ -2794,8 +2770,7 @@ mod tests {
 
     #[test]
     fn derives_the_wall_grid_from_the_claim_and_slots() {
-        let derived =
-            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 4).unwrap();
+        let derived = derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 4).unwrap();
         assert_eq!(derived.tiles.rows, 2);
         assert_eq!(derived.tiles.cols, 2);
         assert_eq!(derived.tiles.halo, 1);
@@ -2808,18 +2783,15 @@ mod tests {
     fn derivation_prefers_the_source_aspect_then_wider_tiles() {
         // 2 slots on a 16:9 source: 1x2 and 2x1 tie on log-distance; prefer
         // wider tiles (more columns).
-        let derived =
-            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 2).unwrap();
+        let derived = derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 2).unwrap();
         assert_eq!((derived.tiles.rows, derived.tiles.cols), (1, 2));
 
         // 4 slots where 2x2 is too tall: 4x1 is the only legal shape.
-        let derived =
-            derive_tile_grid(&claim((16, 100, 1), (16, 640, 1)), 640, 360, 4).unwrap();
+        let derived = derive_tile_grid(&claim((16, 100, 1), (16, 640, 1)), 640, 360, 4).unwrap();
         assert_eq!((derived.tiles.rows, derived.tiles.cols), (4, 1));
 
         // 6 slots: (2,3) does not divide 640; (3,2) does.
-        let derived =
-            derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 6).unwrap();
+        let derived = derive_tile_grid(&claim((16, 360, 1), (16, 640, 1)), 640, 360, 6).unwrap();
         assert_eq!((derived.tiles.rows, derived.tiles.cols), (3, 2));
     }
 
