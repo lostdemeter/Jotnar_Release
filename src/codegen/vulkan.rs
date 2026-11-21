@@ -199,6 +199,7 @@ struct Ctx<'a> {
     t2: Option<i64>,
     f: i64,
     beta_b: f64,
+    eps_rms: i64,
 }
 
 impl<'a> Ctx<'a> {
@@ -334,6 +335,19 @@ pub fn compile_vulkan(text: &str, opts: &CompileOptions, sample: Feeds) -> Resul
         beta_b: bound
             .config
             .get_f64_or("beta_b", bound.config.get_f64_or("beta", 0.5)),
+        eps_rms: {
+            let m_cov = bound.config.get_i64("m_cov").unwrap_or(33280);
+            match bound.config.get_f64("eps_rms") {
+                Some(v) => {
+                    let um = phi_core::lattice::PHI
+                        .powf((m_cov - phi_core::lattice::BIAS) as f64 / 512.0);
+                    phi_core::lattice::round_half_even(
+                        v * 68719476736.0 / (um * um),
+                    ) as i64
+                }
+                None => bound.config.get_i64("eps_rms_c").unwrap_or(4514),
+            }
+        },
     };
 
     let mut dispatches: Vec<Dispatch> = Vec::new();
@@ -443,6 +457,10 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
         }
         ("IGET", CKind::I) => iget(ins, ctx, tabs, out_ord),
         ("TBETA", CKind::T) => tbeta(ins, ctx, out_ord, out_n),
+        ("SILU", CKind::T) => silu(ins, ctx, tabs, out_ord),
+        ("SOFTMAX_WIDE", CKind::T) => softmax_wide(ins, ctx, tabs, out_ord),
+        ("RMSNORM", CKind::T) => rmsnorm(ins, ctx, tabs, out_ord),
+        ("T2I", CKind::I) => t2i(ins, ctx, tabs, out_ord),
         ("TSHIFT", CKind::T) => tshift(ins, ctx, tabs, out_ord),
 
         // exact integer arithmetic
@@ -456,10 +474,9 @@ fn lower(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables) -> Result<Lowered> {
 
         // Ladder ops that need the fixed-point bridge / baked tables.
         ("DIV", CKind::T)
-        | ("RMSNORM", CKind::T) | ("SOFTMAX", CKind::T)
-        | ("SOFTMAX_WIDE", CKind::T) | ("SILU", CKind::T) | ("GELU", CKind::T)
+        | ("SOFTMAX", CKind::T) | ("GELU", CKind::T)
         | ("ROTARY", CKind::T) | ("CONCAT", CKind::T)
-        | ("T2I", CKind::I) | ("IREDUCE_SUM", CKind::I) => {
+        | ("IREDUCE_SUM", CKind::I) => {
             Err(Error::unimplemented(format!(
                 "Vulkan backend: {} on {out_kind:?} needs the ladder bridge/tables (next milestone)",
                 ins.mn
@@ -1590,6 +1607,373 @@ void main()
         src,
         vec![a_s, a_e, a_z, o_s, o_e, o_z, frac, frac_hi, coarse, fine],
         [rows as u32, cols as u32, ctx.m_acc as u32, 0],
+        groups,
+        [LOCAL_SIZE, 1, 1],
+    ))
+}
+
+/// SILU = x * sigmoid(x), sigmoid through the frozen sigx/sig tables.
+fn silu(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 SILU is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let out_n = ctx.elems(out_ord)?;
+    if ctx.elems(in_ord)? != out_n {
+        return Err(Error::unimplemented("Vulkan: SILU shape mismatch"));
+    }
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(in_ord, Comp::S)?,
+        ctx.plane_of(in_ord, Comp::E)?,
+        ctx.plane_of(in_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let sigx = tabs.get("sigx", || phi_core::lattice::sigx_lut().to_vec());
+    let sig = tabs.get("sig", || phi_core::lattice::sig_lut().to_vec());
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) buffer OS {{ int os_[]; }};
+layout(std430, binding = 4) buffer OE {{ int oe[]; }};
+layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 6) readonly buffer SIGX {{ int64_t sigx[]; }};
+layout(std430, binding = 7) readonly buffer SIGT {{ int64_t sigt[]; }};
+layout(std430, binding = 8) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 9) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 10) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+const int64_t SPAN = 262144;
+
+void main()
+{{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+
+  int e = ae[i] < 0 ? 0 : (ae[i] > 65535 ? 65535 : ae[i]);
+  int64_t x14 = (az[i] != 0u) ? int64_t(0) : int64_t(as_[i]) * sigx[e];
+
+  int64_t y14;
+  if (x14 < -SPAN) y14 = 0;
+  else if (x14 > SPAN) y14 = 16384;
+  else y14 = sigt[int(x14 + SPAN)];
+
+  Ladder sg = from_fixed(y14 * 16, BIAS);
+
+  os_[i] = sg.s * as_[i];
+  int ee = sg.e + ae[i] - BIAS;
+  oe[i] = ee < 0 ? 0 : (ee > 65535 ? 65535 : ee);
+  oz[i] = sg.z | az[i];
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![a_s, a_e, a_z, o_s, o_e, o_z, sigx, sig, frac, coarse, fine],
+        [out_n as u32, 0, 0, 0],
+        groups,
+        [LOCAL_SIZE, 1, 1],
+    ))
+}
+
+/// T2I: decode the ladder to an exact integer through the t2i table.
+fn t2i(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let out_n = ctx.elems(out_ord)?;
+    if ctx.elems(in_ord)? != out_n {
+        return Err(Error::unimplemented("Vulkan: T2I shape mismatch"));
+    }
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(in_ord, Comp::S)?,
+        ctx.plane_of(in_ord, Comp::E)?,
+        ctx.plane_of(in_ord, Comp::Z)?,
+    );
+    let o_p = ctx.plane_of(out_ord, Comp::V)?;
+    let lut = tabs.get("t2i", || phi_core::lattice::t2i_lut().to_vec());
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) readonly buffer LUT {{ int64_t lut[]; }};
+layout(std430, binding = 4) buffer O {{ int64_t o[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+void main() {{
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.n) return;
+  if (az[i] != 0u) {{ o[i] = int64_t(0); return; }}
+  int e = ae[i] < 0 ? 0 : (ae[i] > 65535 ? 65535 : ae[i]);
+  int64_t mag = lut[e];
+  o[i] = as_[i] < 0 ? -mag : (as_[i] == 0 ? int64_t(0) : mag);
+}}
+"#
+    );
+
+    let groups = [div_ceil(out_n, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((src, vec![a_s, a_e, a_z, lut, o_p], [out_n as u32, 0, 0, 0], groups, [LOCAL_SIZE, 1, 1]))
+}
+
+/// SOFTMAX_WIDE: wide bridge at BIAS, exp table, truncating normalisation.
+fn softmax_wide(
+    ins: &BoundInstr,
+    ctx: &Ctx,
+    tabs: &mut Tables,
+    out_ord: usize,
+) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 SOFTMAX_WIDE is not implemented yet (frozen T is)",
+        ));
+    }
+    let in_ord = ctx.ordinal(&ins.args[0])?;
+    let shape = ctx.info(in_ord)?.static_shape(&ctx.name(in_ord))?;
+    let cols = *shape.last().unwrap_or(&1);
+    let rows: usize = shape[..shape.len().saturating_sub(1)].iter().product();
+
+    let (a_s, a_e, a_z) = (
+        ctx.plane_of(in_ord, Comp::S)?,
+        ctx.plane_of(in_ord, Comp::E)?,
+        ctx.plane_of(in_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let exp = tabs.get("exp", || phi_core::lattice::exp_lut().to_vec());
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let frac_hi = tabs.get("frac_hi", || phi_core::lattice::frac_hi_lut().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer AS {{ int as_[]; }};
+layout(std430, binding = 1) readonly buffer AE {{ int ae[]; }};
+layout(std430, binding = 2) readonly buffer AZ {{ uint az[]; }};
+layout(std430, binding = 3) buffer OS {{ int os_[]; }};
+layout(std430, binding = 4) buffer OE {{ int oe[]; }};
+layout(std430, binding = 5) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 6) readonly buffer EXP {{ int64_t expo[]; }};
+layout(std430, binding = 7) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 8) readonly buffer FRACHI {{ int64_t frac_hi[]; }};
+layout(std430, binding = 9) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 10) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+const int WIDE_CAP = 8192;
+
+int64_t to_fixed_wide(int sgn, int ev, uint z, int64_t m0)
+{{
+  int64_t d = m0 - int64_t(ev);
+  int64_t q_lo;
+  if (d < int64_t(-WIDE_CAP)) {{
+    q_lo = int64_t(sgn) * frac[0];
+  }} else {{
+    int64_t k = -d;
+    if (k < 1) k = 1;
+    if (k > int64_t(WIDE_CAP)) k = int64_t(WIDE_CAP);
+    q_lo = int64_t(sgn) * frac_hi[int(k - 1)];
+  }}
+  if (z != 0u) return 0;
+  if (d < 0) return q_lo;
+  if (d > int64_t(FRAC_CAP)) return 0;
+  return int64_t(sgn) * frac[int(d)];
+}}
+
+int64_t tdiv64(int64_t a, int64_t b)
+{{
+  if (b == 0) return 0;
+  int64_t q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+  return ((a < 0) != (b < 0)) ? -q : q;
+}}
+
+int64_t exp_at(int64_t dd)
+{{
+  if (dd < 0) dd = 0;
+  if (dd > 262144) dd = 262144;
+  return expo[int(dd)];
+}}
+
+void main()
+{{
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.n) return;
+  uint c = pc.p0;
+
+  int64_t vmax = int64_t(0);
+  bool first = true;
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t s14 = tdiv64(q, int64_t(16));
+    if (first || s14 > vmax) {{ vmax = s14; first = false; }}
+  }}
+
+  int64_t dsum = int64_t(0);
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t s14 = tdiv64(q, int64_t(16));
+    dsum += exp_at(vmax - s14);
+  }}
+  int64_t den = (dsum == 0) ? int64_t(1) : dsum;
+
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed_wide(as_[i], ae[i], az[i], int64_t(BIAS));
+    int64_t s14 = tdiv64(q, int64_t(16));
+    int64_t num = exp_at(vmax - s14);
+    int64_t c18 = tdiv64(num * (int64_t(1) << 18), den);
+    Ladder res = from_fixed(c18, int64_t(BIAS));
+    os_[i] = res.s; oe[i] = res.e; oz[i] = res.z;
+  }}
+}}
+"#
+    );
+
+    let groups = [div_ceil(rows, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![a_s, a_e, a_z, o_s, o_e, o_z, exp, frac, frac_hi, coarse, fine],
+        [rows as u32, cols as u32, 0, 0],
+        groups,
+        [LOCAL_SIZE, 1, 1],
+    ))
+}
+
+/// RMSNORM over the last axis at m_cov, matching `norm_rows`.
+fn rmsnorm(ins: &BoundInstr, ctx: &Ctx, tabs: &mut Tables, out_ord: usize) -> Result<Lowered> {
+    if ctx.t2.is_some() {
+        return Err(Error::unimplemented(
+            "Vulkan: T2 RMSNORM is not implemented yet (frozen T is)",
+        ));
+    }
+    if ins.args.len() != 2 {
+        return Err(Error::asm("Vulkan: RMSNORM expects x and w"));
+    }
+    let x_ord = ctx.ordinal(&ins.args[0])?;
+    let w_ord = ctx.ordinal(&ins.args[1])?;
+    let shape = ctx.info(x_ord)?.static_shape(&ctx.name(x_ord))?;
+    let cols = *shape.last().unwrap_or(&1);
+    let rows: usize = shape[..shape.len().saturating_sub(1)].iter().product();
+    if ctx.elems(w_ord)? != cols {
+        return Err(Error::asm("Vulkan: RMSNORM weight length mismatch"));
+    }
+
+    let (x_s, x_e, x_z) = (
+        ctx.plane_of(x_ord, Comp::S)?,
+        ctx.plane_of(x_ord, Comp::E)?,
+        ctx.plane_of(x_ord, Comp::Z)?,
+    );
+    let (w_s, w_e, w_z) = (
+        ctx.plane_of(w_ord, Comp::S)?,
+        ctx.plane_of(w_ord, Comp::E)?,
+        ctx.plane_of(w_ord, Comp::Z)?,
+    );
+    let (o_s, o_e, o_z) = (
+        ctx.plane_of(out_ord, Comp::S)?,
+        ctx.plane_of(out_ord, Comp::E)?,
+        ctx.plane_of(out_ord, Comp::Z)?,
+    );
+    let frac = tabs.get("frac", || phi_core::lattice::l_frac().to_vec());
+    let coarse = tabs.get("coarse", || phi_core::lattice::l_coarse().to_vec());
+    let fine = tabs.get("fine", || phi_core::lattice::l_fine().to_vec());
+    let ladder = LADDER_GLSL;
+
+    let src = format!(
+        r#"#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = {LOCAL_SIZE}) in;
+layout(std430, binding = 0) readonly buffer XS {{ int xs_[]; }};
+layout(std430, binding = 1) readonly buffer XE {{ int xe[]; }};
+layout(std430, binding = 2) readonly buffer XZ {{ uint xz[]; }};
+layout(std430, binding = 3) readonly buffer WS {{ int ws[]; }};
+layout(std430, binding = 4) readonly buffer WE {{ int we[]; }};
+layout(std430, binding = 5) readonly buffer WZ {{ uint wz[]; }};
+layout(std430, binding = 6) buffer OS {{ int os_[]; }};
+layout(std430, binding = 7) buffer OE {{ int oe[]; }};
+layout(std430, binding = 8) buffer OZ {{ uint oz[]; }};
+layout(std430, binding = 9) readonly buffer FRAC {{ int64_t frac[]; }};
+layout(std430, binding = 10) readonly buffer COARSE {{ int64_t coarse[]; }};
+layout(std430, binding = 11) readonly buffer FINE {{ int64_t fine[]; }};
+layout(push_constant) uniform PC {{ uint n; uint p0; uint p1; uint p2; }} pc;
+{ladder}
+int64_t tdiv64(int64_t a, int64_t b)
+{{
+  if (b == 0) return 0;
+  int64_t q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+  return ((a < 0) != (b < 0)) ? -q : q;
+}}
+
+uint64_t isqrt64(uint64_t n)
+{{
+  if (n < 2ul) return n;
+  uint64_t x = n;
+  uint64_t y = (x + 1ul) >> 1;
+  while (y < x) {{ x = y; y = (x + n / x) >> 1; }}
+  return x;
+}}
+
+void main()
+{{
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.n) return;
+  uint c = pc.p0;
+  int64_t m0 = int64_t(pc.p1);
+  int64_t eps = int64_t(pc.p2);
+
+  int64_t sum = int64_t(0);
+  for (uint j = 0; j < c; ++j) {{
+    int64_t q = to_fixed(xs_[r * c + j], xe[r * c + j], xz[r * c + j], m0);
+    sum += q * q;
+  }}
+  int64_t ms = tdiv64(sum, int64_t(c)) + eps;
+  int64_t rms = ms > 0 ? int64_t(isqrt64(uint64_t(ms))) : int64_t(0);
+
+  int64_t one18 = int64_t(1) << 18;
+  for (uint j = 0; j < c; ++j) {{
+    uint i = r * c + j;
+    int64_t q = to_fixed(xs_[i], xe[i], xz[i], m0);
+    int64_t norm = (rms == 0) ? int64_t(0) : tdiv64(q * one18, rms);
+    int64_t wq = to_fixed(ws[j], we[j], wz[j], m0);
+    int64_t v = tdiv64(norm * wq, one18);
+    Ladder res = from_fixed(v, m0);
+    os_[i] = res.s; oe[i] = res.e; oz[i] = res.z;
+  }}
+}}
+"#
+    );
+
+    let groups = [div_ceil(rows, LOCAL_SIZE as usize) as u32, 1, 1];
+    Ok((
+        src,
+        vec![x_s, x_e, x_z, w_s, w_e, w_z, o_s, o_e, o_z, frac, coarse, fine],
+        [rows as u32, cols as u32, ctx.m_cov as u32, ctx.eps_rms as u32],
         groups,
         [LOCAL_SIZE, 1, 1],
     ))

@@ -171,6 +171,61 @@ OUT = TBETA(A)
         True,
     ),
     (
+        "t_silu",
+        """IN A AS T:*
+OUT = SILU(A)
+""",
+        lambda: {"A": t3([1, -1, 1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 30000],
+                         [0, 0, 0, 1, 0, 0], [6])},
+        {"kind": "T", "shape": [6]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "t_softmax_wide",
+        """IN A AS T:*
+OUT = SOFTMAX_WIDE(A)
+""",
+        lambda: {"A": t3([1, 1, -1, 1, -1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 33200, 32900, 33100],
+                         [0, 0, 0, 1, 0, 0, 0, 0], [2, 4])},
+        {"kind": "T", "shape": [2, 4]},
+        # non-FPU is off by one rung on element 4 of this case; the
+        # interpreter is the oracle, so gate against it.
+        "interp",
+        True,
+    ),
+    (
+        "t_rmsnorm",
+        """IN X AS T:*
+IN W AS T:*
+OUT = RMSNORM(X, W)
+""",
+        lambda: {
+            "X": t3([1, 1, -1, 1, -1, 1, -1, 1],
+                    [32768, 33000, 32500, 32768, 34000, 33200, 32900, 33100],
+                    [0, 0, 0, 1, 0, 0, 0, 0], [2, 4]),
+            "W": t3([1, 1, 1, -1], [32768, 32900, 33000, 32768],
+                    [0, 0, 0, 0], [4]),
+        },
+        {"kind": "T", "shape": [2, 4]},
+        "nonfpu",
+        True,
+    ),
+    (
+        "i_t2i",
+        """IN A AS T:*
+OUT = T2I(A)
+""",
+        lambda: {"A": t3([1, -1, 1, 1, -1, 1],
+                         [32768, 33000, 32500, 32768, 34000, 30000],
+                         [0, 0, 0, 1, 0, 0], [6])},
+        {"kind": "I64", "shape": [6]},
+        "nonfpu",
+        True,
+    ),
+    (
         "i_iget",
         """IN X AS I:*
 OUT = IGET(X, 2)
@@ -275,8 +330,10 @@ def run_case(bin_path, case, workroot):
         man = json.load(open(os.path.join(work, exe_name + ".manifest.json")))
         return os.path.join(work, man["executable"]), man
 
-    ref_exe, ref_man = build(ref_target, "ref")
     vk_exe, vk_man = build("vulkan", "vk")
+    ref_exe = ref_man = None
+    if ref_target != "interp":
+        ref_exe, ref_man = build(ref_target, "ref")
 
     def argv_for(exe, man, tag):
         n = numel(out_spec["shape"])
@@ -298,9 +355,29 @@ def run_case(bin_path, case, workroot):
             argv.append(p)
         return argv, outs, n
 
-    ref_argv, ref_outs, count = argv_for(ref_exe, ref_man, "ref")
     vk_argv, vk_outs, _ = argv_for(vk_exe, vk_man, "vk")
 
+    if ref_target == "interp":
+        # Compare against the interpreter itself. Used where an emitter and the
+        # oracle disagree; the oracle wins.
+        subprocess.run([vk_exe] + vk_argv, check=True, stdout=subprocess.DEVNULL)
+        exp = json.loads(subprocess.check_output(
+            [bin_path, "run", listing_path, "--payload", payload_path],
+            text=True))["streams"]["OUT"]
+        ok = True
+        for suffix, fmt, path in vk_outs:
+            key = suffix if suffix else "data"
+            raw = exp[key]
+            want = [float(x) for x in raw] if fmt in ("d", "f") else [int(x) for x in raw]
+            got = load(path, fmt, len(want))
+            if got != want:
+                ok = False
+                label = name + ("." + suffix if suffix else "")
+                print(f"  FAIL {label}: interp={want[:8]} vk={got[:8]}")
+        print(f"{'PASS' if ok else 'FAIL'} {name} (interpreter reference, exact)")
+        return ok
+
+    ref_argv, ref_outs, count = argv_for(ref_exe, ref_man, "ref")
     subprocess.run([ref_exe] + ref_argv, check=True, stdout=subprocess.DEVNULL)
     subprocess.run([vk_exe] + vk_argv, check=True, stdout=subprocess.DEVNULL)
 
