@@ -1357,7 +1357,7 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                 }
                 streams.insert(o, StreamInfo::i(vec![Some(1)]));
             }
-            "ISCATTER1" => {
+            "ISCATTER1" | "ISCATTER_MIN1" => {
                 let base = get(&streams, a(0))?;
                 let ids = get(&streams, a(1))?;
                 let vals = get(&streams, a(2))?;
@@ -1369,7 +1369,7 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     || vals.shape.len() != 1
                 {
                     return Err(Error::unimplemented(format!(
-                        "{where_}: ISCATTER1 needs 1D I OUT/IDS/VALS"
+                        "{where_}: ISCATTER1/ISCATTER_MIN1 needs 1D I OUT/IDS/VALS"
                     )));
                 }
                 if ids.shape[0].is_some()
@@ -1377,7 +1377,7 @@ pub fn infer_shapes(bound: &BoundProgram, sample: &Feeds) -> Result<HashMap<Stri
                     && ids.shape[0] != vals.shape[0]
                 {
                     return Err(Error::asm(format!(
-                        "{where_}: ISCATTER1 IDS {:?} vs VALS {:?}",
+                        "{where_}: ISCATTER1/ISCATTER_MIN1 IDS {:?} vs VALS {:?}",
                         ids.shape[0], vals.shape[0]
                     )));
                 }

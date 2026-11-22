@@ -194,6 +194,55 @@ pub fn op_iscatter1(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     )?)])
 }
 
+/// Atomic min-scatter: `OUT[id] = min(OUT[id], val)` for each `(id, val)`.
+///
+/// `ISCATTER1` is last-wins, so a z-buffer can only be built by sorting the
+/// point stream far-to-near first. This op resolves the collision instead of
+/// hiding the order in a host `argsort`: identical ids combine by minimum, and
+/// a repeated id is order-independent. Ties keep the stored value (min is
+/// idempotent), so the result is independent of thread count and batch order.
+///
+/// Contract:
+///   OUT  : I64 [P]   initial buffer (caller supplies the sentinel)
+///   IDS  : I64 [N]   destination indices, 0 <= id < P
+///   VALS : I64 [N]   candidate values
+///   ->     I64 [P]   same shape as OUT
+pub fn op_iscatter_min1(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
+    let base = int_stream(args, 0, "ISCATTER_MIN1", "OUT")?;
+    let ids = int_stream(args, 1, "ISCATTER_MIN1", "IDS")?;
+    let vals = int_stream(args, 2, "ISCATTER_MIN1", "VALS")?;
+    if base.ndim() != 1 || ids.ndim() != 1 || vals.ndim() != 1 {
+        return Err(Error::runtime("ISCATTER_MIN1: OUT/IDS/VALS must be 1D I"));
+    }
+    if ids.len() != vals.len() {
+        return Err(Error::runtime(format!(
+            "ISCATTER_MIN1: IDS {:?} vs VALS {:?}",
+            ids.shape(),
+            vals.shape()
+        )));
+    }
+    let mut out = flat(&base);
+    let idsf = flat(&ids);
+    let valsf = flat(&vals);
+    for (n, &id) in idsf.iter().enumerate() {
+        if id < 0 || id as usize >= out.len() {
+            return Err(Error::runtime(format!(
+                "ISCATTER_MIN1: ids out of range [0,{})",
+                out.len()
+            )));
+        }
+        let slot = &mut out[id as usize];
+        let v = valsf[n];
+        if v < *slot {
+            *slot = v;
+        }
+    }
+    Ok(vec![Value::I64(crate::value::array_from_vec(
+        base.shape(),
+        out,
+    )?)])
+}
+
 pub fn op_icrc32(args: &[Arg], _: &Config) -> Result<Vec<Value>> {
     let x = int_stream(args, 0, "ICRC32", "X")?;
     if x.ndim() != 1 {

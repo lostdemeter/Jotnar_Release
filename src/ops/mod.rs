@@ -579,6 +579,18 @@ fn build_registry() -> Registry {
         sig(&["I:*", "I:*", "I:*"], &["I:*"]),
         Some(op_iscatter1),
     );
+    // Order-independent min-scatter. ISCATTER1 is last-wins, which forces a
+    // host far-to-near sort for a z-buffer; this op removes that hidden
+    // geometry. The nonfpu path uses the shared structural C pattern (the
+    // pattern returns None and `pattern_c` emits the bounds-checked loop),
+    // not a separate nonfpu arm.
+    add(
+        "ISCATTER_MIN1",
+        3,
+        1,
+        sig(&["I:*", "I:*", "I:*"], &["I:*"]),
+        Some(op_iscatter_min1),
+    );
 
     Registry { map: m }
 }

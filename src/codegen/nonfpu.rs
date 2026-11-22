@@ -22,6 +22,7 @@ const INTEGER_MN: &[&str] = &[
     "IASSEMBLE",
     "ISUM",
     "ISCATTER1",
+    "ISCATTER_MIN1",
     "ARGMAX",
     "TRANSPOSE",
     "SLICE",

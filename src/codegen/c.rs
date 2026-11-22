@@ -531,6 +531,46 @@ for (int64_t g_i = 0; g_i < {co}; ++g_i) {
                 None,
             ))
         }
+        "ISCATTER_MIN1" => {
+            let (base, ids, vals, o) = (
+                args[0].as_str(),
+                args[1].as_str(),
+                args[2].as_str(),
+                outs[0].as_str(),
+            );
+            let vn = ctx.s(base)?.shape[0].ok_or_else(|| {
+                Error::unimplemented("C backend ISCATTER_MIN1: OUT length must be static")
+            })?;
+            let nids = ctx.s(ids)?.shape[0].ok_or_else(|| {
+                Error::unimplemented("C backend ISCATTER_MIN1: IDS length must be static")
+            })?;
+            let co = ctx.elems(o)?;
+            let copy = if base == o {
+                String::new()
+            } else {
+                format!("for (int64_t s_i = 0; s_i < {co}; ++s_i) {o}[s_i] = {base}[s_i];\n")
+            };
+            Ok((
+                fill(
+                    r#"/* {o} = ISCATTER_MIN1({base}, {ids}, {vals}) exact, order-independent */
+{copy}for (int64_t s_i = 0; s_i < {nids}; ++s_i) {
+  int64_t _b = {ids}[s_i];
+  if (_b < 0 || _b >= {vn}) return 4;
+  if ({vals}[s_i] < {o}[_b]) {o}[_b] = {vals}[s_i];
+}"#,
+                    &[
+                        ("o", o.into()),
+                        ("base", base.into()),
+                        ("ids", ids.into()),
+                        ("vals", vals.into()),
+                        ("vn", vn.to_string()),
+                        ("nids", nids.to_string()),
+                        ("copy", copy),
+                    ],
+                ),
+                None,
+            ))
+        }
         "IADD" | "ISUB" | "IMUL" | "IMAD" | "IDIV" | "IMOD" | "IDIVU" | "IMODU" | "ISAR" => {
             let (a, o) = (args[0].as_str(), outs[0].as_str());
             let co = ctx.elems(o)?;
