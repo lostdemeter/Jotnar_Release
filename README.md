@@ -34,7 +34,7 @@ behind the claims.</p>
 &nbsp;·&nbsp;
 <a href="manual/">source</a>
 </p>
-<p><em>103 pages. 105 mnemonics. One fail-loud rule: if the assembler has to
+<p><em>103 pages. 106 mnemonics. One fail-loud rule: if the assembler has to
 guess, the program is already wrong.</em></p>
 </td>
 </tr>
@@ -223,7 +223,7 @@ The front door is deliberately short. The actual parts are here:
 - assembler, macro expansion, layouts: [`src/asm.rs`](src/asm.rs), [`src/layout.rs`](src/layout.rs)
 - opt-in T2 φ-float (T + binary mantissa) for non-FPU precision:
   [`docs/T2_PHI_FLOAT.md`](docs/T2_PHI_FLOAT.md)
-- the 105-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
+- the 106-mnemonic registry and reference semantics: [`src/ops/`](src/ops/)
 - code generators: [`src/codegen/`](src/codegen/)
 - structural Verilog: [`src/verilog.rs`](src/verilog.rs)
 - RV32IM and DOOM: [`src/rv32.rs`](src/rv32.rs)
@@ -256,7 +256,7 @@ The front door is deliberately short. The actual parts are here:
 ## Receipts, not promises
 
 ```text
-105 mnemonics
+106 mnemonics
 88/88 Python-oracle cases (original 86)
 4 extension gates (T2I, IGET, IMATMUL, IREDUCE_SUM)
 4 non-FPU image ops (POOLMAX2D, POOLAVG2D, MULC, ADDC) + T2 SILU

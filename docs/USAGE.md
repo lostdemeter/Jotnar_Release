@@ -58,7 +58,7 @@ What works today:
 
 - `IMPORT` / `DEF` / `CALL` textual macro expansion with per-call-site
   namespacing, `REPEAT` / `BREAK`, `CONFIG`, layouts, `STATE`, `RANGE`.
-- Registry binding for **all 105 mnemonics**, including `SADD`, `IMAX`,
+- Registry binding for **all 106 mnemonics**, including `SADD`, `IMAX`,
   `ISAR`, `IDIVU`, `IMODU`, `IEQ`, `ILT`, `ISELECT`.
 - The static layout verifier with honest coverage reporting.
 - The reference interpreter over `F32`/`F64`, `I64`, `U8`, bool masks,
@@ -71,7 +71,7 @@ What works today:
   T refused, DECONV/INTERP/GATHER fail loud until the next slice), and Vulkan
   (φ-ladder subset; see `docs/VULKAN_FEASIBILITY.md`). HIP ports the
   51-mnemonic CUDA slice as of `d98dfe2`; current CUDA has 65, and none of
-  HIP, CUDA, or Vulkan is the full 105-mnemonic surface.
+  HIP, CUDA, or Vulkan is the full 106-mnemonic surface.
 - Differential parity:
 
 ```text

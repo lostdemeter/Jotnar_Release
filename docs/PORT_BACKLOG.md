@@ -20,7 +20,7 @@ Guiding rules:
 
 Done:
 
-- 105-mnemonic registry, parser/expander/assembler/verifier, interpreter,
+- 106-mnemonic registry, parser/expander/assembler/verifier, interpreter,
   `REPEAT`/`BREAK`, `repeat()`.
 - C, non-FPU, and CUDA code generators (correctness-first).
 - `phi-core` crate: lattice, triples, exact helpers, numpy-style substrate
@@ -41,7 +41,7 @@ Open:
 
 - [x] `asm.py`: IMPORT, DEF/CALL, REPEAT/BREAK, parse, assemble, verify
 - [x] `asm_ops.py`: the 86 historical opcodes and signatures (the Rust
-  registry extends to 105)
+  registry extends to 106)
 - [x] `run()` / `repeat()` reference interpreter
 - [ ] `builder.py`: programmatic listing construction
 - [ ] `debugger.py`: breakpoints, watch, step, lesion

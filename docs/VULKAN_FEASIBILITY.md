@@ -12,7 +12,7 @@ backend that proves it?
 
 Answer for this spike: **yes**, with a direct Vulkan-compute emitter and a
 bit-exact gate against the non-FPU reference. The primary numeric path is the
-**φ-ladder (T)**, not FP32. This is not "all 105 mnemonics on Vulkan", not a
+**φ-ladder (T)**, not FP32. This is not "all 106 mnemonics on Vulkan", not a
 performance result beyond the numbers below, and not a node-image
 integration.
 

@@ -175,7 +175,7 @@ aliases). Current CUDA has 65 mnemonics; the 14 not in this HIP slice are
 `GELU`, `RELU`, `CONV2D`, `CONV2D_RELU`, `DECONV2D`, `RESIZE2D`, `RESHAPE2`,
 `RESHAPE3`, `MATMUL_T`, `MATMUL_BIAS`, `MATMUL_BIAS_RESIDUAL`,
 `MATMUL_BIAS_GELU`, `SELF_ATTN`, and `LINEAR_ATTN`. HIP is intentionally not
-the full 105-mnemonic language:
+the full 106-mnemonic language:
 
 ```text
 ADD SUB MUL DIV SILU

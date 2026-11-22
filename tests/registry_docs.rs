@@ -44,7 +44,7 @@ fn registry_and_manual_register_agree() {
 #[test]
 fn mnemonic_count_is_documented() {
     let count = registry().len();
-    assert_eq!(count, 105, "registry mnemonic count");
+    assert_eq!(count, 106, "registry mnemonic count");
     let readme = read("README.md");
     assert!(
         readme.contains(&format!("{count} mnemonics")),
