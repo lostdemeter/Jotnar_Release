@@ -64,6 +64,42 @@ fn mul_add_match_f64() {
 }
 
 #[test]
+fn div_matches_f64_on_declared_range() {
+    let m = 24;
+    let tabs = Tables::new(24);
+    let mut seed = 23u64;
+    let bound = 2.0f64.powi(-(m as i32 - 4));
+    for _ in 0..2000 {
+        let av = lcg(&mut seed) * 20.0;
+        let mut bv = lcg(&mut seed) * 20.0;
+        // Stay in the declared non-zero divisor range; exact zeros are the
+        // separate zero-divisor contract test.
+        if bv.abs() < 1e-3 {
+            bv = if bv < 0.0 { -1e-3 } else { 1e-3 };
+        }
+        let a = t2::encode(av, m);
+        let b = t2::encode(bv, m);
+        let da = t2::decode(a, m);
+        let db = t2::decode(b, m);
+        let r = t2::div(a, b, &tabs, m);
+        let got = t2::decode(r, m);
+        let want = da / db;
+        let rel_err = (got - want).abs() / want.abs().max(1e-30);
+        assert!(rel_err < bound, "div {av} / {bv}: got {got}, want {want}");
+    }
+}
+
+#[test]
+fn div_by_zero_is_the_declared_zero() {
+    let m = 24;
+    let tabs = Tables::new(24);
+    let a = t2::encode(3.0, m);
+    let zero = T2::zero();
+    assert!(t2::div(a, zero, &tabs, m).is_zero());
+    assert!(t2::div(zero, a, &tabs, m).is_zero());
+}
+
+#[test]
 fn fixed_roundtrip_is_canonical() {
     let m = 24;
     let tabs = Tables::new(24);

@@ -65,6 +65,7 @@ const INTEGER_MN: &[&str] = &[
     "ADD",
     "SUB",
     "SQUARE",
+    "DIV",
     "MATMUL",
     "BATCH_MATMUL",
     "CONV2D",
@@ -88,6 +89,7 @@ const FX_MN: &[&str] = &[
     "ADD",
     "SUB",
     "SQUARE",
+    "DIV",
     "MATMUL",
     "BATCH_MATMUL",
     "CONV2D",
@@ -496,6 +498,25 @@ static void nf_t2_add(int8_t sa, int32_t ea, int32_t ma, uint8_t za,
   int64_t qb = nf_t2_to_fixed(sb, eb, mb, zb, m0);
   int64_t acc = sub ? (qa - qb) : (qa + qb);
   nf_t2_from_fixed(acc, m0, os, oe, om, oz);
+}
+static void nf_t2_div(int8_t sa, int32_t ea, int32_t ma, uint8_t za,
+                      int8_t sb, int32_t eb, int32_t mb, uint8_t zb,
+                      int8_t *os, int32_t *oe, int32_t *om, uint8_t *oz) {
+  /* Declared contract: a zero numerator or divisor is T2 zero. */
+  if (za || zb) { *os = 1; *oe = 32768; *om = 0; *oz = 1; return; }
+  int m0 = (int)ea - (int)eb + 32768;
+  if (m0 < 0) m0 = 0;
+  if (m0 > 65535) m0 = 65535;
+  int64_t aa = NF_T2_SCALE + (int64_t)ma;
+  int64_t bb = NF_T2_SCALE + (int64_t)mb;
+  if (bb == 0) { *os = 1; *oe = 32768; *om = 0; *oz = 1; return; }
+  __int128 num = ((__int128)aa) << NF_FIXED_F;
+  __int128 bd = (bb < 0) ? -(__int128)bb : (__int128)bb;
+  __int128 q = (num + bd / 2) / bd;
+  if (((int)sa * (int)sb) < 0) q = -q;
+  if (q > (__int128)9223372036854775807LL) q = (__int128)9223372036854775807LL;
+  if (q < -((__int128)9223372036854775807LL) - 1) q = -((__int128)9223372036854775807LL) - 1;
+  nf_t2_from_fixed((int64_t)q, m0, os, oe, om, oz);
 }
 static void nf_t2_layernorm_row(const int8_t *xs, const int32_t *xe, const int32_t *xm, const uint8_t *xz,
                                 const int8_t *ws, const int32_t *we, const int32_t *wm, const uint8_t *wz,
@@ -1075,6 +1096,32 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i)
                 None,
             ))
         }
+        "DIV" => {
+            let (a, b) = (args[0].as_str(), args[1].as_str());
+            Ok((
+                fill(
+                    r#"/* {o} = DIV({a},{b}) T2 reciprocal, zero divisor -> zero */
+for (int64_t f_i = 0; f_i < {co}; ++f_i)
+  nf_t2_div({as}, {ae}, {am}, {az}, {bs}, {be}, {bm}, {bz},
+            &{o}_s[f_i], &{o}_e[f_i], &{o}_m[f_i], &{o}_z[f_i]);"#,
+                    &[
+                        ("o", o.into()),
+                        ("a", a.into()),
+                        ("b", b.into()),
+                        ("as", tplane(ctx, a, "s", "f_i")),
+                        ("ae", tplane(ctx, a, "e", "f_i")),
+                        ("am", tplane(ctx, a, "m", "f_i")),
+                        ("az", tplane(ctx, a, "z", "f_i")),
+                        ("bs", tplane(ctx, b, "s", "f_i")),
+                        ("be", tplane(ctx, b, "e", "f_i")),
+                        ("bm", tplane(ctx, b, "m", "f_i")),
+                        ("bz", tplane(ctx, b, "z", "f_i")),
+                        ("co", co.to_string()),
+                    ],
+                ),
+                None,
+            ))
+        }
         "MATMUL" => {
             let (a, b) = (args[0].as_str(), args[1].as_str());
             let ash = ctx.s(a)?.shape.clone();
@@ -1377,8 +1424,8 @@ for (int64_t f_i = 0; f_i < {co}; ++f_i) {
         }
         other => Err(Error::unimplemented(format!(
             "nonfpu T2: no pattern for {other} (supported: MUL, SQUARE, ADD, SUB, \
-             MATMUL, LAYERNORM, GELU, SILU, SOFTMAX, SOFTMAX_WIDE, CONV2D, \
-             DECONV2D, RESIZE2D, RELU)"
+             DIV, MATMUL, LAYERNORM, GELU, SILU, SOFTMAX, SOFTMAX_WIDE, CONV2D, \
+             DECONV2D, RESIZE2D, RELU; structural ops use the shared C pattern)"
         ))),
     }
 }

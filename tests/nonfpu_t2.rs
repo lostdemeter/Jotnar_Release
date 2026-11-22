@@ -32,6 +32,8 @@ LN = LAYERNORM(X, W, BB)
 G = GELU(X)
 SM = SOFTMAX(X)
 MM = MATMUL(A, B2)
+DV = DIV(A, B)
+TR = TRANSPOSE(A)
 ";
 
 fn arr(shape: &[usize], v: &[f64]) -> Triple {
@@ -49,7 +51,7 @@ fn feeds() -> Feeds {
     );
     f.insert(
         "B".into(),
-        Value::Triple(arr(&[2, 3], &[-0.25, 2.5, -1.0, 4.0, 0.5, -2.0])),
+        Value::Triple(arr(&[2, 3], &[-0.25, 0.0, -1.0, 4.0, 0.5, -2.0])),
     );
     f.insert(
         "B2".into(),
@@ -120,6 +122,8 @@ fn nonfpu_t2_matches_interpreter() {
             "G".into(),
             "SM".into(),
             "MM".into(),
+            "DV".into(),
+            "TR".into(),
         ],
         asm: AsmOptions::new("."),
         use_fp16: false,
@@ -136,7 +140,7 @@ fn nonfpu_t2_matches_interpreter() {
         };
         argv.extend(write_planes(dir.path(), name, t));
     }
-    for name in ["M", "S", "D", "LN", "G", "SM", "MM"] {
+    for name in ["M", "S", "D", "LN", "G", "SM", "MM", "DV", "TR"] {
         for comp in ["s", "e", "m", "z"] {
             argv.push(
                 dir.path()
@@ -157,6 +161,8 @@ fn nonfpu_t2_matches_interpreter() {
         ("G", &[2, 3]),
         ("SM", &[2, 3]),
         ("MM", &[2, 2]),
+        ("DV", &[2, 3]),
+        ("TR", &[3, 2]),
     ];
     for (name, shape) in shapes {
         let got = read_planes(dir.path(), name, shape);

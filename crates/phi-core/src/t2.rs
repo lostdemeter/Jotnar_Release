@@ -286,6 +286,47 @@ pub fn mul(a: T2, b: T2, m_bits: i64) -> T2 {
     }
 }
 
+/// DIV: one reciprocal step on the phi-ladder exponent difference.
+///
+/// `m0 = e_a - e_b + BIAS`; the mantissas are formed as `(S + m_a)` and
+/// `(S + m_b)` with `S = 2^M`, and the quotient is
+/// `(S + m_a) * 2^F / (S + m_b)` with round-half-away-from-zero. The result
+/// is canonicalized at `m0`, so the fixed-point error is `O(2^-F)` at the
+/// fixed-point scale.
+///
+/// A zero numerator or divisor yields the T2 zero value. This matches the T
+/// path, where `tdiv_pure` carries `az | bz` as a masked zero lane; the T2
+/// algebra has no infinity. Callers must mask undefined divisions. `I DIV` is
+/// the exact, unmasked layer and errors instead.
+///
+/// This is the declared contract shared by the interpreter and the NonFpu
+/// emitter.
+pub fn div(a: T2, b: T2, tabs: &Tables, m_bits: i64) -> T2 {
+    if a.is_zero() || b.is_zero() {
+        return T2::zero();
+    }
+    // Exponents divide on the phi ladder; mantissas divide in the binary
+    // residual. Form `ratio * 2^f` first, then canonicalize it at the
+    // result's lattice reference. This keeps the full mantissa precision
+    // instead of quantizing the smaller operand at the larger exponent.
+    let m0 = (a.e as i64 - b.e as i64 + BIAS).clamp(0, 65535);
+    let scale = 1i64 << m_bits;
+    let aa = scale + a.m as i64; // [0.5, 1.5) * 2^M
+    let bb = scale + b.m as i64;
+    if bb == 0 {
+        return T2::zero();
+    }
+    let f = 1i128 << tabs.f;
+    let q = round_div_pos((aa as i128) * f, bb as i128);
+    let q = if (a.s as i32) * (b.s as i32) < 0 {
+        -q
+    } else {
+        q
+    };
+    let q = q.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    from_fixed(q, m0, tabs, m_bits)
+}
+
 /// ADD/SUB: align to the larger phi exponent, add fixed integers, canonicalize.
 pub fn add(a: T2, b: T2, sub: bool, tabs: &Tables, m_bits: i64) -> T2 {
     if a.is_zero() && b.is_zero() {
@@ -400,6 +441,46 @@ pub fn add_array(a: &Triple, b: &Triple, sub: bool, tabs: &Tables, m_bits: i64) 
                 z: bz[i],
             },
             sub,
+            tabs,
+            m_bits,
+        );
+        s.push(r.s);
+        e.push(r.e);
+        m.push(r.m);
+        z.push(r.z);
+    }
+    from_planes(&a.shape(), s, e, m, z)
+}
+
+/// Elementwise T2 division. Broadcasting is the caller's job; shapes must
+/// match exactly, like MUL.
+pub fn div_array(a: &Triple, b: &Triple, tabs: &Tables, m_bits: i64) -> Result<Triple> {
+    if a.shape() != b.shape() {
+        return Err(Error::runtime("T2 DIV shape mismatch"));
+    }
+    let (as_, ae, am, az) = planes(a)?;
+    let (bs, be, bm, bz) = planes(b)?;
+    let n = as_.len();
+    let (mut s, mut e, mut m, mut z) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    for i in 0..n {
+        let r = div(
+            T2 {
+                s: as_[i],
+                e: ae[i],
+                m: am[i],
+                z: az[i],
+            },
+            T2 {
+                s: bs[i],
+                e: be[i],
+                m: bm[i],
+                z: bz[i],
+            },
             tabs,
             m_bits,
         );
