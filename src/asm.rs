@@ -989,11 +989,19 @@ pub fn assemble(text: &str, opts: &AsmOptions) -> Result<BoundProgram> {
                     ))
                 })?;
                 if ins.args.len() != def.arity_in {
+                    let nested = ins.line.matches('(').count() > 1
+                        || ins.args.iter().any(|a| a.contains('('));
+                    let hint = if nested {
+                        " (nested calls are not supported; bind the inner result to an intermediate name)"
+                    } else {
+                        ""
+                    };
                     return Err(Error::asm(format!(
-                        "line {}: {mn} wants {} args, got {}",
+                        "line {}: {mn} wants {} args, got {}{}",
                         ins.line,
                         def.arity_in,
-                        ins.args.len()
+                        ins.args.len(),
+                        hint
                     )));
                 }
                 if ins.outs.len() != def.arity_out {
